@@ -515,6 +515,12 @@
         }
       }
     },
+    "Choose Wallpaper Engine assets directory" : {
+
+    },
+    "Clear assets directory" : {
+
+    },
     "Click a display to select it, then choose a wallpaper from the library." : {
 
     },
@@ -746,6 +752,9 @@
           }
         }
       }
+    },
+    "Enables audio-reactive wallpaper effects and the Other Application Playing Audio rule." : {
+
     },
     "English" : {
       "localizations" : {
@@ -2102,6 +2111,9 @@
         }
       }
     },
+    "System Audio Capture" : {
+
+    },
     "Tags" : {
       "localizations" : {
         "zh-Hans" : {
@@ -2357,7 +2369,7 @@
         }
       }
     },
-    "Wallpaper Engine assets directory" : {
+    "Wallpaper Engine assets" : {
 
     },
     "Wallpaper Engine for Mac" : {

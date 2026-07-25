@@ -159,6 +159,26 @@ public enum SceneAudioCaptureStatus: Equatable, Sendable {
     case unavailable(String)
 }
 
+public struct SceneAudioCapturePolicy: Equatable, Sendable {
+    public var isCaptureAllowed: Bool
+    public var isSuspended: Bool
+    public var demandCount: Int
+
+    public init(
+        isCaptureAllowed: Bool,
+        isSuspended: Bool,
+        demandCount: Int
+    ) {
+        self.isCaptureAllowed = isCaptureAllowed
+        self.isSuspended = isSuspended
+        self.demandCount = demandCount
+    }
+
+    public var shouldRun: Bool {
+        isCaptureAllowed && !isSuspended && demandCount > 0
+    }
+}
+
 /// One explicit claim on the process-wide system-audio stream. Scene rendering
 /// and playback-policy detection share the same capture, so neither consumer
 /// may stop it while the other one is still active.
@@ -203,7 +223,8 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
     private var lastSignalUptime: TimeInterval?
     private let analyzer = LinuxAudioSpectrumAnalyzer()
     @MainActor private var activeLeaseIDs: Set<UUID> = []
-    @MainActor private var unmanagedStartRequested = false
+    @MainActor private var captureAllowed = false
+    @MainActor private var captureSuspended = false
     @MainActor private var startTask: Task<Void, Error>?
     @MainActor private var startGeneration: UUID?
 
@@ -230,23 +251,60 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
         }
     }
 
+    @MainActor
+    public var capturePolicy: SceneAudioCapturePolicy {
+        SceneAudioCapturePolicy(
+            isCaptureAllowed: captureAllowed,
+            isSuspended: captureSuspended,
+            demandCount: activeLeaseIDs.count
+        )
+    }
+
+    @MainActor
+    public func setCaptureAllowed(_ allowed: Bool) {
+        guard captureAllowed != allowed else { return }
+        captureAllowed = allowed
+        reconcileCapturePolicy()
+    }
+
+    @MainActor
+    public func setCaptureSuspended(_ suspended: Bool) {
+        guard captureSuspended != suspended else { return }
+        captureSuspended = suspended
+        reconcileCapturePolicy()
+    }
+
     /// Acquires shared capture ownership. Concurrent callers await the same
     /// in-flight ScreenCaptureKit startup instead of observing `.starting` as
     /// if capture were already usable.
     @MainActor
     public func acquire() async throws -> SceneAudioCaptureLease {
-        try await ensureRunning()
+        guard captureAllowed else {
+            throw SceneAudioCaptureError.disabled
+        }
         let id = UUID()
         activeLeaseIDs.insert(id)
-        return SceneAudioCaptureLease(provider: self, id: id)
-    }
-
-    /// Legacy unmanaged startup. New host code should use `acquire()` so the
-    /// stream can be stopped once its last real consumer goes away.
-    @MainActor
-    public func startIfNeeded() async throws {
-        try await ensureRunning()
-        unmanagedStartRequested = true
+        let lease = SceneAudioCaptureLease(provider: self, id: id)
+        guard !captureSuspended else { return lease }
+        do {
+            try await ensureRunning()
+        } catch {
+            if captureAllowed,
+               captureSuspended,
+               activeLeaseIDs.contains(id) {
+                return lease
+            }
+            activeLeaseIDs.remove(id)
+            stopIfUnused()
+            if !captureAllowed {
+                throw SceneAudioCaptureError.disabled
+            }
+            throw error
+        }
+        guard captureAllowed, activeLeaseIDs.contains(id) else {
+            throw SceneAudioCaptureError.disabled
+        }
+        return lease
     }
 
     @MainActor
@@ -257,6 +315,10 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
 
     @MainActor
     private func ensureRunning() async throws {
+        guard captureAllowed else {
+            throw SceneAudioCaptureError.disabled
+        }
+        guard !captureSuspended, !activeLeaseIDs.isEmpty else { return }
         if withLock({ stream != nil && statusStorage == .running }) {
             return
         }
@@ -317,8 +379,14 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
             try nextStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: .global(qos: .userInteractive))
             try await nextStream.startCapture()
 
-            guard startGeneration == generation, !Task.isCancelled else {
-                try? await nextStream.stopCapture()
+            guard startGeneration == generation,
+                  !Task.isCancelled,
+                  capturePolicy.shouldRun else {
+                do {
+                    try await nextStream.stopCapture()
+                } catch {
+                    NSLog("[SceneAudio] Stopping cancelled capture failed: %@", error.localizedDescription)
+                }
                 throw CancellationError()
             }
 
@@ -332,25 +400,41 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
             }
             throw CancellationError()
         } catch {
+            guard startGeneration == generation, !Task.isCancelled else {
+                withLock {
+                    if stream == nil { statusStorage = .idle }
+                }
+                throw CancellationError()
+            }
             withLock { statusStorage = .unavailable(error.localizedDescription) }
             throw SceneAudioCaptureError.startFailed(error.localizedDescription)
         }
     }
 
-    /// Releases unmanaged ownership and stops capture only when no leased
-    /// consumer remains. This preserves the old API without letting one
-    /// subsystem tear down another subsystem's stream.
     @MainActor
-    public func stop() async {
-        unmanagedStartRequested = false
+    private func stopIfUnused() {
         guard activeLeaseIDs.isEmpty else { return }
         stopCapture()
     }
 
     @MainActor
-    private func stopIfUnused() {
-        guard activeLeaseIDs.isEmpty, !unmanagedStartRequested else { return }
-        stopCapture()
+    private func reconcileCapturePolicy() {
+        guard capturePolicy.shouldRun else {
+            stopCapture()
+            return
+        }
+        guard startTask == nil,
+              !withLock({ stream != nil && statusStorage == .running }) else {
+            return
+        }
+        Task { @MainActor [weak self] in
+            do {
+                try await self?.ensureRunning()
+            } catch {
+                // The provider status carries the failure. Consumers surface it
+                // without an automatic permission or startup retry loop.
+            }
+        }
     }
 
     @MainActor
@@ -363,18 +447,19 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
             stream = nil
             statusStorage = .idle
             pendingSamples.removeAll(keepingCapacity: true)
+            latestFrameStorage = .zero
+            lastSignalUptime = nil
             return currentStream
         }
         if let currentStream {
             Task {
-                try? await currentStream.stopCapture()
+                do {
+                    try await currentStream.stopCapture()
+                } catch {
+                    NSLog("[SceneAudio] Stopping system audio capture failed: %@", error.localizedDescription)
+                }
             }
         }
-    }
-
-    @MainActor
-    private var hasCaptureOwners: Bool {
-        !activeLeaseIDs.isEmpty || unmanagedStartRequested
     }
 
     private func append(samples: [Float]) {
@@ -403,11 +488,13 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
 }
 
 public enum SceneAudioCaptureError: LocalizedError, Equatable {
+    case disabled
     case noDisplay
     case startFailed(String)
 
     public var errorDescription: String? {
         switch self {
+        case .disabled: return "System audio capture is disabled in Settings"
         case .noDisplay: return "No display is available for system-audio capture"
         case .startFailed(let message): return "Starting system-audio capture failed: \(message)"
         }
@@ -433,15 +520,9 @@ extension SceneSystemAudioSpectrumProvider: SCStreamOutput, SCStreamDelegate {
             if self.stream === stream {
                 self.stream = nil
                 statusStorage = .unavailable(error.localizedDescription)
-            }
-        }
-        Task { @MainActor [weak self] in
-            guard let self, self.hasCaptureOwners else { return }
-            do {
-                try await self.ensureRunning()
-            } catch {
-                // `status` already carries the explicit failure. Consumers
-                // surface it through their normal polling/render paths.
+                pendingSamples.removeAll(keepingCapacity: true)
+                latestFrameStorage = .zero
+                lastSignalUptime = nil
             }
         }
     }

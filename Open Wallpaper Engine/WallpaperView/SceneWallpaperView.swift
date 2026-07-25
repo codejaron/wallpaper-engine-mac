@@ -291,6 +291,8 @@ struct SceneWallpaperView: View {
                 framesPerSecond: globalSettingsViewModel.settings.fps,
                 masterVolume: wallpaperViewModel.effectivePlayVolume,
                 audioOutputEnabled: globalSettingsViewModel.settings.audioOutput,
+                systemAudioCaptureEnabled:
+                    globalSettingsViewModel.settings.systemAudioCaptureEnabled,
                 isAudibleOwner: audioOwnerCoordinator.isAudible(screenId: screenId),
                 mediaSnapshot: mediaSnapshotProvider.snapshot,
                 assetsDirectory: resolvedAssetsDirectory,
@@ -333,17 +335,12 @@ struct SceneWallpaperView: View {
                     .padding(24)
             }
         }
-        .onAppear { audioOwnerCoordinator.register(screenId: screenId) }
-        .onDisappear { audioOwnerCoordinator.unregister(screenId: screenId) }
     }
 
     private var resolvedAssetsDirectory: String? {
         let configured = globalSettingsViewModel.settings.wallpaperEngineAssetsDirectory?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let configured, !configured.isEmpty { return configured }
-        let environment = ProcessInfo.processInfo.environment["WE_ASSETS_DIR"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return environment.flatMap { $0.isEmpty ? nil : $0 }
+        return configured.flatMap { $0.isEmpty ? nil : $0 }
     }
 }
 
@@ -354,6 +351,7 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
     let framesPerSecond: Double
     let masterVolume: Float
     let audioOutputEnabled: Bool
+    let systemAudioCaptureEnabled: Bool
     let isAudibleOwner: Bool
     let mediaSnapshot: SceneMediaProviderSnapshot
     let assetsDirectory: String?
@@ -371,6 +369,7 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
             }
         }
         view.onPropertiesLoaded = onPropertiesLoaded
+        view.setSystemAudioCaptureEnabled(systemAudioCaptureEnabled)
         view.configure(
             wallpaper: wallpaper,
             assetsDirectory: assetsDirectory,
@@ -396,6 +395,7 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
             }
         }
         view.onPropertiesLoaded = onPropertiesLoaded
+        view.setSystemAudioCaptureEnabled(systemAudioCaptureEnabled)
         view.configure(
             wallpaper: wallpaper,
             assetsDirectory: assetsDirectory,
@@ -487,6 +487,10 @@ private final class SceneOpenGLContainerView: NSView {
         )
     }
 
+    func setSystemAudioCaptureEnabled(_ enabled: Bool) {
+        openGLView?.setSystemAudioCaptureEnabled(enabled)
+    }
+
     func setMediaSnapshot(_ value: SceneMediaProviderSnapshot) {
         openGLView?.setMediaSnapshot(value)
     }
@@ -534,6 +538,7 @@ private final class SceneOpenGLView: NSOpenGLView {
     private var framesPerSecond = 30.0
     private var masterVolume: Float = 1
     private var audioOutputEnabled = true
+    private var systemAudioCaptureEnabled = false
     private var isAudibleOwner = false
     private var mediaSnapshot: SceneMediaProviderSnapshot =
         .unavailable(revision: 0)
@@ -645,6 +650,19 @@ private final class SceneOpenGLView: NSOpenGLView {
             isAudibleOwner: isAudibleOwner
         )
         reportAudioIssue()
+    }
+
+    func setSystemAudioCaptureEnabled(_ enabled: Bool) {
+        guard systemAudioCaptureEnabled != enabled else { return }
+        systemAudioCaptureEnabled = enabled
+        audioCaptureIssue = nil
+        if !enabled {
+            cancelAudioCapture()
+        } else if let session, session.requiresAudioSpectrum {
+            beginAudioCapture(for: session)
+        }
+        reportAudioIssue()
+        needsDisplay = true
     }
 
     func setMediaSnapshot(_ value: SceneMediaProviderSnapshot) {
@@ -766,6 +784,7 @@ private final class SceneOpenGLView: NSOpenGLView {
                     presentation: presentation,
                     masterVolume: masterVolume,
                     audioOutputEnabled: audioOutputEnabled,
+                    systemAudioCaptureEnabled: systemAudioCaptureEnabled,
                     isAudibleOwner: isAudibleOwner
                 )
                 hasRenderedFrame = true
@@ -902,7 +921,7 @@ private final class SceneOpenGLView: NSOpenGLView {
         propertyConfigurationValid = false
         audioCaptureIssue = nil
         onPropertiesLoaded?(newSession.properties)
-        if newSession.requiresAudioSpectrum {
+        if systemAudioCaptureEnabled && newSession.requiresAudioSpectrum {
             beginAudioCapture(for: newSession)
         }
         do {
@@ -960,45 +979,36 @@ private final class SceneOpenGLView: NSOpenGLView {
         audioCaptureGeneration &+= 1
         let generation = audioCaptureGeneration
         audioCaptureTask = Task { @MainActor [weak self, targetSession] in
-            var retryDelayNanoseconds: UInt64 = 250_000_000
-            while !Task.isCancelled {
-                guard let self,
-                      self.session === targetSession,
-                      self.audioCaptureGeneration == generation else { return }
-                do {
-                    let lease = try await SceneSystemAudioSpectrumProvider.shared.acquire()
-                    guard self.session === targetSession,
-                          self.audioCaptureGeneration == generation,
-                          !Task.isCancelled else {
-                        lease.cancel()
-                        return
-                    }
-                    self.audioCaptureLease?.cancel()
-                    self.audioCaptureLease = lease
-                    self.audioCaptureTask = nil
-                    self.audioCaptureIssue = nil
-                    self.reportAudioIssue()
-                    self.needsDisplay = true
+            guard let self,
+                  self.session === targetSession,
+                  self.audioCaptureGeneration == generation,
+                  self.systemAudioCaptureEnabled else { return }
+            do {
+                let lease = try await SceneSystemAudioSpectrumProvider.shared.acquire()
+                guard self.session === targetSession,
+                      self.audioCaptureGeneration == generation,
+                      self.systemAudioCaptureEnabled,
+                      !Task.isCancelled else {
+                    lease.cancel()
                     return
-                } catch is CancellationError {
-                    return
-                } catch {
-                    guard self.session === targetSession,
-                          self.audioCaptureGeneration == generation else { return }
-                    self.audioCaptureIssue =
-                        "System audio capture unavailable: \(error.localizedDescription)"
-                    self.reportAudioIssue()
-                    self.needsDisplay = true
-                    do {
-                        try await Task.sleep(nanoseconds: retryDelayNanoseconds)
-                    } catch {
-                        return
-                    }
-                    retryDelayNanoseconds = min(
-                        retryDelayNanoseconds * 2,
-                        8_000_000_000
-                    )
                 }
+                self.audioCaptureLease?.cancel()
+                self.audioCaptureLease = lease
+                self.audioCaptureTask = nil
+                self.audioCaptureIssue = nil
+                self.reportAudioIssue()
+                self.needsDisplay = true
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.session === targetSession,
+                      self.audioCaptureGeneration == generation,
+                      self.systemAudioCaptureEnabled else { return }
+                self.audioCaptureTask = nil
+                self.audioCaptureIssue =
+                    "System audio capture unavailable: \(error.localizedDescription)"
+                self.reportAudioIssue()
+                self.needsDisplay = true
             }
         }
     }
@@ -1044,7 +1054,19 @@ private final class SceneOpenGLView: NSOpenGLView {
     }
 
     private func reportAudioIssue() {
-        let message = [session?.audioPlaybackIssue, audioCaptureIssue]
+        let providerIssue: String?
+        if systemAudioCaptureEnabled,
+           session?.requiresAudioSpectrum == true,
+           case .unavailable(let detail) =
+               SceneSystemAudioSpectrumProvider.shared.status {
+            providerIssue = "System audio capture unavailable: \(detail)"
+        } else {
+            providerIssue = nil
+        }
+        let message = [
+            session?.audioPlaybackIssue,
+            audioCaptureIssue ?? providerIssue,
+        ]
             .compactMap { $0 }
             .joined(separator: "\n")
         let effectiveMessage = message.isEmpty ? nil : message

@@ -65,6 +65,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var wallpaperViewModel = WallpaperViewModel()
     var globalSettingsViewModel = GlobalSettingsViewModel()
     let sceneMediaSnapshotProvider = SceneMediaSnapshotProvider()
+    let sceneAudioCaptureLifecycleMonitor = SceneAudioCaptureLifecycleMonitor()
     lazy var sceneAudioOwnerCoordinator = MainActor.assumeIsolated {
         SceneAudioOwnerCoordinator(mainScreenId: WallpaperViewModel.mainScreenId())
     }
@@ -77,6 +78,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared = AppDelegate()
     
     func applicationWillFinishLaunching(_ notification: Notification) {
+        sceneAudioCaptureLifecycleMonitor.start()
+
         // 创建设置视窗
         setSettingsWindow()
         
@@ -142,6 +145,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        sceneAudioCaptureLifecycleMonitor.stop()
         globalSettingsViewModel.stopPlaybackPolicyMonitoring(restorePlayback: false)
         if let eventHandler { NSEvent.removeMonitor(eventHandler) }
         if let localEventHandler { NSEvent.removeMonitor(localEventHandler) }

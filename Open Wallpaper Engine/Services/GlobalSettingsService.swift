@@ -7,6 +7,7 @@
 
 import Cocoa
 import Combine
+import SceneAudio
 import SwiftUI
 import ServiceManagement
 
@@ -98,6 +99,7 @@ struct GlobalSettings: Codable, Equatable {
     
     // MARK: Audio
     var audioOutput = true
+    var systemAudioCaptureEnabled = false
     var reloadWhenChangingOutputDevice = true // Not putting in use
     
     // MARK: Video
@@ -122,7 +124,8 @@ struct GlobalSettings: Codable, Equatable {
         case scenePresentationScaling, sceneSpanAcrossScreens
         case autoStart, safeMode, language
         case adjustMenuBarTint, appearance
-        case audioOutput, reloadWhenChangingOutputDevice
+        case audioOutput, systemAudioCaptureEnabled,
+             reloadWhenChangingOutputDevice
         case videoFramework
         case wallpaperEngineAssetsDirectory, processPiority,
              pauseOnVRAMExhausted, restartAfterCrashing
@@ -148,6 +151,7 @@ struct GlobalSettings: Codable, Equatable {
         adjustMenuBarTint = true
         appearance = .followSystem
         audioOutput = true
+        systemAudioCaptureEnabled = false
         reloadWhenChangingOutputDevice = true
         videoFramework = .avkit
         wallpaperEngineAssetsDirectory = nil
@@ -209,6 +213,9 @@ struct GlobalSettings: Codable, Equatable {
             GSAppearance.self, forKey: .appearance
         ) ?? .followSystem
         audioOutput = try container.decodeIfPresent(Bool.self, forKey: .audioOutput) ?? true
+        systemAudioCaptureEnabled = try container.decodeIfPresent(
+            Bool.self, forKey: .systemAudioCaptureEnabled
+        ) ?? false
         reloadWhenChangingOutputDevice = try container.decodeIfPresent(
             Bool.self, forKey: .reloadWhenChangingOutputDevice
         ) ?? true
@@ -248,7 +255,13 @@ struct GlobalSettings: Codable, Equatable {
 class GlobalSettingsViewModel: ObservableObject {
     @Published var settings: GlobalSettings
     {
-        didSet { save(); validate() }
+        didSet {
+            save()
+            validate()
+            SceneSystemAudioSpectrumProvider.shared.setCaptureAllowed(
+                settings.systemAudioCaptureEnabled
+            )
+        }
     }
     
     @Published var selection = 0
@@ -282,6 +295,9 @@ class GlobalSettingsViewModel: ObservableObject {
         }
         self.playbackPolicyState = PlaybackPolicyState(
             configuration: self.settings.playbackPolicyConfiguration
+        )
+        SceneSystemAudioSpectrumProvider.shared.setCaptureAllowed(
+            self.settings.systemAudioCaptureEnabled
         )
         
         // Add observers
@@ -349,13 +365,17 @@ class GlobalSettingsViewModel: ObservableObject {
 
         self.didChangePlaybackPolicyConfigurationCancellable =
         self.$settings
-            .map(\.playbackPolicyConfiguration)
-            .removeDuplicates()
+            .removeDuplicates { previous, current in
+                previous.playbackPolicyConfiguration == current.playbackPolicyConfiguration &&
+                    previous.systemAudioCaptureEnabled == current.systemAudioCaptureEnabled
+            }
             .receive(on: RunLoop.main)
-            .sink { [weak self] configuration in
+            .sink { [weak self] settings in
                 guard let self else { return }
+                let configuration = settings.playbackPolicyConfiguration
                 self.playbackConditionMonitor?.setAudioDetectionEnabled(
-                    configuration.otherApplicationPlayingAudio != .keepRunning
+                    settings.systemAudioCaptureEnabled &&
+                        configuration.otherApplicationPlayingAudio != .keepRunning
                 )
                 self.updatePlaybackPolicy(.configurationChanged(configuration))
             }
@@ -425,7 +445,6 @@ class GlobalSettingsViewModel: ObservableObject {
     
     func save() {
         let data = try! JSONEncoder().encode(settings)
-        print(String(describing: String(data: data, encoding: .utf8)))
         UserDefaults.standard.set(data, forKey: "GlobalSettings")
     }
     

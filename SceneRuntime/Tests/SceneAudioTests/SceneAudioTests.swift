@@ -89,6 +89,22 @@ final class SceneAudioTests: XCTestCase {
         XCTAssertEqual(changes[2].1, "screen-a")
     }
 
+    func testOwnerCoordinatorKeepsScreenActiveUntilEveryRegistrationIsReleased() {
+        let coordinator = SceneAudioOwnerCoordinator(mainScreenId: "screen-a")
+
+        coordinator.register(screenId: "screen-a")
+        coordinator.register(screenId: "screen-a")
+        coordinator.unregister(screenId: "screen-a")
+
+        XCTAssertEqual(coordinator.activeScreenIds, ["screen-a"])
+        XCTAssertTrue(coordinator.isAudible(screenId: "screen-a"))
+
+        coordinator.unregister(screenId: "screen-a")
+
+        XCTAssertTrue(coordinator.activeScreenIds.isEmpty)
+        XCTAssertNil(coordinator.ownerScreenId)
+    }
+
     func testLinuxSpectrumUsesLatestWindowAndKeepsStereoArraysBound() {
         let analyzer = LinuxAudioSpectrumAnalyzer()
         let dc = [Float](repeating: 1, count: LinuxAudioSpectrumAnalyzer.sampleCount)
@@ -102,6 +118,31 @@ final class SceneAudioTests: XCTestCase {
         XCTAssertEqual(second.spectrum16Left, second.spectrum16Right)
         XCTAssertEqual(second.spectrum64Left[0], 0.3, accuracy: 0.0001)
         XCTAssertTrue(second.spectrum64Left.allSatisfy(\.isFinite))
+    }
+
+    func testCapturePolicyRequiresPermissionActiveSessionAndDemand() {
+        var policy = SceneAudioCapturePolicy(
+            isCaptureAllowed: false,
+            isSuspended: false,
+            demandCount: 1
+        )
+        XCTAssertFalse(policy.shouldRun)
+
+        policy.isCaptureAllowed = true
+        policy.demandCount = 0
+        XCTAssertFalse(policy.shouldRun)
+
+        policy.demandCount = 1
+        XCTAssertTrue(policy.shouldRun)
+
+        policy.isSuspended = true
+        XCTAssertFalse(policy.shouldRun)
+
+        policy.isSuspended = false
+        XCTAssertTrue(policy.shouldRun)
+
+        policy.demandCount = 0
+        XCTAssertFalse(policy.shouldRun)
     }
 
     func testPlanarFloatCaptureDownmixesEveryBuffer() throws {
@@ -771,9 +812,56 @@ final class SceneAudioTests: XCTestCase {
         }
     }
 
-    func testSynchronizationFailureIsExplicitAndClearsAudioState() throws {
+    func testSynchronizationFailureIsIsolatedToItsSoundObject() throws {
         let (controller, created) = controlledController()
-        let original = sound(objectId: 31, visible: true, sources: [
+        let working = sound(objectId: 31, visible: true, sources: [
+            source(
+                index: 0,
+                resource: "working.wav",
+                loop: true,
+                volume: 1,
+                startSilent: false
+            ),
+        ])
+        let broken = sound(objectId: 32, visible: true, sources: [
+            source(
+                index: 0,
+                resource: "broken.wav",
+                loop: true,
+                volume: 1,
+                startSilent: false
+            ),
+        ])
+        let issues = controller.synchronize(
+            [working, broken],
+            masterVolume: 1,
+            audioOutput: 1
+        ) { resource in
+            if resource == "broken.wav" {
+                throw SyntheticAudioLoadFailure()
+            }
+            return self.waveData()
+        }
+
+        XCTAssertEqual(issues, [SceneAudioSynchronizationIssue(
+            objectId: 32,
+            message: "synthetic audio asset failure"
+        )])
+        XCTAssertEqual(controller.playerCount, 1)
+        XCTAssertEqual(created().count, 1)
+        XCTAssertEqual(created().first?.playbackState, .playing)
+        XCTAssertEqual(
+            try controller.playerState(identifier: "sound:31:0").state,
+            .playing
+        )
+        XCTAssertThrowsError(try controller.playerState(identifier: "sound:32:0")) {
+            XCTAssertEqual($0 as? SceneAudioError, .unknownPlayer("sound:32:0"))
+        }
+    }
+
+    func testSynchronizationGlobalFailureIsExplicitAndClearsAudioState() throws {
+        let (controller, created) = controlledController()
+        let working = sound(objectId: 33, visible: true, sources: [
             source(
                 index: 0,
                 resource: "working.wav",
@@ -783,31 +871,23 @@ final class SceneAudioTests: XCTestCase {
             ),
         ])
         try controller.reconcile(
-            [original],
+            [working],
             masterVolume: 1,
             audioOutput: 1
         ) { _ in self.waveData() }
-        XCTAssertEqual(controller.playerCount, 1)
-        XCTAssertEqual(created().first?.playbackState, .playing)
 
-        let replacement = sound(objectId: 31, visible: true, sources: [
-            source(
-                index: 0,
-                resource: "broken.wav",
-                loop: true,
-                volume: 1,
-                startSilent: false
-            ),
-        ])
-        let issue = controller.synchronize(
-            [replacement],
-            masterVolume: 1,
+        let issues = controller.synchronize(
+            [working],
+            masterVolume: 2,
             audioOutput: 1
         ) { _ in
-            throw SyntheticAudioLoadFailure()
+            XCTFail("Global validation must happen before loading assets")
+            return self.waveData()
         }
 
-        XCTAssertEqual(issue?.message, "synthetic audio asset failure")
+        XCTAssertEqual(issues, [SceneAudioSynchronizationIssue(
+            message: SceneAudioError.invalidVolume(2).localizedDescription
+        )])
         XCTAssertEqual(controller.playerCount, 0)
         XCTAssertEqual(created().first?.playbackState, .stopped)
     }

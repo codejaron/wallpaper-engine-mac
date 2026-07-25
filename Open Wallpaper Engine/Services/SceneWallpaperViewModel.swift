@@ -133,6 +133,7 @@ final class SceneRuntimeSession {
         presentation: ScenePresentationLayout,
         masterVolume: Float,
         audioOutputEnabled: Bool,
+        systemAudioCaptureEnabled: Bool,
         isAudibleOwner: Bool
     ) throws {
         guard let executor else {
@@ -153,7 +154,7 @@ final class SceneRuntimeSession {
         ) == 1 else {
             throw bridgeError("Updating Scene pointer state", error)
         }
-        var soundRuntimeStates = audioController.soundRuntimeSnapshots().map {
+        let soundRuntimeStates = audioController.soundRuntimeSnapshots().map {
             snapshot -> WESceneSoundRuntimeStateInput in
             let state: WESceneSoundRuntimeState
             switch snapshot.state {
@@ -180,40 +181,33 @@ final class SceneRuntimeSession {
             try applyMediaSnapshot(mediaSnapshot, to: executor)
             lastMediaSnapshot = mediaSnapshot
         }
-        // A zero-filled spectrum is not equivalent to an unavailable capture:
-        // scripts use registerAudioBuffers() during module evaluation and the
-        // Linux contract reports an explicit unavailable error until a real
-        // recorder frame exists. Only pass the audio ABI when ScreenCaptureKit
-        // has actually reached the running state.
+        let audioSpectrum: SceneAudioSpectrumFrame
+        if systemAudioCaptureEnabled,
+           case .running = SceneSystemAudioSpectrumProvider.shared.status {
+            audioSpectrum = SceneSystemAudioSpectrumProvider.shared.latestFrame
+        } else {
+            // Capture disabled, suspended, starting, or unavailable has one
+            // defined host input: silence. This keeps visual script execution
+            // independent from the privacy-sensitive capture subsystem.
+            audioSpectrum = .zero
+        }
         let renderResult: Int32
         if var viewport = try presentation.viewport(
             drawableWidth: drawableWidth,
             drawableHeight: drawableHeight
         ) {
-            if case .running = SceneSystemAudioSpectrumProvider.shared.status {
-                let spectrum = SceneSystemAudioSpectrumProvider.shared.latestFrame
-                renderResult = withAudioSpectrumInputs(spectrum) { audioInputs in
-                    we_scene_frame_executor_render_for_viewport_with_audio_spectrum(
-                        executor,
-                        &inputs,
-                        &audioInputs,
-                        &viewport,
-                        presentation.bridgeScaling,
-                        &error
-                    )
-                }
-            } else {
-                renderResult = we_scene_frame_executor_render_for_viewport(
+            renderResult = withAudioSpectrumInputs(audioSpectrum) { audioInputs in
+                we_scene_frame_executor_render_for_viewport_with_audio_spectrum(
                     executor,
                     &inputs,
+                    &audioInputs,
                     &viewport,
                     presentation.bridgeScaling,
                     &error
                 )
             }
-        } else if case .running = SceneSystemAudioSpectrumProvider.shared.status {
-            let spectrum = SceneSystemAudioSpectrumProvider.shared.latestFrame
-            renderResult = withAudioSpectrumInputs(spectrum) { audioInputs in
+        } else {
+            renderResult = withAudioSpectrumInputs(audioSpectrum) { audioInputs in
                 we_scene_frame_executor_render_for_drawable_with_audio_spectrum(
                     executor,
                     &inputs,
@@ -224,15 +218,6 @@ final class SceneRuntimeSession {
                     &error
                 )
             }
-        } else {
-            renderResult = we_scene_frame_executor_render_for_drawable(
-                executor,
-                &inputs,
-                drawableWidth,
-                drawableHeight,
-                presentation.bridgeScaling,
-                &error
-            )
         }
         guard renderResult == 1 else {
             invalidateExecutorIssueSnapshot()
@@ -795,16 +780,20 @@ final class SceneRuntimeSession {
             )
             return
         }
-        let issue = audioController.synchronize(
+        let issues = audioController.synchronize(
             sounds,
             masterVolume: masterVolume,
             audioOutput: audioOutputEnabled && isAudibleOwner ? 1 : 0
         ) { path in
             try SceneAssetDataLoader.load(runtime: runtime, path: path)
         }
-        audioPlaybackIssue = issue.map {
-            "Scene audio unavailable: \($0.message)"
+        let messages = issues.map { issue in
+            if let objectId = issue.objectId {
+                return "Scene audio object \(objectId) unavailable: \(issue.message)"
+            }
+            return "Scene audio unavailable: \(issue.message)"
         }
+        audioPlaybackIssue = messages.isEmpty ? nil : messages.joined(separator: "\n")
     }
 
     private func recordAudioFailure(_ error: Error) {

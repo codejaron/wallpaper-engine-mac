@@ -98,9 +98,11 @@ public struct SceneSoundSnapshot: Equatable, Sendable {
 }
 
 public struct SceneAudioSynchronizationIssue: Equatable, Sendable {
+    public let objectId: Int?
     public let message: String
 
-    public init(message: String) {
+    public init(objectId: Int? = nil, message: String) {
+        self.objectId = objectId
         self.message = message
     }
 }
@@ -154,7 +156,7 @@ public final class SceneAudioOwnerCoordinator: ObservableObject {
         _ ownerScreenId: String?
     ) -> Void
 
-    private var activeScreenIdSet: Set<String> = []
+    private var activeScreenRegistrationCounts: [String: Int] = [:]
     private let ownerDidChange: OwnerDidChange?
 
     public private(set) var mainScreenId: String?
@@ -168,15 +170,26 @@ public final class SceneAudioOwnerCoordinator: ObservableObject {
         self.ownerDidChange = ownerDidChange
     }
 
-    public var activeScreenIds: [String] { activeScreenIdSet.sorted() }
+    public var activeScreenIds: [String] {
+        activeScreenRegistrationCounts.keys.sorted()
+    }
 
     public func register(screenId: String) {
-        guard activeScreenIdSet.insert(screenId).inserted else { return }
+        let previousCount = activeScreenRegistrationCounts[screenId, default: 0]
+        activeScreenRegistrationCounts[screenId] = previousCount + 1
+        guard previousCount == 0 else { return }
         reconcileOwner()
     }
 
     public func unregister(screenId: String) {
-        guard activeScreenIdSet.remove(screenId) != nil else { return }
+        guard let previousCount = activeScreenRegistrationCounts[screenId] else {
+            return
+        }
+        if previousCount > 1 {
+            activeScreenRegistrationCounts[screenId] = previousCount - 1
+            return
+        }
+        activeScreenRegistrationCounts.removeValue(forKey: screenId)
         reconcileOwner()
     }
 
@@ -192,10 +205,11 @@ public final class SceneAudioOwnerCoordinator: ObservableObject {
 
     private func reconcileOwner() {
         let nextOwner: String?
-        if let mainScreenId, activeScreenIdSet.contains(mainScreenId) {
+        if let mainScreenId,
+           activeScreenRegistrationCounts[mainScreenId] != nil {
             nextOwner = mainScreenId
         } else {
-            nextOwner = activeScreenIdSet.min()
+            nextOwner = activeScreenRegistrationCounts.keys.min()
         }
         guard nextOwner != ownerScreenId else { return }
         let previousOwner = ownerScreenId
@@ -392,6 +406,22 @@ public final class SceneAudioController {
         audioOutput: Float,
         loadAsset: (String) throws -> Data
     ) throws {
+        try reconcile(
+            sounds,
+            masterVolume: masterVolume,
+            audioOutput: audioOutput,
+            loadAsset: loadAsset,
+            shouldRemoveMissing: { _ in true }
+        )
+    }
+
+    private func reconcile(
+        _ sounds: [SceneSoundSnapshot],
+        masterVolume: Float,
+        audioOutput: Float,
+        loadAsset: (String) throws -> Data,
+        shouldRemoveMissing: (Entry) -> Bool
+    ) throws {
         try validateVolume(masterVolume)
         try validateVolume(audioOutput)
 
@@ -517,7 +547,8 @@ public final class SceneAudioController {
         for (identifier, entry) in players where next[identifier]?.player !== entry.player {
             entry.player.stop()
         }
-        for (identifier, entry) in players where desired[identifier] == nil {
+        for (identifier, entry) in players
+        where desired[identifier] == nil && shouldRemoveMissing(entry) {
             entry.player.stop()
             next.removeValue(forKey: identifier)
         }
@@ -526,29 +557,74 @@ public final class SceneAudioController {
 
     /// Synchronizes the audio sidecar without allowing an audio failure to
     /// invalidate its owning visual Scene session. The strict `reconcile`
-    /// path remains available to callers that need transactional errors.
-    /// This boundary reports the failure explicitly and clears all players so
-    /// stale audio cannot survive a failed snapshot.
+    /// path remains available to callers that need one transaction for the
+    /// complete snapshot. This boundary isolates each authored sound object so
+    /// one invalid asset cannot stop unrelated, valid playback.
     @discardableResult
     public func synchronize(
         _ sounds: [SceneSoundSnapshot],
         masterVolume: Float,
         audioOutput: Float,
         loadAsset: (String) throws -> Data
-    ) -> SceneAudioSynchronizationIssue? {
+    ) -> [SceneAudioSynchronizationIssue] {
         do {
-            try reconcile(
-                sounds,
-                masterVolume: masterVolume,
-                audioOutput: audioOutput,
-                loadAsset: loadAsset
-            )
-            return nil
+            try validateVolume(masterVolume)
+            try validateVolume(audioOutput)
         } catch {
             stopAll()
-            return SceneAudioSynchronizationIssue(
-                message: error.localizedDescription
-            )
+            return [SceneAudioSynchronizationIssue(message: error.localizedDescription)]
+        }
+
+        var objectOrder: [Int] = []
+        var soundsByObjectId: [Int: [SceneSoundSnapshot]] = [:]
+        for sound in sounds {
+            if soundsByObjectId[sound.objectId] == nil {
+                objectOrder.append(sound.objectId)
+            }
+            soundsByObjectId[sound.objectId, default: []].append(sound)
+        }
+
+        var issues: [SceneAudioSynchronizationIssue] = []
+        for objectId in objectOrder {
+            guard let objectSounds = soundsByObjectId[objectId] else { continue }
+            do {
+                try reconcile(
+                    objectSounds,
+                    masterVolume: masterVolume,
+                    audioOutput: audioOutput,
+                    loadAsset: loadAsset,
+                    shouldRemoveMissing: { $0.authoring.objectId == objectId }
+                )
+            } catch {
+                stopPlayers(forObjectId: objectId)
+                issues.append(SceneAudioSynchronizationIssue(
+                    objectId: objectId,
+                    message: error.localizedDescription
+                ))
+            }
+        }
+
+        removePlayersForMissingObjects(Set(soundsByObjectId.keys))
+        return issues
+    }
+
+    private func stopPlayers(forObjectId objectId: Int) {
+        let identifiers: [String] = players.compactMap { identifier, entry in
+            entry.authoring.objectId == objectId ? identifier : nil
+        }
+        for identifier in identifiers {
+            players.removeValue(forKey: identifier)?.player.stop()
+        }
+    }
+
+    private func removePlayersForMissingObjects(_ objectIds: Set<Int>) {
+        let identifiers: [String] = players.compactMap { identifier, entry in
+            guard let objectId = entry.authoring.objectId,
+                  !objectIds.contains(objectId) else { return nil }
+            return identifier
+        }
+        for identifier in identifiers {
+            players.removeValue(forKey: identifier)?.player.stop()
         }
     }
 

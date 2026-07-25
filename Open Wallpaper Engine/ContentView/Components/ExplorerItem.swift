@@ -15,7 +15,6 @@ struct ExplorerItem: SubviewOfContentView {
     @AppStorage("TestAnimates") var animates = false
     
     var wallpaper: WEWallpaper
-    var index: Int
     
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -27,7 +26,6 @@ struct ExplorerItem: SubviewOfContentView {
                 return Bundle.main.url(forResource: "WallpaperNotFound", withExtension: "mp4")!
             }(wallpaper.wallpaperDirectory), animates: animates)
             .resizable()
-            .scaleEffect(viewModel.imageScaleIndex == index ? 1.2 : 1.0)
             .aspectRatio(1.0, contentMode: .fit)
             .clipped()
             
@@ -35,19 +33,10 @@ struct ExplorerItem: SubviewOfContentView {
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, minHeight: 30)
                 .padding(4)
-                .background(Color(white: 0, opacity: viewModel.imageScaleIndex == index ? 0.4 : 0.2))
+                .background(Color(white: 0, opacity: 0.2))
                 .font(.footnote)
                 .multilineTextAlignment(.center)
-                .foregroundStyle(Color(white: viewModel.imageScaleIndex == index ? 0.9 : 0.7))
-            
-//            Spacer()
-//                .onHover { onHover in
-//                    if onHover {
-//                        viewModel.imageScaleIndex = index
-//                    } else {
-//                        viewModel.imageScaleIndex = -1
-//                    }
-//                }
+                .foregroundStyle(Color(white: 0.7))
         }
         .selected(wallpaper.wallpaperDirectory == wallpaperViewModel.currentWallpaper.wallpaperDirectory)
         .overlay(
@@ -61,7 +50,6 @@ struct ExplorerItem: SubviewOfContentView {
                     .padding(4)
             }
         }
-        .border(Color.accentColor, width: viewModel.imageScaleIndex == index ? 1.0 : 0)
         .onTapGesture {
             if NSEvent.modifierFlags.contains(.command) {
                 viewModel.toggleSelection(for: wallpaper)

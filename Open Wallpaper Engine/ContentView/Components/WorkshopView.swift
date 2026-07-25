@@ -210,6 +210,7 @@ private struct WorkshopBrowserView: View {
 
                 WorkshopResults(viewModel: viewModel)
                     .padding(.leading, viewModel.isFilterReveal ? 10 : 0)
+                    .layoutPriority(1)
             }
             .animation(.default, value: viewModel.isFilterReveal)
         }
@@ -257,42 +258,44 @@ private struct WorkshopFilterResults: View {
     @ObservedObject var viewModel: WorkshopViewModel
 
     var body: some View {
-        VStack {
-            ScrollView {
-                VStack(spacing: 30) {
-                    Button {
-                        viewModel.resetFilters()
-                        Task { await viewModel.search() }
-                    } label: {
-                        Label("Reset Filters", systemImage: "arrow.triangle.2.circlepath")
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 5)
-                    }
-                    .buttonStyle(.borderedProminent)
+        HStack(spacing: 0) {
+            VStack {
+                ScrollView {
+                    VStack(spacing: 30) {
+                        Button {
+                            viewModel.resetFilters()
+                            Task { await viewModel.search() }
+                        } label: {
+                            Label("Reset Filters", systemImage: "arrow.triangle.2.circlepath")
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 5)
+                        }
+                        .buttonStyle(.borderedProminent)
 
-                    VStack(spacing: 15) {
-                        filterSection(
-                            "Age Rating",
-                            group: .contentRating,
-                            tags: WorkshopViewModel.contentRatingTags
-                        )
-                        filterSection(
-                            "Type",
-                            group: .type,
-                            tags: WorkshopViewModel.typeTags
-                        )
-                        filterSection(
-                            "Tags",
-                            group: .genre,
-                            tags: WorkshopViewModel.genreTags
-                        )
+                        VStack(spacing: 15) {
+                            filterSection(
+                                "Age Rating",
+                                group: .contentRating,
+                                tags: WorkshopViewModel.contentRatingTags
+                            )
+                            filterSection(
+                                "Type",
+                                group: .type,
+                                tags: WorkshopViewModel.typeTags
+                            )
+                            filterSection(
+                                "Tags",
+                                group: .genre,
+                                tags: WorkshopViewModel.genreTags
+                            )
+                        }
                     }
+                    .padding(.trailing)
                 }
-                .padding(.trailing)
+                .lineLimit(1)
             }
-            .lineLimit(1)
+            Divider()
         }
-        Divider()
     }
 
     private func filterSection(
@@ -403,6 +406,197 @@ private struct WorkshopResults: View {
 
 // MARK: - Workshop Item Card
 
+protocol WorkshopPreviewDataLoading {
+    func data(from url: URL) async throws -> Data
+}
+
+struct URLSessionWorkshopPreviewDataLoader: WorkshopPreviewDataLoading {
+    func data(from url: URL) async throws -> Data {
+        let (data, response) = try await URLSession.shared.data(from: url)
+
+        guard let response = response as? HTTPURLResponse else {
+            throw WorkshopPreviewLoadingError.invalidResponse
+        }
+        guard (200..<300).contains(response.statusCode) else {
+            throw WorkshopPreviewLoadingError.httpStatus(response.statusCode)
+        }
+        guard !data.isEmpty else {
+            throw WorkshopPreviewLoadingError.emptyData
+        }
+        return data
+    }
+}
+
+enum WorkshopPreviewLoadingError: LocalizedError {
+    case missingURL
+    case invalidResponse
+    case httpStatus(Int)
+    case emptyData
+    case invalidImageData
+
+    var errorDescription: String? {
+        switch self {
+        case .missingURL:
+            return "This item does not provide a preview URL."
+        case .invalidResponse:
+            return "The preview server returned an invalid response."
+        case .httpStatus(let statusCode):
+            return "The preview server returned HTTP \(statusCode)."
+        case .emptyData:
+            return "The preview response was empty."
+        case .invalidImageData:
+            return "The preview data is not a supported image."
+        }
+    }
+}
+
+final class WorkshopPreviewImageCache {
+    static let shared = WorkshopPreviewImageCache()
+
+    private let images = NSCache<NSURL, NSImage>()
+
+    init(countLimit: Int = 200) {
+        images.countLimit = countLimit
+    }
+
+    func image(for url: URL) -> NSImage? {
+        images.object(forKey: url as NSURL)
+    }
+
+    func insert(_ image: NSImage, for url: URL) {
+        images.setObject(image, forKey: url as NSURL)
+    }
+
+    func removeImage(for url: URL) {
+        images.removeObject(forKey: url as NSURL)
+    }
+}
+
+@MainActor
+final class WorkshopPreviewImageLoader: ObservableObject {
+    enum State {
+        case idle
+        case loading
+        case loaded(NSImage)
+        case failed(String)
+    }
+
+    @Published private(set) var state: State = .idle
+
+    private let dataLoader: WorkshopPreviewDataLoading
+    private let cache: WorkshopPreviewImageCache
+    private var currentURL: URL?
+
+    init(
+        dataLoader: WorkshopPreviewDataLoading = URLSessionWorkshopPreviewDataLoader(),
+        cache: WorkshopPreviewImageCache = .shared
+    ) {
+        self.dataLoader = dataLoader
+        self.cache = cache
+    }
+
+    var image: NSImage? {
+        guard case .loaded(let image) = state else { return nil }
+        return image
+    }
+
+    var errorMessage: String? {
+        guard case .failed(let message) = state else { return nil }
+        return message
+    }
+
+    func load(url: URL?, ignoringCache: Bool = false) async {
+        currentURL = url
+
+        guard let url else {
+            state = .failed(WorkshopPreviewLoadingError.missingURL.localizedDescription)
+            return
+        }
+
+        if ignoringCache {
+            cache.removeImage(for: url)
+        } else if let cachedImage = cache.image(for: url) {
+            state = .loaded(cachedImage)
+            return
+        }
+
+        state = .loading
+
+        do {
+            let data = try await dataLoader.data(from: url)
+            try Task.checkCancellation()
+            guard currentURL == url else { return }
+            guard let image = NSImage(data: data), image.isValid else {
+                throw WorkshopPreviewLoadingError.invalidImageData
+            }
+
+            cache.insert(image, for: url)
+            state = .loaded(image)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard currentURL == url else { return }
+            state = .failed(error.localizedDescription)
+        }
+    }
+
+    func retry() async {
+        await load(url: currentURL, ignoringCache: true)
+    }
+}
+
+struct WorkshopItemPreview: View {
+    let url: URL?
+    @StateObject private var imageLoader: WorkshopPreviewImageLoader
+
+    init(
+        url: URL?,
+        dataLoader: WorkshopPreviewDataLoading = URLSessionWorkshopPreviewDataLoader(),
+        cache: WorkshopPreviewImageCache = .shared
+    ) {
+        self.url = url
+        _imageLoader = StateObject(wrappedValue: WorkshopPreviewImageLoader(
+            dataLoader: dataLoader,
+            cache: cache
+        ))
+    }
+
+    var body: some View {
+        ZStack {
+            Color(nsColor: .separatorColor)
+
+            switch imageLoader.state {
+            case .loaded(let image):
+                GifImage(image: image, animates: true)
+                    .resizable()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .failed(let message):
+                VStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.secondary)
+                    Text("Preview failed to load")
+                        .font(.caption)
+                    Button("Retry") {
+                        Task { await imageLoader.retry() }
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                }
+                .help(message)
+            case .idle, .loading:
+                ProgressView()
+                    .controlSize(.small)
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .frame(maxWidth: .infinity)
+        .clipped()
+        .task(id: url) {
+            await imageLoader.load(url: url)
+        }
+    }
+}
+
 private struct WorkshopItemCard: View {
     let item: WorkshopItem
     @ObservedObject var viewModel: WorkshopViewModel
@@ -410,22 +604,7 @@ private struct WorkshopItemCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Preview image
-            AsyncImage(url: item.previewImageURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(16/9, contentMode: .fill)
-                        .clipped()
-                case .failure:
-                    placeholder
-                default:
-                    placeholder
-                        .overlay(ProgressView().controlSize(.small))
-                }
-            }
-            .frame(height: 120)
-            .clipped()
+            WorkshopItemPreview(url: item.previewImageURL)
 
             // Info
             VStack(alignment: .leading, spacing: 4) {
@@ -498,12 +677,6 @@ private struct WorkshopItemCard: View {
                     .foregroundStyle(.secondary)
             }
         }
-    }
-
-    private var placeholder: some View {
-        Rectangle()
-            .fill(Color(nsColor: .separatorColor))
-            .aspectRatio(16/9, contentMode: .fill)
     }
 
     private func formatCount(_ count: Int) -> String {

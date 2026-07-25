@@ -9,102 +9,127 @@ import Cocoa
 import SwiftUI
 
 struct GifImage: NSViewRepresentable {
-    
-    var gifName: String?
-    var gifUrl: URL?
-    
-    var isResizable: Bool = false
-    var contentMode: ContentMode = .fill
-    
-    var animates: Bool
-    
-    init(_ gifName: String, animates: Bool = true) {
-        self.gifName = gifName
-        self.animates = animates
-    }
-    
-    init(contentsOf url: URL, animates: Bool = true) {
-        self.gifUrl = url
-        self.animates = animates
-    }
-    
-    func makeNSView(context: Context) -> NSImageView {
-        let nsView = NSImageView()
-        
-        nsView.canDrawSubviewsIntoLayer = true
-        nsView.imageScaling = .scaleProportionallyUpOrDown
-        nsView.animates = animates
-        
-        if let gifName = self.gifName {
-            if let url = Bundle.main.url(forResource: gifName, withExtension: "gif") {
-                if let image = NSImage(contentsOf: url) {
-                    let gifRep = image.representations[0] as? NSBitmapImageRep
-                    gifRep?.setProperty(.loopCount, withValue: 0)
-                    nsView.image = image
+    private enum Source {
+        case resource(String)
+        case url(URL)
+        case image(NSImage)
+
+        var identity: SourceIdentity {
+            switch self {
+            case .resource(let name):
+                return .resource(name)
+            case .url(let url):
+                return .url(url)
+            case .image(let image):
+                return .image(ObjectIdentifier(image))
+            }
+        }
+
+        func load() -> NSImage? {
+            switch self {
+            case .resource(let name):
+                guard let url = Bundle.main.url(forResource: name, withExtension: "gif") else {
+                    return nil
                 }
+                return NSImage(contentsOf: url)
+            case .url(let url):
+                return NSImage(contentsOf: url)
+            case .image(let image):
+                return image
             }
         }
-        if let gifUrl = self.gifUrl {
-            if let image = NSImage(contentsOf: gifUrl) {
-                let gifRep = image.representations[0] as? NSBitmapImageRep
-                gifRep?.setProperty(.loopCount, withValue: 0)
-                nsView.image = image
-            }
-        }
-        
-        return nsView
     }
-    
-    func updateNSView(_ nsView: NSImageView, context: Context) {
-        nsView.animates = animates
-        updateModifiers(nsView)
+
+    fileprivate enum SourceIdentity: Equatable {
+        case resource(String)
+        case url(URL)
+        case image(ObjectIdentifier)
     }
-    
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSImageView, context: Context) -> CGSize? {
-        if !self.isResizable {
-            return nsView.sizeThatFits(nsView.frame.size)
-        } else {
-            guard let width = proposal.width, let height = proposal.height else { return nil }
+
+    final class Coordinator {
+        fileprivate var loadedSource: SourceIdentity?
+    }
+
+    private let source: Source
+    private var isResizable = false
+    private let animates: Bool
+
+    init(_ gifName: String, animates: Bool = true) {
+        source = .resource(gifName)
+        self.animates = animates
+    }
+
+    init(contentsOf url: URL, animates: Bool = true) {
+        source = .url(url)
+        self.animates = animates
+    }
+
+    init(image: NSImage, animates: Bool = true) {
+        source = .image(image)
+        self.animates = animates
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSImageView {
+        let imageView = NSImageView()
+        imageView.canDrawSubviewsIntoLayer = true
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        update(imageView, coordinator: context.coordinator)
+        return imageView
+    }
+
+    func updateNSView(_ imageView: NSImageView, context: Context) {
+        update(imageView, coordinator: context.coordinator)
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsView: NSImageView,
+        context: Context
+    ) -> CGSize? {
+        guard isResizable else { return nil }
+
+        if let width = proposal.width, let height = proposal.height {
             return CGSize(width: width, height: height)
         }
+
+        let imageSize = nsView.image?.size ?? .zero
+        let aspectRatio = imageSize.width > 0 && imageSize.height > 0
+            ? imageSize.width / imageSize.height
+            : 1
+
+        if let width = proposal.width {
+            return CGSize(width: width, height: width / aspectRatio)
+        }
+        if let height = proposal.height {
+            return CGSize(width: height * aspectRatio, height: height)
+        }
+        return imageSize == .zero ? nil : imageSize
     }
-    
-    private func updateModifiers(_ nsView: NSImageView) {
-        if let gifName = self.gifName {
-            if let url = Bundle.main.url(forResource: gifName, withExtension: "gif") {
-                if let image = NSImage(contentsOf: url) {
-                    let gifRep = image.representations[0] as? NSBitmapImageRep
-                    gifRep?.setProperty(.loopCount, withValue: 0)
-                    nsView.image = image
-                }
-            }
-        }
-        if let gifUrl = self.gifUrl {
-            if let image = NSImage(contentsOf: gifUrl) {
-                let gifRep = image.representations[0] as? NSBitmapImageRep
-                gifRep?.setProperty(.loopCount, withValue: 0)
-                nsView.image = image
-            }
-        }
-        if self.isResizable {
-            switch self.contentMode {
-            case .fill:
-                nsView.imageScaling = .scaleAxesIndependently
-            case .fit:
-                nsView.imageScaling = .scaleProportionallyUpOrDown
-            }
-        }
-    }
-    
-    func resizable(capInsets: EdgeInsets = EdgeInsets(), resizingMode: Image.ResizingMode = .stretch) -> Self {
+
+    func resizable(
+        capInsets: EdgeInsets = EdgeInsets(),
+        resizingMode: Image.ResizingMode = .stretch
+    ) -> Self {
         var view = self
         view.isResizable = true
         return view
     }
-    
-    func aspectRatio(_ aspectRatio: CGFloat? = nil, contentMode: ContentMode) -> Self {
-        var view = self
-        view.contentMode = contentMode
-        return view
+
+    private func update(_ imageView: NSImageView, coordinator: Coordinator) {
+        imageView.animates = animates
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+
+        guard coordinator.loadedSource != source.identity else { return }
+
+        let image = source.load()
+        image?.representations
+            .compactMap { $0 as? NSBitmapImageRep }
+            .forEach { $0.setProperty(.loopCount, withValue: 0) }
+        imageView.image = image
+        coordinator.loadedSource = source.identity
     }
 }

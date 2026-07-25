@@ -1606,6 +1606,9 @@
         }
       }
     },
+    "Preview failed to load" : {
+
+    },
     "Proceed" : {
       "localizations" : {
         "zh-Hans" : {
@@ -1847,6 +1850,9 @@
           }
         }
       }
+    },
+    "Retry" : {
+
     },
     "Safe start after hibernation" : {
       "extractionState" : "stale",

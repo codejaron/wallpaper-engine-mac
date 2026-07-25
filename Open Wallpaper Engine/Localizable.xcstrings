@@ -137,6 +137,7 @@
       }
     },
     "×8 MSAA is only recommended for powerful high-end desktop graphics cards." : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -571,16 +572,6 @@
         }
       }
     },
-    "Currently, these settings below are designed for scene wallpapers \nand may not work as expect " : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "目前以下设置并不会生效，因为它们是为场景类壁纸而设计的。目前还不支持场景壁纸"
-          }
-        }
-      }
-    },
     "Cut" : {
       "localizations" : {
         "zh-Hans" : {
@@ -853,6 +844,16 @@
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "帧率"
+          }
+        }
+      }
+    },
+    "FPS, scaling, and spanning apply only to Scene wallpapers. Disabled quality options are not yet supported." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "帧率、缩放和跨屏设置仅对场景壁纸生效；灰色质量选项尚未支持。"
           }
         }
       }
@@ -2213,6 +2214,7 @@
       }
     },
     "Ultra mode adds HDR bloom to supported wallpapers and is only recommended for powerful high-end desktop graphics cards." : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {

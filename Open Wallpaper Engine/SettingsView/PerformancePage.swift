@@ -101,46 +101,26 @@ struct PerformancePage: SettingsPage {
                 .background(Color(nsColor: NSColor.unemphasizedSelectedContentBackgroundColor))
                 .buttonStyle(.borderless)
                 .clipShape(RoundedRectangle(cornerRadius: 5.0))
+                .disabled(true)
                 Picker("Anti-aliasing", selection: $viewModel.settings.antiAliasing) {
                     Text("None").tag(GSAntiAliasingQuality.none)
                     Text("MSAA x2").tag(GSAntiAliasingQuality.msaa_x2)
                     Text("MSAA x4").tag(GSAntiAliasingQuality.msaa_x4)
                     Text("MSAA x8").tag(GSAntiAliasingQuality.msaa_x8)
                 }
-                .overlay {
-                    HStack {
-                        Spacer(); Spacer()
-                        if viewModel.settings.antiAliasing == .msaa_x8 {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.red)
-                                .help("×8 MSAA is only recommended for powerful high-end desktop graphics cards.")
-                        }
-                        Spacer()
-                    }
-                    
-                }
+                .disabled(true)
                 Picker("Post-Processing", selection: $viewModel.settings.postProcessing) {
                     Text("Disabled").tag(GSPostProcessingQuality.disabled)
                     Text("Enabled").tag(GSPostProcessingQuality.enabled)
                     Text("Ultra").tag(GSPostProcessingQuality.ultra)
                 }
-                .overlay {
-                    HStack {
-                        Spacer(); Spacer()
-                        if viewModel.settings.postProcessing == .ultra {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.yellow)
-                                .help("Ultra mode adds HDR bloom to supported wallpapers and is only recommended for powerful high-end desktop graphics cards.")
-                        }
-                        Spacer()
-                    }
-                    
-                }
+                .disabled(true)
                 Picker("Texture Resolution", selection: $viewModel.settings.textureResolution) {
                     Text("High Quality").tag(GSTextureResolutionQuality.highQuality)
                     Text("High Performance").tag(GSTextureResolutionQuality.highPerformance)
                     Text("Automatic").tag(GSTextureResolutionQuality.automatic)
                 }
+                .disabled(true)
                 HStack {
                     Text("FPS")
                     Spacer()
@@ -194,11 +174,13 @@ struct PerformancePage: SettingsPage {
                 }
                 HStack {
                     Text("Reflections")
+                        .foregroundStyle(.secondary)
                     Spacer()
                     Toggle("Reflection", isOn: $viewModel.settings.reflections)
                         .toggleStyle(.checkbox)
                         .labelsHidden()
                 }
+                .disabled(true)
                 Picker("Scene scaling", selection: $viewModel.settings.scenePresentationScaling) {
                     Text("Stretch").tag(GSScenePresentationScaling.stretch)
                     Text("Aspect fit").tag(GSScenePresentationScaling.aspectFit)
@@ -214,7 +196,7 @@ struct PerformancePage: SettingsPage {
                     .fixedSize(horizontal: false, vertical: true)
             } header: {
                 Label("Quality", systemImage: "memorychip.fill")
-                Text("Currently, these settings below are designed for scene wallpapers \nand may not work as expect ")
+                Text("FPS, scaling, and spanning apply only to Scene wallpapers. Disabled quality options are not yet supported.")
             }
         }
         .formStyle(.grouped)

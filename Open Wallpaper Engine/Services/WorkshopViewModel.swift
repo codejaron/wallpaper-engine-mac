@@ -9,11 +9,15 @@ class WorkshopViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published var currentPage = 1
-    @Published var selectedTags: [String] = ["Everyone"]
+    @Published var filters = WorkshopFilterSelection()
+    @Published var isFilterReveal = false
+    @Published private(set) var hasMoreResults = true
 
     let steamCmd: SteamCmdService
-    private let api = WorkshopAPIService()
+    private let api: any WorkshopAPIClient
     private var cancellable: AnyCancellable?
+    private var paginator: WorkshopSearchPaginator?
+    private var searchGeneration = UUID()
 
     static let contentRatingTags = ["Everyone", "Questionable", "Mature"]
 
@@ -32,8 +36,12 @@ class WorkshopViewModel: ObservableObject {
         "3440 x 1440", "1440 x 2560",
     ]
 
-    init(steamCmd: SteamCmdService) {
+    init(
+        steamCmd: SteamCmdService,
+        api: any WorkshopAPIClient = WorkshopAPIService()
+    ) {
         self.steamCmd = steamCmd
+        self.api = api
         // Forward steamCmd changes (e.g. downloadProgress) to trigger view updates
         self.cancellable = steamCmd.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
@@ -42,42 +50,65 @@ class WorkshopViewModel: ObservableObject {
 
     @MainActor
     func search() async {
+        let generation = UUID()
+        searchGeneration = generation
+        let paginator = WorkshopSearchPaginator(
+            api: api,
+            query: .init(text: searchText, filters: filters, sortOrder: sortOrder)
+        )
+        self.paginator = paginator
+
         isLoading = true
         errorMessage = nil
-
-        do {
-            let results = try await api.searchItems(
-                query: searchText,
-                tags: selectedTags,
-                sortOrder: sortOrder,
-                page: currentPage
-            )
-            items = results
-        } catch {
-            errorMessage = error.localizedDescription
+        currentPage = 1
+        items = []
+        hasMoreResults = true
+        defer {
+            if searchGeneration == generation {
+                isLoading = false
+            }
         }
 
-        isLoading = false
+        do {
+            let results = try await paginator.nextPage()
+            guard searchGeneration == generation else { return }
+            items = results
+            hasMoreResults = paginator.hasMoreResults
+        } catch is CancellationError {
+            return
+        } catch {
+            guard searchGeneration == generation else { return }
+            errorMessage = error.localizedDescription
+        }
     }
 
     @MainActor
     func loadMore() async {
-        currentPage += 1
-        isLoading = true
+        guard !isLoading, hasMoreResults, let paginator else { return }
 
-        do {
-            let results = try await api.searchItems(
-                query: searchText,
-                tags: selectedTags,
-                sortOrder: sortOrder,
-                page: currentPage
-            )
-            items.append(contentsOf: results)
-        } catch {
-            errorMessage = error.localizedDescription
+        let generation = searchGeneration
+        isLoading = true
+        errorMessage = nil
+        defer {
+            if searchGeneration == generation {
+                isLoading = false
+            }
         }
 
-        isLoading = false
+        do {
+            let results = try await paginator.nextPage()
+            guard searchGeneration == generation else { return }
+            items.append(contentsOf: results)
+            hasMoreResults = paginator.hasMoreResults
+            if !results.isEmpty {
+                currentPage += 1
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard searchGeneration == generation else { return }
+            errorMessage = error.localizedDescription
+        }
     }
 
     func download(item: WorkshopItem) {
@@ -88,12 +119,17 @@ class WorkshopViewModel: ObservableObject {
         steamCmd.downloadProgress[item.id]
     }
 
-    func toggleTag(_ tag: String) {
-        if selectedTags.contains(tag) {
-            selectedTags.removeAll { $0 == tag }
-        } else {
-            selectedTags.append(tag)
-        }
+    func isTagSelected(_ tag: String, in group: WorkshopFilterGroup) -> Bool {
+        filters.contains(tag, in: group)
+    }
+
+    func setTag(_ tag: String, in group: WorkshopFilterGroup, isSelected: Bool) {
+        filters.set(tag, in: group, isSelected: isSelected)
+        currentPage = 1
+    }
+
+    func resetFilters() {
+        filters = WorkshopFilterSelection()
         currentPage = 1
     }
 }

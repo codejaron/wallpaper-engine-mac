@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		5EC47E912A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EC47E902A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift */; };
 		5E0700E62A859FAD00ADFE2E /* WallpaperNotFound.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 5E0700E52A859FAD00ADFE2E /* WallpaperNotFound.mp4 */; };
 		5E2F1E892A57DF2D0081D69D /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 5E2F1E882A57DF2D0081D69D /* Localizable.xcstrings */; };
 		5E32ABFE2A4D595D00A0EEEC /* FilterResults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E32ABFD2A4D595D00A0EEEC /* FilterResults.swift */; };
@@ -57,6 +58,8 @@
 		CC0000000000000000000007 /* WorkshopAPIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0000000000000000000008 /* WorkshopAPIService.swift */; };
 		CC0000000000000000000009 /* WorkshopViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC000000000000000000000A /* WorkshopViewModel.swift */; };
 		CC000000000000000000000B /* WorkshopView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC000000000000000000000C /* WorkshopView.swift */; };
+		DD10000000000000000001 /* WorkshopFilterSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD10000000000000000002 /* WorkshopFilterSelection.swift */; };
+		DD10000000000000000003 /* WorkshopSearchPaginator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD10000000000000000004 /* WorkshopSearchPaginator.swift */; };
 		DAEE29C62A9CB52100633898 /* WebWallpaperViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */; };
 		D10000000000000000000001 /* SceneRuntimeBridge in Frameworks */ = {isa = PBXBuildFile; productRef = D10000000000000000000003 /* SceneRuntimeBridge */; };
 		D30000000000000000000001 /* SceneAudio in Frameworks */ = {isa = PBXBuildFile; productRef = D30000000000000000000002 /* SceneAudio */; };
@@ -74,6 +77,16 @@
 		D20000000000000000000002 /* SceneProperty.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000001 /* SceneProperty.swift */; };
 		D20000000000000000000004 /* ScenePropertyControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000003 /* ScenePropertyControls.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		5EC47E8D2A2DB2E700120CCC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5EC47E6E2A2DB2E600120CCC /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5EC47E752A2DB2E600120CCC;
+			remoteInfo = "Open Wallpaper Engine";
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		5E0700E52A859FAD00ADFE2E /* WallpaperNotFound.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = WallpaperNotFound.mp4; sourceTree = "<group>"; };
@@ -113,6 +126,8 @@
 		5EB152A02A82ADEB007EA845 /* Open_Wallpaper_Engine.docc */ = {isa = PBXFileReference; lastKnownFileType = folder.documentationcatalog; path = Open_Wallpaper_Engine.docc; sourceTree = "<group>"; };
 		5EB4DB872A980532000A1FEA /* ExplorerItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerItem.swift; sourceTree = "<group>"; };
 		5EC47E762A2DB2E600120CCC /* Open Wallpaper Engine.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Open Wallpaper Engine.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		5EC47E8C2A2DB2E700120CCC /* Open Wallpaper EngineTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Open Wallpaper EngineTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		5EC47E902A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopFilterSelectionTests.swift; sourceTree = "<group>"; };
 		5EC47E7D2A2DB2E700120CCC /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5EC47E802A2DB2E700120CCC /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		5EC47E872A2DB2E700120CCC /* Open_Wallpaper_Engine.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Open_Wallpaper_Engine.entitlements; sourceTree = "<group>"; };
@@ -139,6 +154,8 @@
 		CC0000000000000000000008 /* WorkshopAPIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopAPIService.swift; sourceTree = "<group>"; };
 		CC000000000000000000000A /* WorkshopViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopViewModel.swift; sourceTree = "<group>"; };
 		CC000000000000000000000C /* WorkshopView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopView.swift; sourceTree = "<group>"; };
+		DD10000000000000000002 /* WorkshopFilterSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopFilterSelection.swift; sourceTree = "<group>"; };
+		DD10000000000000000004 /* WorkshopSearchPaginator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopSearchPaginator.swift; sourceTree = "<group>"; };
 		DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebWallpaperViewModel.swift; sourceTree = "<group>"; };
 		D10000000000000000000004 /* SceneRuntime NOTICE */ = {isa = PBXFileReference; lastKnownFileType = text; name = "SceneRuntime NOTICE"; path = SceneRuntime/NOTICE; sourceTree = "<group>"; };
 		D10000000000000000000005 /* LZ4.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SceneRuntime/ThirdPartyLicenses/LZ4.txt; sourceTree = "<group>"; };
@@ -155,6 +172,13 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		5EC47E892A2DB2E700120CCC /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		5EC47E732A2DB2E600120CCC /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -246,6 +270,8 @@
 				CC0000000000000000000004 /* ZipImporter.swift */,
 				CC0000000000000000000006 /* SteamCmdService.swift */,
 				CC0000000000000000000008 /* WorkshopAPIService.swift */,
+				DD10000000000000000002 /* WorkshopFilterSelection.swift */,
+				DD10000000000000000004 /* WorkshopSearchPaginator.swift */,
 				CC000000000000000000000A /* WorkshopViewModel.swift */,
 			);
 			path = Services;
@@ -295,6 +321,7 @@
 				5EF4C24C2A4C98FA009831E5 /* README.md */,
 				5EEE8D5D2A7501C800DCE41A /* resources */,
 				5EC47E782A2DB2E600120CCC /* Open Wallpaper Engine */,
+				5EC47E8F2A2DB2E700120CCC /* Open Wallpaper EngineTests */,
 				5EC47E772A2DB2E600120CCC /* Products */,
 			);
 			sourceTree = "<group>";
@@ -316,6 +343,7 @@
 			isa = PBXGroup;
 			children = (
 				5EC47E762A2DB2E600120CCC /* Open Wallpaper Engine.app */,
+				5EC47E8C2A2DB2E700120CCC /* Open Wallpaper EngineTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -346,6 +374,14 @@
 				5EC47E802A2DB2E700120CCC /* Preview Assets.xcassets */,
 			);
 			path = "Preview Content";
+			sourceTree = "<group>";
+		};
+		5EC47E8F2A2DB2E700120CCC /* Open Wallpaper EngineTests */ = {
+			isa = PBXGroup;
+			children = (
+				5EC47E902A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift */,
+			);
+			path = "Open Wallpaper EngineTests";
 			sourceTree = "<group>";
 		};
 		5EDF1E122A93B026006617EA /* GlobalComponents */ = {
@@ -401,6 +437,24 @@
 			productReference = 5EC47E762A2DB2E600120CCC /* Open Wallpaper Engine.app */;
 			productType = "com.apple.product-type.application";
 		};
+		5EC47E8B2A2DB2E700120CCC /* Open Wallpaper EngineTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5EC47EA32A2DB2E700120CCC /* Build configuration list for PBXNativeTarget "Open Wallpaper EngineTests" */;
+			buildPhases = (
+				5EC47E882A2DB2E700120CCC /* Sources */,
+				5EC47E892A2DB2E700120CCC /* Frameworks */,
+				5EC47E8A2A2DB2E700120CCC /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5EC47E8E2A2DB2E700120CCC /* PBXTargetDependency */,
+			);
+			name = "Open Wallpaper EngineTests";
+			productName = "Open Wallpaper EngineTests";
+			productReference = 5EC47E8C2A2DB2E700120CCC /* Open Wallpaper EngineTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -413,6 +467,10 @@
 				TargetAttributes = {
 					5EC47E752A2DB2E600120CCC = {
 						CreatedOnToolsVersion = 14.3.1;
+					};
+					5EC47E8B2A2DB2E700120CCC = {
+						CreatedOnToolsVersion = 14.3.1;
+						TestTargetID = 5EC47E752A2DB2E600120CCC;
 					};
 				};
 			};
@@ -434,11 +492,19 @@
 			projectRoot = "";
 			targets = (
 				5EC47E752A2DB2E600120CCC /* Open Wallpaper Engine */,
+				5EC47E8B2A2DB2E700120CCC /* Open Wallpaper EngineTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		5EC47E8A2A2DB2E700120CCC /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		5EC47E742A2DB2E600120CCC /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -461,6 +527,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		5EC47E882A2DB2E700120CCC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5EC47E912A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		5EC47E722A2DB2E600120CCC /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -515,6 +589,8 @@
 				CC0000000000000000000003 /* ZipImporter.swift in Sources */,
 				CC0000000000000000000005 /* SteamCmdService.swift in Sources */,
 				CC0000000000000000000007 /* WorkshopAPIService.swift in Sources */,
+				DD10000000000000000001 /* WorkshopFilterSelection.swift in Sources */,
+				DD10000000000000000003 /* WorkshopSearchPaginator.swift in Sources */,
 				CC0000000000000000000009 /* WorkshopViewModel.swift in Sources */,
 				CC000000000000000000000B /* WorkshopView.swift in Sources */,
 			);
@@ -522,7 +598,55 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		5EC47E8E2A2DB2E700120CCC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5EC47E752A2DB2E600120CCC /* Open Wallpaper Engine */;
+			targetProxy = 5EC47E8D2A2DB2E700120CCC /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		5EC47EA42A2DB2E700120CCC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.winddog.wallpaper-engineTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Open Wallpaper Engine.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Open Wallpaper Engine";
+			};
+			name = Debug;
+		};
+		5EC47EA52A2DB2E700120CCC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.winddog.wallpaper-engineTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Open Wallpaper Engine.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Open Wallpaper Engine";
+			};
+			name = Release;
+		};
 		5EC47E9E2A2DB2E700120CCC /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -738,6 +862,15 @@
 			buildConfigurations = (
 				5EC47EA12A2DB2E700120CCC /* Debug */,
 				5EC47EA22A2DB2E700120CCC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5EC47EA32A2DB2E700120CCC /* Build configuration list for PBXNativeTarget "Open Wallpaper EngineTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5EC47EA42A2DB2E700120CCC /* Debug */,
+				5EC47EA52A2DB2E700120CCC /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

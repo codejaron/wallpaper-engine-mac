@@ -72,25 +72,21 @@ WebGL ベースの壁紙は `WKWebView` がローカルファイルアクセス�
 シーン壁紙（Steam Workshop で最も一般的なタイプ）は完全に未実装で、「Hello, World!」のみ表示されていました。
 
 **新しい実装：**
-- **PKG パーサー** — Wallpaper Engine の PKGV アーカイブ形式を読み取り、scene.json、モデル、マテリアル、テクスチャを抽出
-- **TEX パーサー** — TEXV0005 テクスチャコンテナを読み取り、TEXI/TEXB セクションから埋め込み JPEG/PNG 画像を抽出
-- **Scene JSON デコーダー** — scene.json を解析、ポリモーフィックフィールド（値がプレーンタイプまたは `{"script":..,"value":..}` オブジェクト）を柔軟に処理
-- **SpriteKit レンダラー** — シーン画像レイヤーを SKSpriteNode としてレンダリング、位置、サイズ、アルファ、カラーティント、ブレンドモードを正確に処理
-- **プレビューフォールバック** — テクスチャを抽出できない場合は preview.jpg/png/gif にフォールバック
-- **TEXI 形式検出** — デコードできない DXT 圧縮テクスチャを迅速に識別してスキップ
+- **ネイティブ SceneRuntime** — PKGV/TEXV、モデル、マテリアル、シェーダー、スクリプトを単一の C++ ランタイムで処理
+- **OpenGL レンダラー** — 一貫したフレームグラフを実行し、CPU readback なしで `NSOpenGLView` に直接表示
+- **Wallpaper Engine assets directory** — 一般設定で選択した公式シェーダー／マテリアル資産を使用
+- **明示的な失敗** — 無効・未対応のシーンでは古いフレームやプレビューにフォールバックせず、画面をクリアしてエラーを表示
 
 ### インポート — フォルダインポートの修正
 インポートパネルが個別の壁紙フォルダと複数の壁紙を含む親ディレクトリの両方を正しく処理するようになりました。
 
 ## 現在の制限事項
 
-- **DXT テクスチャ** — DXT1/DXT5 圧縮テクスチャ（TEXI 形式 4/7/8）を使用する壁紙はレンダリングできません。ソフトウェアデコンプレッサーまたは Metal ベースのレンダリングが必要な GPU ネイティブ圧縮形式です。プレビュー画像にフォールバックします。
-- **パーティクルエフェクト** — シーンパーティクルシステム（雨、雪、スパークル）は解析されますが、視覚的な問題を避けるためレンダリングで無効化されています。
-- **オーディオリアクティブスクリプト** — Wallpaper Engine の JavaScript ベースのオーディオ視覚化スクリプトは実行されません。スクリプト付きプロパティは静的な `value` にフォールバックします。
-- **シェーダーエフェクト** — カスタム GLSL シェーダー（ブルーム、ブラー、カラー補正）は適用されません。
-- **カメラパララックス** — マウス追従カメラ移動は未実装です。
-- **アニメーションシーン** — スプライトアニメーションとタイムラインベースのオブジェクトアニメーションはサポートされていません。
-- **一部の JPEG サムネイル** — 少数の TEXB 形式 1 ファイルに macOS がデコードできない非標準 JPEG データが含まれています。
+- **パーティクル互換性** — 決定論的なスプライト経路は box/sphere emitter、主要なランダム initializer、movement、alpha fade に対応しています。Trail/rope、子システムと control point、collision/boids、アニメーション粒子テクスチャ、非 `genericparticle` のマルチパスマテリアルは未対応です。
+- **オーディオリアクティブシーン** — シーン内の音声再生には対応していますが、macOS のシステム音声キャプチャと Wallpaper Engine の audio-input buffer は利用できず、明示的なエラーになります。
+- **テキスト互換性** — テキストレイヤーは描画できますが、ゼロ以外の文字間隔と高度な行数・幅・省略記号レイアウトは未対応です。
+- **エフェクト互換性** — 画像マテリアル、passthrough シーン合成レイヤー、マルチパス effect、framebuffer binding、copy/swap/clear、カメラパララックス、自動投影に対応しています。Compose、puppet mesh、その他未モデル化の機能は明示的に失敗します。
+- **ユーザープロパティ** — Boolean、slider、combo、color、テキスト入力は即時適用され、ディスプレイと Scene ごとに保存されます。Scene texture、ファイル、ディレクトリ、ショートカットのプロパティは現在表示のみです。
 
 ## サポートされている壁紙タイプ
 
@@ -98,9 +94,8 @@ WebGL ベースの壁紙は `WKWebView` がローカルファイルアクセス�
 |--------|------------|
 | 動画 (.mp4, .webm) | 動作中（オリジナル） |
 | Web (HTML/WebGL) | 動作中（パッチ済み） |
-| シーン（静的画像） | 動作中（新機能） |
-| シーン（パーティクル） | 部分対応（無効化） |
-| シーン（DXT テクスチャ） | プレビューフォールバック |
+| シーン（画像、エフェクト、スクリプト） | 部分対応 |
+| シーン（パーティクル、テキスト、音声） | 部分対応 |
 | アプリケーション | 未サポート |
 
 ## ソースからビルド
@@ -139,14 +134,12 @@ Xcode で署名証明書を自分のものに変更するか「Sign to Run Local
 **変更：**
 - `WebWallpaperView.swift` — WKWebView ファイルアクセス設定
 - `WallpaperView.swift` — シーン壁紙ディスパッチ
-- `SceneWallpaperView.swift` — SpriteKit NSViewRepresentable に書き換え
+- `SceneWallpaperView.swift` — ネイティブ SceneRuntime を使う NSOpenGLView 実装
 - `ImportPanels.swift` — フォルダインポートロジック修正
 
 **追加：**
-- `Services/SceneParsers/PKGParser.swift` — PKGV アーカイブパーサー
-- `Services/SceneParsers/TEXParser.swift` — TEXV テクスチャパーサー
-- `Services/SceneParsers/SceneModels.swift` — Scene JSON データモデル
-- `Services/SceneWallpaperViewModel.swift` — シーン読み込みと SpriteKit レンダリング
+- `SceneRuntime/` — パッケージ解析、モデル、スクリプト、フレームグラフ、シェーダー、OpenGL 実行パイプライン
+- `Services/SceneWallpaperViewModel.swift` — ネイティブ SceneRuntime セッションのアプリ側所有者
 - `Services/SteamCmdService.swift` — steamcmd 検出、ログイン、Workshop ダウンロード
 - `Services/WorkshopAPIService.swift` — Steam Web API クライアント
 - `Services/WorkshopViewModel.swift` — Workshop ブラウザ状態管理

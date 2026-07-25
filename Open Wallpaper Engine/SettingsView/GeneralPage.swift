@@ -70,6 +70,13 @@ struct GeneralPage: SettingsPage {
             }
             // MARK: Advanced
             Section {
+                TextField(
+                    "Wallpaper Engine assets directory",
+                    text: Binding(
+                        get: { viewModel.settings.wallpaperEngineAssetsDirectory ?? "" },
+                        set: { viewModel.settings.wallpaperEngineAssetsDirectory = $0 }
+                    )
+                )
                 Picker("Process Piority", selection: $viewModel.settings.processPiority) {
                     Text("Normal").tag(GSProcessPiority.normal)
                     Text("Below Normal").tag(GSProcessPiority.belowNormal)

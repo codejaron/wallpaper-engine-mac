@@ -72,25 +72,21 @@ WebGL-based wallpapers rendered as gray rectangles because `WKWebView` blocked l
 Scene wallpapers (the most common type on Steam Workshop) were completely unimplemented — just showed "Hello, World!".
 
 **New implementation includes:**
-- **PKG parser** — Reads Wallpaper Engine's PKGV archive format to extract scene.json, models, materials, and textures
-- **TEX parser** — Reads TEXV0005 texture containers, extracts embedded JPEG/PNG image data from TEXI/TEXB sections
-- **Scene JSON decoder** — Parses scene.json with flexible decoding that handles Wallpaper Engine's polymorphic fields (values can be plain types or `{"script":..,"value":..}` objects)
-- **SpriteKit renderer** — Renders scene image layers as SKSpriteNodes with correct positioning, sizing, alpha, color tinting, and blend modes
-- **Preview fallback** — Falls back to preview.jpg/png/gif when textures can't be extracted
-- **TEXI format detection** — Quickly identifies and skips DXT-compressed textures that can't be decoded
+- **Native scene runtime** — Parses PKGV/TEXV assets, scene models, materials, shaders, and scripts through one C++ runtime
+- **OpenGL renderer** — Executes coherent frame graphs and presents them directly in an `NSOpenGLView` without CPU readback
+- **Wallpaper Engine assets directory** — Uses the official shader and material assets selected in General settings
+- **Explicit failures** — Invalid or unsupported scenes are cleared and reported instead of silently showing a stale frame or preview
 
 ### Import — Fixed folder import
 The import panel now correctly handles both individual wallpaper folders and parent directories containing multiple wallpapers.
 
 ## Current Limitations
 
-- **DXT textures** — Wallpapers using DXT1/DXT5 compressed textures (TEXI format 4/7/8) cannot be rendered. These are GPU-native compressed formats that require either a software decompressor or Metal-based rendering. The app falls back to the preview image for these wallpapers.
-- **Particle effects** — Scene particle systems (rain, snow, sparkles) are parsed but disabled in rendering to avoid visual artifacts. The particle mapping code exists but needs refinement.
-- **Audio-reactive scripts** — Wallpaper Engine's JavaScript-based audio visualization scripts are not executed. Properties with scripts fall back to their static `value`.
-- **Shader effects** — Custom GLSL shaders (bloom, blur, color correction) are not applied.
-- **Camera parallax** — Mouse-tracking camera movement is not implemented.
-- **Animated scenes** — Sprite animations and timeline-based object animations are not supported.
-- **Some JPEG thumbnails** — A small number of TEXB format 1 files contain non-standard JPEG data that macOS cannot decode. These are typically DXT-compressed textures misidentified as format 1.
+- **Particle compatibility** — The deterministic sprite path supports box/sphere emitters, common random initializers, movement, and alpha fading. Trails/ropes, child and control-point systems, collision/boids, animated particle textures, and non-`genericparticle` multi-pass materials are not supported yet.
+- **Audio-reactive scenes** — Authored sound playback is supported, but macOS system-audio capture and Wallpaper Engine audio-input buffers are unavailable and fail explicitly.
+- **Text compatibility** — Text layers render, but non-zero character spacing and advanced row/width/ellipsis layout are not supported yet.
+- **Effect compatibility** — Image materials, passthrough scene-composite layers, multi-pass effects, framebuffer bindings, copy/swap/clear operations, camera parallax, and automatic projection are supported. Compose, puppet meshes, and other unmodeled effect features fail explicitly.
+- **User properties** — Boolean, slider, combo, color, and text-input values are applied live and persisted per display and Scene. Scene-texture, file, directory, and shortcut properties are currently visible but read-only.
 
 ## Supported Wallpaper Types
 
@@ -98,9 +94,8 @@ The import panel now correctly handles both individual wallpaper folders and par
 |------|--------|
 | Video (.mp4, .webm) | Working (original) |
 | Web (HTML/WebGL) | Working (patched) |
-| Scene (static images) | Working (new) |
-| Scene (particles) | Partial (disabled) |
-| Scene (DXT textures) | Preview fallback |
+| Scene (images, effects, scripts) | Partial |
+| Scene (particles, text, audio) | Partial |
 | Application | Not supported |
 
 ## Build from Source
@@ -139,14 +134,12 @@ In Xcode, change the signing certificate to your own or select "Sign to Run Loca
 **Modified:**
 - `WebWallpaperView.swift` — WKWebView file access configuration
 - `WallpaperView.swift` — Scene wallpaper dispatch
-- `SceneWallpaperView.swift` — Rewritten as SpriteKit NSViewRepresentable
+- `SceneWallpaperView.swift` — Uses an NSOpenGLView backed by the native SceneRuntime
 - `ImportPanels.swift` — Folder import logic fix
 
 **Added:**
-- `Services/SceneParsers/PKGParser.swift` — PKGV archive parser
-- `Services/SceneParsers/TEXParser.swift` — TEXV texture parser
-- `Services/SceneParsers/SceneModels.swift` — Scene JSON data models
-- `Services/SceneWallpaperViewModel.swift` — Scene loading and SpriteKit rendering
+- `SceneRuntime/` — Native package parsing, model, script, frame-graph, shader, and OpenGL execution pipeline
+- `Services/SceneWallpaperViewModel.swift` — App-facing owner for native SceneRuntime sessions
 - `Services/SteamCmdService.swift` — steamcmd detection, login, and workshop download
 - `Services/WorkshopAPIService.swift` — Steam Web API client for workshop browsing
 - `Services/WorkshopViewModel.swift` — Workshop browser state management

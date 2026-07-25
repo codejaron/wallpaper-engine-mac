@@ -49,12 +49,7 @@
 		5EFBB0BB2A2F10EA00E39BEC /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EFBB0BA2A2F10EA00E39BEC /* main.swift */; };
 		5EFC591D2A81ACBC005F97E2 /* StatusBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EFC591C2A81ACBC005F97E2 /* StatusBar.swift */; };
 		5EFC591F2A81ACC3005F97E2 /* MainMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EFC591E2A81ACC3005F97E2 /* MainMenu.swift */; };
-		DAEE29C62A9CB52100633898 /* WebWallpaperViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */; };
-		AA1B2C3D4E5F600200ABCD01 /* PKGParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1B2C3D4E5F600100ABCD01 /* PKGParser.swift */; };
-		AA1B2C3D4E5F600200ABCD02 /* TEXParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1B2C3D4E5F600100ABCD02 /* TEXParser.swift */; };
-		AA1B2C3D4E5F600200ABCD03 /* SceneModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1B2C3D4E5F600100ABCD03 /* SceneModels.swift */; };
 		AA1B2C3D4E5F600200ABCD04 /* SceneWallpaperViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1B2C3D4E5F600100ABCD04 /* SceneWallpaperViewModel.swift */; };
-		AA1B2C3D4E5F600200ABCD05 /* SpriteKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA1B2C3D4E5F600100ABCD05 /* SpriteKit.framework */; };
 		BB0000000000000000000003 /* ObjCExceptionCatcher.m in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000002 /* ObjCExceptionCatcher.m */; };
 		CC0000000000000000000001 /* WallpaperDirectory.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0000000000000000000002 /* WallpaperDirectory.swift */; };
 		CC0000000000000000000003 /* ZipImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0000000000000000000004 /* ZipImporter.swift */; };
@@ -62,6 +57,18 @@
 		CC0000000000000000000007 /* WorkshopAPIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0000000000000000000008 /* WorkshopAPIService.swift */; };
 		CC0000000000000000000009 /* WorkshopViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC000000000000000000000A /* WorkshopViewModel.swift */; };
 		CC000000000000000000000B /* WorkshopView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC000000000000000000000C /* WorkshopView.swift */; };
+		DAEE29C62A9CB52100633898 /* WebWallpaperViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */; };
+		D10000000000000000000001 /* SceneRuntimeBridge in Frameworks */ = {isa = PBXBuildFile; productRef = D10000000000000000000003 /* SceneRuntimeBridge */; };
+		D30000000000000000000001 /* SceneAudio in Frameworks */ = {isa = PBXBuildFile; productRef = D30000000000000000000002 /* SceneAudio */; };
+		D10000000000000000000007 /* SceneRuntime NOTICE in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000004 /* SceneRuntime NOTICE */; };
+		D10000000000000000000008 /* LZ4.txt in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000005 /* LZ4.txt */; };
+		D10000000000000000000009 /* nlohmann-json.txt in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000006 /* nlohmann-json.txt */; };
+		D1000000000000000000000B /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 5EF4C24B2A4C9872009831E5 /* LICENSE */; };
+		D1000000000000000000000D /* glslang-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = D1000000000000000000000C /* glslang-LICENSE.txt */; };
+		D1000000000000000000000F /* SPIRV-Cross-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = D1000000000000000000000E /* SPIRV-Cross-LICENSE.txt */; };
+		D10000000000000000000011 /* QuickJS-NG-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000010 /* QuickJS-NG-LICENSE.txt */; };
+		D20000000000000000000002 /* SceneProperty.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000001 /* SceneProperty.swift */; };
+		D20000000000000000000004 /* ScenePropertyControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000003 /* ScenePropertyControls.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -118,13 +125,8 @@
 		5EFBB0BA2A2F10EA00E39BEC /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		5EFC591C2A81ACBC005F97E2 /* StatusBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBar.swift; sourceTree = "<group>"; };
 		5EFC591E2A81ACC3005F97E2 /* MainMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainMenu.swift; sourceTree = "<group>"; };
-		B4AD1D0F2AA24E8200471AC8 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
-		DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebWallpaperViewModel.swift; sourceTree = "<group>"; };
-		AA1B2C3D4E5F600100ABCD01 /* PKGParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PKGParser.swift; sourceTree = "<group>"; };
-		AA1B2C3D4E5F600100ABCD02 /* TEXParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TEXParser.swift; sourceTree = "<group>"; };
-		AA1B2C3D4E5F600100ABCD03 /* SceneModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneModels.swift; sourceTree = "<group>"; };
 		AA1B2C3D4E5F600100ABCD04 /* SceneWallpaperViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneWallpaperViewModel.swift; sourceTree = "<group>"; };
-		AA1B2C3D4E5F600100ABCD05 /* SpriteKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SpriteKit.framework; path = System/Library/Frameworks/SpriteKit.framework; sourceTree = SDKROOT; };
+		B4AD1D0F2AA24E8200471AC8 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
 		BB0000000000000000000001 /* ObjCExceptionCatcher.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ObjCExceptionCatcher.h; sourceTree = "<group>"; };
 		BB0000000000000000000002 /* ObjCExceptionCatcher.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ObjCExceptionCatcher.m; sourceTree = "<group>"; };
 		CC0000000000000000000002 /* WallpaperDirectory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperDirectory.swift; sourceTree = "<group>"; };
@@ -133,6 +135,15 @@
 		CC0000000000000000000008 /* WorkshopAPIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopAPIService.swift; sourceTree = "<group>"; };
 		CC000000000000000000000A /* WorkshopViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopViewModel.swift; sourceTree = "<group>"; };
 		CC000000000000000000000C /* WorkshopView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopView.swift; sourceTree = "<group>"; };
+		DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebWallpaperViewModel.swift; sourceTree = "<group>"; };
+		D10000000000000000000004 /* SceneRuntime NOTICE */ = {isa = PBXFileReference; lastKnownFileType = text; name = "SceneRuntime NOTICE"; path = SceneRuntime/NOTICE; sourceTree = "<group>"; };
+		D10000000000000000000005 /* LZ4.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SceneRuntime/ThirdPartyLicenses/LZ4.txt; sourceTree = "<group>"; };
+		D10000000000000000000006 /* nlohmann-json.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SceneRuntime/ThirdPartyLicenses/nlohmann-json.txt; sourceTree = "<group>"; };
+		D1000000000000000000000C /* glslang-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SceneRuntime/ThirdPartyLicenses/glslang-LICENSE.txt; sourceTree = "<group>"; };
+		D1000000000000000000000E /* SPIRV-Cross-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SceneRuntime/ThirdPartyLicenses/SPIRV-Cross-LICENSE.txt; sourceTree = "<group>"; };
+		D10000000000000000000010 /* QuickJS-NG-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SceneRuntime/ThirdPartyLicenses/QuickJS-NG-LICENSE.txt; sourceTree = "<group>"; };
+		D20000000000000000000001 /* SceneProperty.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneProperty.swift; sourceTree = "<group>"; };
+		D20000000000000000000003 /* ScenePropertyControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScenePropertyControls.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -140,7 +151,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AA1B2C3D4E5F600200ABCD05 /* SpriteKit.framework in Frameworks */,
+				D30000000000000000000001 /* SceneAudio in Frameworks */,
+				D10000000000000000000001 /* SceneRuntimeBridge in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -165,6 +177,7 @@
 				5E66A0E52A8BA69B00EE79D6 /* WallpaperExplorer.swift */,
 				5EDF1E152A93B4B6006617EA /* WallpaperDiscover.swift */,
 				5E66A0E72A8BA95600EE79D6 /* WallpaperPreview.swift */,
+				D20000000000000000000003 /* ScenePropertyControls.swift */,
 				5E66A0DC2A8ADF7C00EE79D6 /* ExplorerTopBar.swift */,
 				5EB4DB872A980532000A1FEA /* ExplorerItem.swift */,
 				5E66A0E02A8BA18D00EE79D6 /* GifImage.swift */,
@@ -208,12 +221,12 @@
 		5E98F6C92A826E5300C12E34 /* Services */ = {
 			isa = PBXGroup;
 			children = (
-				AA1B2C3D4E5F600300ABCD01 /* SceneParsers */,
 				5E7665252A2DC30D00E0E4B4 /* WEProject.swift */,
 				5EF28EBE2A8986AC0013ABBE /* WallpaperViewModel.swift */,
 				5EF28EC02A8990D90013ABBE /* VideoWallpaperViewModel.swift */,
 				DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */,
 				AA1B2C3D4E5F600100ABCD04 /* SceneWallpaperViewModel.swift */,
+				D20000000000000000000001 /* SceneProperty.swift */,
 				5E51A43B2AA33F5500E46E99 /* GlobalSettingsService.swift */,
 				BB0000000000000000000001 /* ObjCExceptionCatcher.h */,
 				BB0000000000000000000002 /* ObjCExceptionCatcher.m */,
@@ -224,16 +237,6 @@
 				CC000000000000000000000A /* WorkshopViewModel.swift */,
 			);
 			path = Services;
-			sourceTree = "<group>";
-		};
-		AA1B2C3D4E5F600300ABCD01 /* SceneParsers */ = {
-			isa = PBXGroup;
-			children = (
-				AA1B2C3D4E5F600100ABCD01 /* PKGParser.swift */,
-				AA1B2C3D4E5F600100ABCD02 /* TEXParser.swift */,
-				AA1B2C3D4E5F600100ABCD03 /* SceneModels.swift */,
-			);
-			path = SceneParsers;
 			sourceTree = "<group>";
 		};
 		5E98F6CA2A826E8B00C12E34 /* SettingsView */ = {
@@ -272,6 +275,7 @@
 		5EC47E6D2A2DB2E600120CCC = {
 			isa = PBXGroup;
 			children = (
+				D1000000000000000000000A /* SceneRuntime Notices */,
 				B4AD1D0F2AA24E8200471AC8 /* .gitignore */,
 				5E6091F12A83E85D00D4C36C /* AUTHORS.md */,
 				5EF4C24A2A4C9871009831E5 /* CNAME */,
@@ -280,8 +284,20 @@
 				5EEE8D5D2A7501C800DCE41A /* resources */,
 				5EC47E782A2DB2E600120CCC /* Open Wallpaper Engine */,
 				5EC47E772A2DB2E600120CCC /* Products */,
-				AA1B2C3D4E5F600100ABCD05 /* SpriteKit.framework */,
 			);
+			sourceTree = "<group>";
+		};
+		D1000000000000000000000A /* SceneRuntime Notices */ = {
+			isa = PBXGroup;
+			children = (
+				D10000000000000000000004 /* SceneRuntime NOTICE */,
+				D10000000000000000000005 /* LZ4.txt */,
+				D10000000000000000000006 /* nlohmann-json.txt */,
+				D1000000000000000000000C /* glslang-LICENSE.txt */,
+				D1000000000000000000000E /* SPIRV-Cross-LICENSE.txt */,
+				D10000000000000000000010 /* QuickJS-NG-LICENSE.txt */,
+			);
+			name = "SceneRuntime Notices";
 			sourceTree = "<group>";
 		};
 		5EC47E772A2DB2E600120CCC /* Products */ = {
@@ -365,6 +381,10 @@
 			dependencies = (
 			);
 			name = "Open Wallpaper Engine";
+			packageProductDependencies = (
+				D30000000000000000000002 /* SceneAudio */,
+				D10000000000000000000003 /* SceneRuntimeBridge */,
+			);
 			productName = "Open Wallpaper Engine";
 			productReference = 5EC47E762A2DB2E600120CCC /* Open Wallpaper Engine.app */;
 			productType = "com.apple.product-type.application";
@@ -394,6 +414,9 @@
 				"zh-Hans",
 			);
 			mainGroup = 5EC47E6D2A2DB2E600120CCC;
+			packageReferences = (
+				D10000000000000000000002 /* XCLocalSwiftPackageReference "SceneRuntime" */,
+			);
 			productRefGroup = 5EC47E772A2DB2E600120CCC /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -408,6 +431,13 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D1000000000000000000000B /* LICENSE in Resources */,
+				D10000000000000000000007 /* SceneRuntime NOTICE in Resources */,
+				D10000000000000000000008 /* LZ4.txt in Resources */,
+				D10000000000000000000009 /* nlohmann-json.txt in Resources */,
+				D1000000000000000000000D /* glslang-LICENSE.txt in Resources */,
+				D1000000000000000000000F /* SPIRV-Cross-LICENSE.txt in Resources */,
+				D10000000000000000000011 /* QuickJS-NG-LICENSE.txt in Resources */,
 				5E7A89C02AAB9D4E00192EB0 /* maxwell-cat.gif in Resources */,
 				5EC47E812A2DB2E700120CCC /* Preview Assets.xcassets in Resources */,
 				5E2F1E892A57DF2D0081D69D /* Localizable.xcstrings in Resources */,
@@ -432,6 +462,7 @@
 				5EFBB0BB2A2F10EA00E39BEC /* main.swift in Sources */,
 				5E7665262A2DC30E00E0E4B4 /* WEProject.swift in Sources */,
 				5E66A0E82A8BA95600EE79D6 /* WallpaperPreview.swift in Sources */,
+				D20000000000000000000004 /* ScenePropertyControls.swift in Sources */,
 				5EFC591D2A81ACBC005F97E2 /* StatusBar.swift in Sources */,
 				5EFC591F2A81ACC3005F97E2 /* MainMenu.swift in Sources */,
 				5EC47EAC2A2DB3E500120CCC /* WallpaperView.swift in Sources */,
@@ -461,10 +492,8 @@
 				5E615E222A7D2F9700A37EB8 /* ImportPanels.swift in Sources */,
 				5EAF3F702A870DEC00F85685 /* PerformancePage.swift in Sources */,
 				5EF28EC12A8990D90013ABBE /* VideoWallpaperViewModel.swift in Sources */,
-				AA1B2C3D4E5F600200ABCD01 /* PKGParser.swift in Sources */,
-				AA1B2C3D4E5F600200ABCD02 /* TEXParser.swift in Sources */,
-				AA1B2C3D4E5F600200ABCD03 /* SceneModels.swift in Sources */,
 				AA1B2C3D4E5F600200ABCD04 /* SceneWallpaperViewModel.swift in Sources */,
+				D20000000000000000000002 /* SceneProperty.swift in Sources */,
 				BB0000000000000000000003 /* ObjCExceptionCatcher.m in Sources */,
 				CC0000000000000000000001 /* WallpaperDirectory.swift in Sources */,
 				CC0000000000000000000003 /* ZipImporter.swift in Sources */,
@@ -535,7 +564,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
-				ONLY_ACTIVE_ARCH = NO;
+				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = macosx;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -607,13 +636,13 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_ENTITLEMENTS = "Open Wallpaper Engine/Open_Wallpaper_Engine.entitlements";
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "\"Open Wallpaper Engine/Preview Content\"";
-				DEVELOPMENT_TEAM = 35BWY46G6T;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -629,7 +658,6 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 0.8.1;
-				ONLY_ACTIVE_ARCH = NO;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.winddog.wallpaper-engine";
 				PRODUCT_MODULE_NAME = "$(PRODUCT_NAME:c99extidentifier)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -646,13 +674,13 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_ENTITLEMENTS = "Open Wallpaper Engine/Open_Wallpaper_Engine.entitlements";
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "\"Open Wallpaper Engine/Preview Content\"";
-				DEVELOPMENT_TEAM = 35BWY46G6T;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -699,6 +727,26 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		D10000000000000000000002 /* XCLocalSwiftPackageReference "SceneRuntime" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = SceneRuntime;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D10000000000000000000003 /* SceneRuntimeBridge */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D10000000000000000000002 /* XCLocalSwiftPackageReference "SceneRuntime" */;
+			productName = SceneRuntimeBridge;
+		};
+		D30000000000000000000002 /* SceneAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D10000000000000000000002 /* XCLocalSwiftPackageReference "SceneRuntime" */;
+			productName = SceneAudio;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 5EC47E6E2A2DB2E600120CCC /* Project object */;
 }

@@ -8,6 +8,7 @@
 import Cocoa
 import SwiftUI
 import AVKit
+import SceneAudio
 import WebKit
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -22,6 +23,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var contentViewModel = ContentViewModel()
     var wallpaperViewModel = WallpaperViewModel()
     var globalSettingsViewModel = GlobalSettingsViewModel()
+    lazy var sceneAudioOwnerCoordinator = MainActor.assumeIsolated {
+        SceneAudioOwnerCoordinator(mainScreenId: WallpaperViewModel.mainScreenId())
+    }
     
     var importOpenPanel: NSOpenPanel!
     
@@ -154,6 +158,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     
 // MARK: Set Wallpaper Windows - One per screen
     func setWallpaperWindows() {
+        updateSceneAudioMainScreen()
         for screen in NSScreen.screens {
             let screenId = WallpaperViewModel.screenId(for: screen)
             guard wallpaperViewModel.isScreenEnabled(screenId) else { continue }
@@ -179,6 +184,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Rebuild wallpaper windows without changing enabled state.
     func rebuildWallpaperWindows() {
+        updateSceneAudioMainScreen()
         for (_, window) in wallpaperWindows { window.close() }
         wallpaperWindows.removeAll()
         setWallpaperWindows()
@@ -187,11 +193,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Called when monitors connect/disconnect — auto-enables newly connected screens.
     @objc func screensChanged() {
+        updateSceneAudioMainScreen()
         let connectedIds = Set(NSScreen.screens.map { WallpaperViewModel.screenId(for: $0) })
         for id in connectedIds where !wallpaperViewModel.enabledScreens.contains(id) {
             wallpaperViewModel.enabledScreens.insert(id)
         }
         rebuildWallpaperWindows()
+    }
+
+    private func updateSceneAudioMainScreen() {
+        MainActor.assumeIsolated {
+            sceneAudioOwnerCoordinator.updateMainScreenId(
+                WallpaperViewModel.mainScreenId()
+            )
+        }
     }
     
     func windowWillClose(_ notification: Notification) {

@@ -72,25 +72,21 @@ Cmd+點擊選取多個桌布，右鍵選擇批次取消訂閱。
 場景桌布（Steam 創意工坊最常見的類型）原本完全未實作——僅顯示「Hello, World!」。
 
 **新實作包括：**
-- **PKG 解析器** — 讀取 Wallpaper Engine 的 PKGV 封存格式，提取 scene.json、模型、材質和紋理
-- **TEX 解析器** — 讀取 TEXV0005 紋理容器，從 TEXI/TEXB 區段提取嵌入的 JPEG/PNG 圖片
-- **Scene JSON 解碼器** — 解析 scene.json，靈活處理多態欄位（值可為純類型或 `{"script":..,"value":..}` 物件）
-- **SpriteKit 渲染器** — 將場景圖層渲染為 SKSpriteNode，正確處理定位、尺寸、透明度、色彩調整和混合模式
-- **預覽回退** — 無法提取紋理時回退至 preview.jpg/png/gif
-- **TEXI 格式偵測** — 快速識別並跳過無法解碼的 DXT 壓縮紋理
+- **原生 SceneRuntime** — 由單一 C++ runtime 處理 PKGV/TEXV、模型、材質、shader 與腳本
+- **OpenGL 渲染器** — 執行一致的 frame graph，無需 CPU readback 即可直接呈現在 `NSOpenGLView`
+- **Wallpaper Engine assets directory** — 使用一般設定中選取的官方 shader 與材質資源
+- **明確失敗** — 無效或尚未支援的場景會清除畫面並顯示錯誤，不會靜默保留舊畫面或預覽圖
 
 ### 匯入 — 修復資料夾匯入
 匯入面板現在可正確處理單一桌布資料夾和包含多個桌布的父目錄。
 
 ## 目前限制
 
-- **DXT 紋理** — 使用 DXT1/DXT5 壓縮紋理（TEXI 格式 4/7/8）的桌布無法渲染。這些是需要軟體解壓縮器或 Metal 渲染的 GPU 原生壓縮格式。此類桌布會回退至預覽圖。
-- **粒子效果** — 場景粒子系統（雨、雪、閃光）已解析但在渲染中停用，以避免視覺問題。
-- **音訊互動腳本** — Wallpaper Engine 基於 JavaScript 的音訊視覺化腳本不會執行。帶腳本的屬性回退至靜態 `value`。
-- **著色器效果** — 自定義 GLSL 著色器（泛光、模糊、色彩校正）未套用。
-- **相機視差** — 滑鼠追蹤相機移動未實作。
-- **動畫場景** — 精靈動畫和基於時間軸的物件動畫不支援。
-- **部分 JPEG 縮圖** — 少數 TEXB 格式 1 檔案包含 macOS 無法解碼的非標準 JPEG 資料。
+- **粒子相容性** — 確定性的 sprite 路徑已支援 box/sphere emitter、常用隨機 initializer、movement 與 alpha fade。Trail/rope、子系統與 control point、collision/boids、動態粒子紋理，以及非 `genericparticle` 的多 pass 材質仍未支援。
+- **音訊互動場景** — 已支援場景內建音效播放，但 macOS 系統音訊擷取與 Wallpaper Engine audio-input buffer 尚不可用，並會明確回報錯誤。
+- **文字相容性** — 已支援文字圖層渲染，但非零字元間距與進階行數、寬度、刪節號排版仍未支援。
+- **效果相容性** — 已支援圖片材質、passthrough 場景合成圖層、多 pass effect、framebuffer binding、copy/swap/clear、相機視差與自動投影。Compose、puppet mesh 及其他尚未建模的效果功能會明確失敗。
+- **使用者屬性** — Boolean、slider、combo、color 與文字輸入會即時套用，並依顯示器與 Scene 保存。Scene texture、檔案、資料夾與快捷鍵屬性目前可見但唯讀。
 
 ## 支援的桌布類型
 
@@ -98,9 +94,8 @@ Cmd+點擊選取多個桌布，右鍵選擇批次取消訂閱。
 |------|------|
 | 影片 (.mp4, .webm) | 正常運作（原始） |
 | 網頁 (HTML/WebGL) | 正常運作（已修補） |
-| 場景（靜態圖片） | 正常運作（新功能） |
-| 場景（粒子） | 部分支援（已停用） |
-| 場景（DXT 紋理） | 預覽回退 |
+| 場景（圖片、效果、腳本） | 部分支援 |
+| 場景（粒子、文字、音訊） | 部分支援 |
 | 應用程式 | 不支援 |
 
 ## 從原始碼建置
@@ -139,14 +134,12 @@ open "Open Wallpaper Engine.xcodeproj"
 **修改：**
 - `WebWallpaperView.swift` — WKWebView 檔案存取設定
 - `WallpaperView.swift` — 場景桌布分派
-- `SceneWallpaperView.swift` — 改寫為 SpriteKit NSViewRepresentable
+- `SceneWallpaperView.swift` — 使用原生 SceneRuntime 的 NSOpenGLView 實作
 - `ImportPanels.swift` — 資料夾匯入邏輯修復
 
 **新增：**
-- `Services/SceneParsers/PKGParser.swift` — PKGV 封存解析器
-- `Services/SceneParsers/TEXParser.swift` — TEXV 紋理解析器
-- `Services/SceneParsers/SceneModels.swift` — Scene JSON 資料模型
-- `Services/SceneWallpaperViewModel.swift` — 場景載入與 SpriteKit 渲染
+- `SceneRuntime/` — 套件解析、模型、腳本、frame graph、shader 與 OpenGL 執行管線
+- `Services/SceneWallpaperViewModel.swift` — 原生 SceneRuntime session 的 App 端擁有者
 - `Services/SteamCmdService.swift` — steamcmd 偵測、登入與創意工坊下載
 - `Services/WorkshopAPIService.swift` — Steam Web API 客戶端
 - `Services/WorkshopViewModel.swift` — 創意工坊瀏覽器狀態管理

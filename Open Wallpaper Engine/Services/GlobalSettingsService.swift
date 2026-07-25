@@ -96,6 +96,7 @@ struct GlobalSettings: Codable, Equatable {
     var videoFramework = GSVideoFramework.avkit
     
     // MARK: Advanced
+    var wallpaperEngineAssetsDirectory: String?
     var processPiority = GSProcessPiority.normal // Not putting in use
     var pauseOnVRAMExhausted = false // Not putting in use
     var restartAfterCrashing = false // Not putting in use

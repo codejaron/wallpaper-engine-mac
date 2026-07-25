@@ -6,6 +6,7 @@ xcuserdata/
 ## Build products
 build/
 DerivedData/
+SceneRuntime/.build/
 
 ## OS junk
 .DS_Store

@@ -184,14 +184,6 @@ struct WallpaperPreview: SubviewOfContentView {
                         }
                     }
                     VStack(spacing: 16) {
-                        ColorPicker(selection: .constant(.red), supportsOpacity: true) {
-                            HStack {
-                                Label("Scheme Color", systemImage: "paintpalette.fill")
-                                Spacer()
-                            }
-                        }
-                        .opacity(0.5)
-                        .disabled(true)
                         switch wallpaperViewModel.currentWallpaper.project.type.lowercased() {
                         case "video":
                             HStack {
@@ -210,6 +202,12 @@ struct WallpaperPreview: SubviewOfContentView {
                             }
                         case "web":
                             EmptyView()
+                        case "scene":
+                            ScenePropertyControls(
+                                wallpaperViewModel: wallpaperViewModel,
+                                screenId: wallpaperViewModel.selectedScreenId,
+                                wallpaper: wallpaperViewModel.currentWallpaper
+                            )
                         default:
                             EmptyView()
                         }

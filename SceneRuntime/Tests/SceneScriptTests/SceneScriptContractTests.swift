@@ -722,6 +722,9 @@ final class SceneScriptContractTests: XCTestCase {
             let applyCount = 0;
             let initialized = false;
             export function applyUserProperties(changed) {
+                if (!initialized) {
+                    throw new Error('project properties ran before init');
+                }
                 ++applyCount;
                 if (engine.userProperties === scriptProperties) {
                     throw new Error('project properties aliased local script properties');
@@ -737,7 +740,7 @@ final class SceneScriptContractTests: XCTestCase {
                 }
             }
             export function init(value) {
-                if (moduleSpeed !== 2 || applyCount !== 1) {
+                if (moduleSpeed !== 2 || applyCount !== 0) {
                     throw new Error('project properties were not visible before module/init');
                 }
                 initialized = true;
@@ -772,6 +775,44 @@ final class SceneScriptContractTests: XCTestCase {
             try evaluate(instance, runtime: 1, frameTime: 0.1) as? String,
             "4:true:2:0.1"
         )
+    }
+
+    func testInitialUserPropertiesRunAfterInitCanUseInitializedVector() throws {
+        let instance = try makeInstance(
+            source: """
+            let initialOrigin;
+            let resolvedOrigin;
+            export function init(value) {
+                if (!(engine.userProperties.offset instanceof Vec3)) {
+                    throw new Error('project properties were unavailable during init');
+                }
+                initialOrigin = value;
+                return value;
+            }
+            export function applyUserProperties(changed) {
+                if (changed.hasOwnProperty('offset')) {
+                    resolvedOrigin = initialOrigin.add(changed.offset);
+                }
+            }
+            export function update() {
+                return resolvedOrigin;
+            }
+            """,
+            initialJSON: #"{"x":1,"y":2,"z":3}"#
+        )
+        defer { we_scene_script_test_destroy(instance) }
+        try setUserProperties(
+            instance,
+            json: #"{"offset":{"x":4,"y":5,"z":6}}"#
+        )
+
+        let result = try XCTUnwrap(
+            try evaluate(instance, runtime: 0, frameTime: 0)
+                as? [String: Any]
+        )
+        XCTAssertEqual(result["x"] as? Double, 5)
+        XCTAssertEqual(result["y"] as? Double, 7)
+        XCTAssertEqual(result["z"] as? Double, 9)
     }
 
     func testApplyUserPropertiesNeedsNoDeclarationsAndReceivesSparseChangesBeforeUpdate() throws {
@@ -934,6 +975,45 @@ final class SceneScriptContractTests: XCTestCase {
         XCTAssertEqual(
             try evaluate(consumer, runtime: 1, frameTime: 0.016) as? String,
             "realm:1"
+        )
+    }
+
+    func testSharedAssignmentReplacesRuntimeWideValueAcrossContexts() throws {
+        let runtime = try makeRuntime()
+        defer { we_scene_script_test_runtime_destroy(runtime) }
+
+        func replaceSharedValue() throws {
+            let owner = try makeInstance(
+                runtime: runtime,
+                source: """
+                shared = { counter: 40 };
+                export function update() {
+                    return ++shared.counter;
+                }
+                """,
+                initialJSON: "0"
+            )
+            defer { we_scene_script_test_destroy(owner) }
+            XCTAssertEqual(
+                try evaluate(owner, runtime: 0, frameTime: 0) as? Int,
+                41
+            )
+        }
+        try replaceSharedValue()
+
+        let consumer = try makeInstance(
+            runtime: runtime,
+            source: """
+            export function update() {
+                return shared.counter;
+            }
+            """,
+            initialJSON: "0"
+        )
+        defer { we_scene_script_test_destroy(consumer) }
+        XCTAssertEqual(
+            try evaluate(consumer, runtime: 1, frameTime: 0.016) as? Int,
+            41
         )
     }
 

@@ -1648,9 +1648,10 @@ struct ScriptRuntime::Impl {
         }, this);
 
         // `shared` is deliberately owned by a context that lives for the
-        // whole ScriptRuntime. JS values are runtime-scoped in QuickJS, so a
-        // duplicated reference can be installed in every instance context
-        // without cloning the object or weakening identity semantics.
+        // whole ScriptRuntime. JS values are runtime-scoped in QuickJS, so
+        // every instance can expose this single value through an accessor.
+        // Reassigning the global then replaces the runtime-owned reference
+        // instead of creating a realm-local copy.
         sharedContext = JS_NewContext(runtime);
         if (!sharedContext) {
             JS_FreeRuntime(runtime);
@@ -1759,6 +1760,46 @@ struct ScriptInstance::Impl {
             JS_ThrowInternalError(context, "SceneScript context has no instance");
         }
         return self;
+    }
+
+    static JSValue getSharedValue(
+        JSContext* context,
+        JSValueConst,
+        int,
+        JSValueConst*
+    ) {
+        Impl* self = fromContext(context);
+        if (self == nullptr) return JS_EXCEPTION;
+        return JS_DupValueRT(
+            self->runtime->runtime,
+            self->runtime->shared
+        );
+    }
+
+    static JSValue setSharedValue(
+        JSContext* context,
+        JSValueConst,
+        int argc,
+        JSValueConst* argv
+    ) {
+        Impl* self = fromContext(context);
+        if (self == nullptr) return JS_EXCEPTION;
+        if (argc != 1) {
+            return JS_ThrowTypeError(
+                context,
+                "SceneScript shared setter requires one value"
+            );
+        }
+        JSValue replacement = JS_DupValueRT(
+            self->runtime->runtime,
+            argv[0]
+        );
+        JS_FreeValue(
+            self->runtime->sharedContext,
+            self->runtime->shared
+        );
+        self->runtime->shared = replacement;
+        return JS_UNDEFINED;
     }
 
     static void destroyLayerPropertyClosure(void* opaque) {
@@ -3774,8 +3815,13 @@ struct ScriptInstance::Impl {
             );
             setProperty(ctx, global.value, "engine", engine);
 
-            JSValue sharedValue = JS_DupValueRT(runtime->runtime, runtime->shared);
-            defineProperty(ctx, global.value, "shared", sharedValue, JS_PROP_ENUMERABLE);
+            defineAccessor(
+                ctx,
+                global.value,
+                "shared",
+                JS_NewCFunction(ctx, getSharedValue, "get shared", 0),
+                JS_NewCFunction(ctx, setSharedValue, "set shared", 1)
+            );
 
             JSValue console = JS_NewObject(ctx);
             setProperty(ctx, console, "log", JS_NewCFunction(ctx, consoleLog, "log", 1));
@@ -4870,10 +4916,6 @@ struct ScriptInstance::Impl {
                 JSOwner nameSpace(ctx, JS_GetModuleNamespace(ctx, module));
                 init = JS_GetPropertyStr(ctx, nameSpace.value, "init");
                 update = JS_GetPropertyStr(ctx, nameSpace.value, "update");
-                // The initial user-property event is delivered after module
-                // evaluation (so declarations exist) and before init/update,
-                // matching Wallpaper Engine's lifecycle contract.
-                dispatchUserProperties();
                 if (!JS_IsUndefined(init)) {
                     if (!JS_IsFunction(ctx, init)) throw ScriptError(ScriptErrorCode::invalidResultType, "Module export init must be a function");
                     current = invokeInit(init, current);
@@ -4888,6 +4930,13 @@ struct ScriptInstance::Impl {
                 } else if (layerTextDirty) {
                     current = currentLayerText();
                 }
+                // The complete project-property snapshot is already visible
+                // through engine.userProperties during module evaluation and
+                // init. Dispatch its initial change event only after init has
+                // established module state, matching Wallpaper Engine's
+                // object lifecycle. Later frames remain sparse and run before
+                // update below.
+                dispatchUserProperties();
                 hasUpdate = !JS_IsUndefined(update) && JS_IsFunction(ctx, update);
                 started = true;
             } else {

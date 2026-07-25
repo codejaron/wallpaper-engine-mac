@@ -68,7 +68,6 @@ struct GlobalSettings: Codable, Equatable {
     var otherApplicationFocused = GSPlayback.keepRunning
     var otherApplicationFullscreen = GSPlayback.keepRunning
     var otherApplicationPlayingAudio = GSPlayback.keepRunning
-    var displayAsleep = GSPlayback.keepRunning
     var laptopOnBattery = GSPlayback.keepRunning
     
     // MARK: Quality
@@ -119,7 +118,7 @@ struct GlobalSettings: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case otherApplicationFocused, otherApplicationFullscreen,
-             otherApplicationPlayingAudio, displayAsleep, laptopOnBattery
+             otherApplicationPlayingAudio, laptopOnBattery
         case antiAliasing, postProcessing, textureResolution, reflections, fps
         case scenePresentationScaling, sceneSpanAcrossScreens
         case autoStart, safeMode, language
@@ -136,7 +135,6 @@ struct GlobalSettings: Codable, Equatable {
         otherApplicationFocused = .keepRunning
         otherApplicationFullscreen = .keepRunning
         otherApplicationPlayingAudio = .keepRunning
-        displayAsleep = .keepRunning
         laptopOnBattery = .keepRunning
         antiAliasing = .msaa_x2
         postProcessing = .disabled
@@ -175,9 +173,6 @@ struct GlobalSettings: Codable, Equatable {
         ) ?? .keepRunning
         otherApplicationPlayingAudio = try container.decodeIfPresent(
             GSPlayback.self, forKey: .otherApplicationPlayingAudio
-        ) ?? .keepRunning
-        displayAsleep = try container.decodeIfPresent(
-            GSPlayback.self, forKey: .displayAsleep
         ) ?? .keepRunning
         laptopOnBattery = try container.decodeIfPresent(
             GSPlayback.self, forKey: .laptopOnBattery
@@ -245,7 +240,6 @@ struct GlobalSettings: Codable, Equatable {
             otherApplicationFocused: otherApplicationFocused,
             otherApplicationFullscreen: otherApplicationFullscreen,
             otherApplicationPlayingAudio: otherApplicationPlayingAudio,
-            displayAsleep: displayAsleep,
             laptopOnBattery: laptopOnBattery
         )
     }

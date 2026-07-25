@@ -30,11 +30,9 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
 
     private weak var attachedWebView: WKWebView?
     private var policyPaused = false
-    private var systemSleeping = false
     private var appliedPaused: Bool?
     private var appliedPolicyMuted: Bool?
     private var appliedPolicyVolume: Float?
-    private var appliedSystemSleeping: Bool?
     private var javascriptIssues: [String: String] = [:]
     private var cancellables = Set<AnyCancellable>()
     
@@ -43,8 +41,6 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
         self.currentWallpaper = wallpaper
         super.init()
         policyPaused = AppDelegate.shared.wallpaperViewModel.effectivePlayRate == 0
-        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(systemWillSleep(_:)), name: NSWorkspace.screensDidSleepNotification, object: nil)
-        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(systemDidWake(_:)), name: NSWorkspace.screensDidWakeNotification, object: nil)
 
         let wallpaperViewModel = AppDelegate.shared.wallpaperViewModel
         wallpaperViewModel.$effectivePlayRate
@@ -73,7 +69,6 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
     }
     
     deinit {
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
         cancellables.removeAll()
     }
 
@@ -83,7 +78,6 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
         appliedPaused = nil
         appliedPolicyMuted = nil
         appliedPolicyVolume = nil
-        appliedSystemSleeping = nil
         reconcileMediaPolicy(force: true)
         applyUserProperties()
     }
@@ -102,7 +96,6 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
         appliedPaused = nil
         appliedPolicyMuted = nil
         appliedPolicyVolume = nil
-        appliedSystemSleeping = nil
     }
 
     private func setPolicyPaused(_ paused: Bool) {
@@ -125,18 +118,14 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
         let muted = shouldMuteAudio
         let volume = min(max(AppDelegate.shared.wallpaperViewModel.effectivePlayVolume, 0), 1)
         let paused = policyPaused
-        let sleeping = systemSleeping
         guard force || appliedPaused != paused ||
                 appliedPolicyMuted != muted ||
-                appliedPolicyVolume != volume ||
-                appliedSystemSleeping != sleeping else { return }
+                appliedPolicyVolume != volume else { return }
         appliedPaused = paused
         appliedPolicyMuted = muted
         appliedPolicyVolume = volume
-        appliedSystemSleeping = sleeping
         applyMediaPolicy(
             policyPaused: paused,
-            systemSleeping: sleeping,
             muted: muted,
             volume: volume,
             in: webView
@@ -153,7 +142,6 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
         appliedPaused = nil
         appliedPolicyMuted = nil
         appliedPolicyVolume = nil
-        appliedSystemSleeping = nil
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -163,7 +151,6 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
         appliedPaused = nil
         appliedPolicyMuted = nil
         appliedPolicyVolume = nil
-        appliedSystemSleeping = nil
         let javascriptStyle = "var css = '*{-webkit-touch-callout:none;-webkit-user-select:none}'; var head = document.head || document.getElementsByTagName('head')[0]; var style = document.createElement('style'); style.type = 'text/css'; style.appendChild(document.createTextNode(css)); head.appendChild(style);"
         evaluatePolicyJavaScript(
             javascriptStyle,
@@ -189,38 +176,23 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
         }
     }
     
-    @objc func systemWillSleep(_ notification: Notification) {
-        guard !systemSleeping else { return }
-        systemSleeping = true
-        reconcileMediaPolicy()
-    }
-        
-    @objc func systemDidWake(_ notification: Notification) {
-        guard systemSleeping else { return }
-        systemSleeping = false
-        reconcileMediaPolicy()
-    }
-
     private func applyMediaPolicy(
         policyPaused: Bool,
-        systemSleeping: Bool,
         muted: Bool,
         volume: Float,
         in webView: WKWebView
     ) {
         let paused = policyPaused ? "true" : "false"
-        let sleeping = systemSleeping ? "true" : "false"
         let mute = muted ? "true" : "false"
         let normalizedVolume = String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), volume)
         evaluatePolicyAsyncJavaScript(
-            "if (typeof window.__weSetMediaPolicy !== 'function') { throw new Error('media policy controller is not installed'); } await window.__weSetMediaPolicy({policyPaused:\(paused),systemSleeping:\(sleeping),muted:\(mute),volume:\(normalizedVolume)});",
+            "if (typeof window.__weSetMediaPolicy !== 'function') { throw new Error('media policy controller is not installed'); } await window.__weSetMediaPolicy({policyPaused:\(paused),muted:\(mute),volume:\(normalizedVolume)});",
             operation: "apply media policy",
             in: webView,
             onFailure: { [weak self] in
                 self?.appliedPaused = nil
                 self?.appliedPolicyMuted = nil
                 self?.appliedPolicyVolume = nil
-                self?.appliedSystemSleeping = nil
             }
         )
     }
@@ -342,9 +314,9 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
 
     /// Injected at document start so policy covers media elements created by
     /// wallpaper scripts after navigation. The controller keeps authored
-    /// volume/mute and pause intent separate from host policy, allowing an
-    /// overlapping sleep + policy pause to restore only media that was
-    /// actually playing before the first reason became active.
+    /// volume/mute and pause intent separate from host policy, allowing a
+    /// host pause to restore only media that was playing before the policy
+    /// became active.
     static func makeMediaPolicyUserScript() -> WKUserScript {
         WKUserScript(source: Self.mediaPolicyJavaScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
     }
@@ -400,12 +372,12 @@ window.__weWallpaperPropertyBridge=bridge;
     private static let mediaPolicyJavaScript = #"""
 (function(){
 if(window.__weMediaPolicyController){return;}
-const state={policyPaused:false,systemSleeping:false,muted:false,volume:1};
+const state={policyPaused:false,muted:false,volume:1};
 const controller={state:state,lastError:null};
 const knownFrames=new WeakSet();
 const clamp=function(v){v=Number(v);return Number.isFinite(v)?Math.max(0,Math.min(1,v)):0;};
-const shouldPause=function(){return state.policyPaused||state.systemSleeping;};
-const snapshot=function(){return {policyPaused:state.policyPaused,systemSleeping:state.systemSleeping,muted:state.muted,volume:state.volume};};
+const shouldPause=function(){return state.policyPaused;};
+const snapshot=function(){return {policyPaused:state.policyPaused,muted:state.muted,volume:state.volume};};
 function install(element){
   if(!element||element.__weMediaState)return;
   const authored={volume:clamp(element.volume),muted:!!element.muted,wasPlaying:false,applying:false,lastFactor:1};
@@ -488,7 +460,6 @@ controller.apply=function(){return Promise.all(all().map(apply));};
 function setState(next,propagate){
   if(!next||typeof next!=='object')throw new Error('invalid media policy state');
   state.policyPaused=!!next.policyPaused;
-  state.systemSleeping=!!next.systemSleeping;
   state.muted=!!next.muted;
   state.volume=clamp(next.volume);
   controller.lastError=null;
@@ -505,7 +476,7 @@ window.addEventListener('message',function(event){
   try{setState(data.state,true).catch(report);}catch(error){report(error);}
 });
 window.__weMediaPolicyController=controller;
-setState({policyPaused:false,systemSleeping:false,muted:false,volume:1},false).catch(report);
+setState({policyPaused:false,muted:false,volume:1},false).catch(report);
 })()
 """#
 }

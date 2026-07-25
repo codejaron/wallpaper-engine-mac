@@ -30,7 +30,6 @@ struct PlaybackPolicyConfiguration: Equatable, Sendable {
     var otherApplicationFocused: GSPlayback = .keepRunning
     var otherApplicationFullscreen: GSPlayback = .keepRunning
     var otherApplicationPlayingAudio: GSPlayback = .keepRunning
-    var displayAsleep: GSPlayback = .keepRunning
     var laptopOnBattery: GSPlayback = .keepRunning
 }
 
@@ -90,8 +89,10 @@ struct PlaybackPolicyTransition: Equatable, Sendable {
     var changed: Bool { previous != current }
 }
 
-/// Pure reducer for playback policy. If multiple conditions are active, the
-/// most restrictive configured action wins: stop > pause > mute > keepRunning.
+/// Pure reducer for playback policy. Display sleep is a lifecycle suspension,
+/// not a configurable playback rule, so it always contributes `pause`. If
+/// multiple conditions are active, the most restrictive action wins:
+/// stop > pause > mute > keepRunning.
 enum PlaybackPolicyReducer {
     @discardableResult
     static func reduce(
@@ -134,8 +135,7 @@ enum PlaybackPolicyReducer {
                 ? configuration.otherApplicationFullscreen : .keepRunning,
             conditions.otherApplicationPlayingAudio
                 ? configuration.otherApplicationPlayingAudio : .keepRunning,
-            conditions.displayAsleep
-                ? configuration.displayAsleep : .keepRunning,
+            conditions.displayAsleep ? .pause : .keepRunning,
             conditions.laptopOnBattery
                 ? configuration.laptopOnBattery : .keepRunning,
         ]

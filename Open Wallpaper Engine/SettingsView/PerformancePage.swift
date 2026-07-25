@@ -38,12 +38,6 @@ struct PerformancePage: SettingsPage {
                     Text("Pause").tag(GSPlayback.pause)
                 }
                 
-                Picker("Display asleep", selection: $viewModel.settings.displayAsleep) {
-                    Text("Keep Running").tag(GSPlayback.keepRunning)
-                    Text("Pause").tag(GSPlayback.pause)
-                    Text("Stop (free memory)").tag(GSPlayback.stop)
-                }
-                
                 Picker("Laptop on battery", selection: $viewModel.settings.laptopOnBattery) {
                     Text("Keep Running").tag(GSPlayback.keepRunning)
                     Text("Pause").tag(GSPlayback.pause)

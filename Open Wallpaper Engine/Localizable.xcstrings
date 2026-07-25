@@ -662,16 +662,6 @@
         }
       }
     },
-    "Display asleep" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "显示器休眠"
-          }
-        }
-      }
-    },
     "Display Settings" : {
 
     },

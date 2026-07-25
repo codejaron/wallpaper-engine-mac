@@ -41,17 +41,15 @@ class VideoWallpaperViewModel: ObservableObject {
 
     var player = AVPlayer()
     private var cancellables = Set<AnyCancellable>()
-    private var isSystemSleeping = false
 
     init(wallpaper currentWallpaper: WEWallpaper, screenId: String) {
         self.screenId = screenId
         self.currentWallpaper = currentWallpaper
         self.player = AVPlayer(url: currentWallpaper.wallpaperDirectory.appending(path: currentWallpaper.project.file))
         NotificationCenter.default.addObserver(self, selector: #selector(playerDidFinishPlaying(_:)), name: .AVPlayerItemDidPlayToEndTime, object: self.player.currentItem)
-        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(systemWillSleep(_:)), name: NSWorkspace.screensDidSleepNotification, object: nil)
-        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(systemDidWake(_:)), name: NSWorkspace.didWakeNotification, object: nil)
 
-        // Directly observe playRate/playVolume changes from the shared WallpaperViewModel
+        // Host conditions and user intent are already combined by the shared
+        // WallpaperViewModel. This adapter must not create a second sleep state.
         let wvm = AppDelegate.shared.wallpaperViewModel
         wvm.$effectivePlayRate
             .receive(on: DispatchQueue.main)
@@ -80,7 +78,6 @@ class VideoWallpaperViewModel: ObservableObject {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     @objc private func playerDidFinishPlaying(_ notification: Notification) {
@@ -94,18 +91,8 @@ class VideoWallpaperViewModel: ObservableObject {
         applyEffectiveRate()
     }
 
-    @objc func systemWillSleep(_ notification: Notification) {
-        isSystemSleeping = true
-        applyEffectiveRate()
-    }
-
-    @objc func systemDidWake(_ notification: Notification) {
-        isSystemSleeping = false
-        applyEffectiveRate()
-    }
-
     private func applyEffectiveRate() {
-        player.rate = isSystemSleeping ? 0 : playRate
+        player.rate = playRate
     }
 
     private func applyEffectiveVolume() {

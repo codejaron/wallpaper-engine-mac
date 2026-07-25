@@ -51,7 +51,7 @@ final class PlaybackConditionMonitor {
                 MainActor.assumeIsolated { self?.setDisplayAsleep(true) }
             },
             workspaceCenter.addObserver(
-                forName: NSWorkspace.didWakeNotification,
+                forName: NSWorkspace.screensDidWakeNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in

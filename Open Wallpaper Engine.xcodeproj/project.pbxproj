@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		5EC47E912A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EC47E902A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift */; };
 		FA1000000000000000000001 /* SteamCmdServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000002 /* SteamCmdServiceTests.swift */; };
+		F70000000000000000000001 /* PlaybackPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000000000000000000002 /* PlaybackPolicyTests.swift */; };
 		5E0700E62A859FAD00ADFE2E /* WallpaperNotFound.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 5E0700E52A859FAD00ADFE2E /* WallpaperNotFound.mp4 */; };
 		5E2F1E892A57DF2D0081D69D /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 5E2F1E882A57DF2D0081D69D /* Localizable.xcstrings */; };
 		5E32ABFE2A4D595D00A0EEEC /* FilterResults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E32ABFD2A4D595D00A0EEEC /* FilterResults.swift */; };
@@ -130,6 +131,7 @@
 		5EC47E8C2A2DB2E700120CCC /* Open Wallpaper EngineTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Open Wallpaper EngineTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		5EC47E902A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopFilterSelectionTests.swift; sourceTree = "<group>"; };
 		FA1000000000000000000002 /* SteamCmdServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteamCmdServiceTests.swift; sourceTree = "<group>"; };
+		F70000000000000000000002 /* PlaybackPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackPolicyTests.swift; sourceTree = "<group>"; };
 		5EC47E7D2A2DB2E700120CCC /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5EC47E802A2DB2E700120CCC /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		5EC47E872A2DB2E700120CCC /* Open_Wallpaper_Engine.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Open_Wallpaper_Engine.entitlements; sourceTree = "<group>"; };
@@ -381,6 +383,7 @@
 		5EC47E8F2A2DB2E700120CCC /* Open Wallpaper EngineTests */ = {
 			isa = PBXGroup;
 			children = (
+				F70000000000000000000002 /* PlaybackPolicyTests.swift */,
 				FA1000000000000000000002 /* SteamCmdServiceTests.swift */,
 				5EC47E902A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift */,
 			);
@@ -534,6 +537,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F70000000000000000000001 /* PlaybackPolicyTests.swift in Sources */,
 				FA1000000000000000000001 /* SteamCmdServiceTests.swift in Sources */,
 				5EC47E912A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift in Sources */,
 			);

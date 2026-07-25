@@ -305,15 +305,16 @@ void TextCoverageRenderer::drawPrepared(
 
     const float width = float(text.width);
     const float height = float(text.height);
-    // CoreGraphics coverage is top-down. OpenGL treats the first uploaded row
-    // as v=0, so the local bottom edge samples v=1 to preserve glyph orientation.
+    // CoreGraphics coverage is top-down, matching every other Wallpaper Engine
+    // source texture. Keep v=0 on the local bottom edge; presentation performs
+    // the one global vertical correction for the completed scene.
     const Vertex vertices[] = {
-        {0, 0, 0, 1},
-        {0, height, 0, 0},
-        {width, height, 1, 0},
-        {0, 0, 0, 1},
-        {width, height, 1, 0},
-        {width, 0, 1, 1},
+        {0, 0, 0, 0},
+        {0, height, 0, 1},
+        {width, height, 1, 1},
+        {0, 0, 0, 0},
+        {width, height, 1, 1},
+        {width, 0, 1, 0},
     };
     glBindFramebuffer(GL_FRAMEBUFFER, destination.framebuffer);
     glViewport(0, 0, destination.width, destination.height);

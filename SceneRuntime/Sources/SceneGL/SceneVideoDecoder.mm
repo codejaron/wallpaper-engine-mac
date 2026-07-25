@@ -54,7 +54,8 @@ bool copyCGImage(CGImageRef image, Decoder& decoder) {
     CGContextRelease(context);
 
     // Convert premultiplied RGBA to the straight-alpha bytes expected by the
-    // OpenGL upload path and flip the top-down ImageIO result for GL's v=0.
+    // OpenGL upload path. Keep CoreGraphics' top-down rows unchanged so video,
+    // TEX and embedded images share the same scene orientation contract.
     for (std::size_t offset = 0; offset < decoder.pixels.size(); offset += 4) {
         const std::uint32_t alpha = decoder.pixels[offset + 3];
         if (alpha == 0) {
@@ -68,16 +69,6 @@ bool copyCGImage(CGImageRef image, Decoder& decoder) {
                     std::min<std::uint32_t>(255, (value * 255 + alpha / 2) / alpha)
                 );
             }
-        }
-    }
-    const std::size_t rowBytes = width * 4;
-    for (std::size_t top = 0; top < height / 2; ++top) {
-        const std::size_t bottom = height - top - 1;
-        for (std::size_t byte = 0; byte < rowBytes; ++byte) {
-            std::swap(
-                decoder.pixels[top * rowBytes + byte],
-                decoder.pixels[bottom * rowBytes + byte]
-            );
         }
     }
     decoder.width = static_cast<std::uint32_t>(width);

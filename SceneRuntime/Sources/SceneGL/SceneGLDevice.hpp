@@ -54,6 +54,15 @@ struct FramebufferResource final {
     PixelFormat format = PixelFormat::rgba8;
 };
 
+// Device readback always returns tightly packed top-down rows. Ordinary GL
+// framebuffers store logical bottom-left content at their first physical row,
+// while Wallpaper Engine deliberately keeps its top-left row there until the
+// final presentation boundary.
+enum class ReadbackSourceOrientation {
+    openGLBottomLeft,
+    wallpaperEngineTopLeft,
+};
+
 struct AssetTextureResource final {
     AssetTextureResource() = default;
     ~AssetTextureResource();
@@ -138,7 +147,9 @@ public:
 
         void readRGBA8(
             const FramebufferResource& framebuffer,
-            std::span<std::uint8_t> output
+            std::span<std::uint8_t> output,
+            ReadbackSourceOrientation sourceOrientation =
+                ReadbackSourceOrientation::openGLBottomLeft
         );
 
         void checkError(ErrorCode code, const char* operation) const;

@@ -1,6 +1,7 @@
 #include <SceneGLTestSupport/SceneGLTestSupport.h>
 #include <SceneGL/FramePlanExecutor.hpp>
 #include "../SceneGL/SceneGLDevice.hpp"
+#include "../SceneGL/SceneGLPresentation.hpp"
 #include "../SceneGL/SceneVideoDecoder.hpp"
 #include "../SceneGL/TextCoverageRenderer.hpp"
 #include <algorithm>
@@ -147,11 +148,20 @@ extern "C" int we_scene_gl_test_blit_presentation_slice(
 
         glBindFramebuffer(GL_FRAMEBUFFER, source.framebuffer);
         glEnable(GL_SCISSOR_TEST);
-        glScissor(0, 0, 2, 4);
+        // Scene output keeps Wallpaper Engine's top-down rows at the bottom of
+        // its OpenGL framebuffer. These four quadrants therefore represent a
+        // user-visible red/green top row and blue/yellow bottom row.
+        glScissor(0, 0, 2, 2);
         glClearColor(1, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
-        glScissor(2, 0, 2, 4);
+        glScissor(2, 0, 2, 2);
         glClearColor(0, 1, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glScissor(0, 2, 2, 2);
+        glClearColor(0, 0, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glScissor(2, 2, 2, 2);
+        glClearColor(1, 1, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
         glDisable(GL_SCISSOR_TEST);
 
@@ -163,24 +173,11 @@ extern "C" int we_scene_gl_test_blit_presentation_slice(
             4, 4, nativeViewport, mode
         ).slice();
         if (slice.hasContent) {
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, source.framebuffer);
-            glReadBuffer(GL_COLOR_ATTACHMENT0);
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, destination.framebuffer);
-            glDrawBuffer(GL_COLOR_ATTACHMENT0);
-            glBlitFramebuffer(
-                static_cast<GLint>(slice.source.x),
-                static_cast<GLint>(slice.source.y),
-                static_cast<GLint>(slice.source.x + slice.source.width),
-                static_cast<GLint>(slice.source.y + slice.source.height),
-                static_cast<GLint>(slice.destination.x),
-                static_cast<GLint>(slice.destination.y),
-                static_cast<GLint>(
-                    slice.destination.x + slice.destination.width
-                ),
-                static_cast<GLint>(
-                    slice.destination.y + slice.destination.height
-                ),
-                GL_COLOR_BUFFER_BIT,
+            gl::blitWallpaperEngineOutput(
+                source,
+                destination.framebuffer,
+                GL_COLOR_ATTACHMENT0,
+                slice,
                 GL_NEAREST
             );
         }

@@ -430,19 +430,9 @@ DecodedImage decodeEmbeddedImage(
         }
     }
 
-    // ImageIO returns rows in top-down image order, while OpenGL texture
-    // coordinates address the first uploaded row at v=0 (the bottom edge).
-    // Flip decoded file-backed images once at the upload boundary so every
-    // shader can use Wallpaper Engine's normal texture-coordinate convention.
-    const std::size_t rowBytes = width * 4;
-    for (std::size_t top = 0; top < height / 2; ++top) {
-        const std::size_t bottom = height - top - 1;
-        std::swap_ranges(
-            result.rgba8.begin() + static_cast<std::ptrdiff_t>(top * rowBytes),
-            result.rgba8.begin() + static_cast<std::ptrdiff_t>((top + 1) * rowBytes),
-            result.rgba8.begin() + static_cast<std::ptrdiff_t>(bottom * rowBytes)
-        );
-    }
+    // Keep ImageIO's top-down rows unchanged. Raw/compressed TEX payloads and
+    // Linux's stb path are uploaded without per-resource orientation fixes;
+    // the scene is flipped exactly once when it leaves the final framebuffer.
     return result;
 }
 
@@ -1206,7 +1196,8 @@ void Device::Session::destroyTexture(GLuint& texture) noexcept {
 
 void Device::Session::readRGBA8(
     const FramebufferResource& framebuffer,
-    std::span<std::uint8_t> output
+    std::span<std::uint8_t> output,
+    ReadbackSourceOrientation sourceOrientation
 ) {
     validateResourceDimensions(
         framebuffer.width,
@@ -1243,6 +1234,14 @@ void Device::Session::readRGBA8(
         output.data()
     );
     checkError(ErrorCode::readback, "Reading an offscreen framebuffer");
+
+    if (sourceOrientation ==
+        ReadbackSourceOrientation::wallpaperEngineTopLeft) {
+        // Wallpaper Engine's first logical (top) row already lives at the
+        // framebuffer's first OpenGL (bottom) row, which is also the first row
+        // returned by glReadPixels.
+        return;
+    }
 
     const std::size_t rowBytes = static_cast<std::size_t>(framebuffer.width) * 4;
     for (std::size_t topRow = 0; topRow < framebuffer.height / 2; ++topRow) {

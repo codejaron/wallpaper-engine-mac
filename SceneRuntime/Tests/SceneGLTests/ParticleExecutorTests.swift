@@ -156,6 +156,40 @@ final class ParticleExecutorTests: XCTestCase {
         )
     }
 
+    func testTextAnglesFollowLinuxNoRotationContract() throws {
+        let unrotated = try loadPipeline(
+            fixture: makeFixture(
+                includeText: true,
+                particleInstantaneousCount: 0,
+                textValue: "L",
+                textOrigin: "8 4 0"
+            ),
+            context: nil
+        )
+        let authoredRotation = try loadPipeline(
+            fixture: makeFixture(
+                includeText: true,
+                particleInstantaneousCount: 0,
+                textValue: "L",
+                textOrigin: "8 4 0",
+                textAngles: "0 0 3.141592653589793"
+            ),
+            context: nil
+        )
+        defer {
+            destroy(authoredRotation)
+            destroy(unrotated)
+        }
+
+        try render(unrotated.executor, time: 1, delta: 0)
+        try render(authoredRotation.executor, time: 1, delta: 0)
+        XCTAssertEqual(
+            try readPixels(authoredRotation.executor),
+            try readPixels(unrotated.executor),
+            "Linux CText places text from origin and scale; authored angles must not rotate a date/text layer independently"
+        )
+    }
+
     func testNonAtlasParticleRenderVarCarriesRealTextureAspectRatio() throws {
         let fixture = try makeFixture(
             includeText: false,
@@ -1063,6 +1097,52 @@ final class ParticleExecutorTests: XCTestCase {
         )
     }
 
+    func testParticleOriginUsesTopDownSceneCoordinates() throws {
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleOrigin: "4 2 0",
+                particleVertexShaderSource: minimalParticleVertexShader,
+                particleFragmentShaderSource: constantGreenParticleFragmentShader
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 1.0 / 120.0)
+        try assertNoExecutionIssues(loaded.executor)
+        let pixels = try readPixels(loaded.executor)
+        let rows = greenRows(pixels, width: 16)
+        XCTAssertFalse(rows.isEmpty)
+        XCTAssertTrue(
+            rows.allSatisfy { $0 < 4 },
+            "A particle authored near the scene top must remain in the user-visible top half; rows=\(rows)"
+        )
+    }
+
+    func testParticleVelocityUsesTopDownSceneCoordinates() throws {
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleOrigin: "8 4 0",
+                particleVelocity: "0 -120 0",
+                particleVertexShaderSource: minimalParticleVertexShader,
+                particleFragmentShaderSource: constantGreenParticleFragmentShader
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 1.0 / 60.0)
+        try assertNoExecutionIssues(loaded.executor)
+        let rows = greenRows(try readPixels(loaded.executor), width: 16)
+        XCTAssertFalse(rows.isEmpty)
+        XCTAssertTrue(
+            rows.allSatisfy { $0 < 4 },
+            "Negative authored Y velocity must move a particle upward after presentation; rows=\(rows)"
+        )
+    }
+
     private func loadPipeline(
         includeText: Bool,
         context: CGLContextObj? = nil
@@ -1232,6 +1312,15 @@ final class ParticleExecutorTests: XCTestCase {
         })
     }
 
+    private func greenRows(_ pixels: [UInt8], width: Int) -> Set<Int> {
+        Set(stride(from: 0, to: pixels.count, by: 4).compactMap { offset in
+            let red = Int(pixels[offset])
+            let green = Int(pixels[offset + 1])
+            return green > red + 50 && green > 80
+                ? (offset / 4) / width : nil
+        })
+    }
+
     private func hasPixel(_ expected: [UInt8], in pixels: [UInt8]) -> Bool {
         precondition(expected.count == 4)
         return stride(from: 0, to: pixels.count, by: 4).contains { offset in
@@ -1291,6 +1380,9 @@ final class ParticleExecutorTests: XCTestCase {
         particleVertexShaderSource: String? = nil,
         particleFragmentShaderSource: String? = nil,
         particleInstantaneousCount: Int = 1,
+        textValue: String = "I",
+        textOrigin: String = "5 0 0",
+        textAngles: String? = nil,
         includeDiscardImageBeforeParticle: Bool = false,
         clearColor: String = "0 0 0 0",
         cameraNearPlane: Double? = nil,
@@ -1337,7 +1429,7 @@ final class ParticleExecutorTests: XCTestCase {
                     "label": [
                         "text": "Label",
                         "type": "textinput",
-                        "value": "I",
+                        "value": textValue,
                     ],
                 ],
             ],
@@ -1389,22 +1481,26 @@ final class ParticleExecutorTests: XCTestCase {
             ], at: 0)
         }
         if includeText {
-            objects.append([
+            var textObject: [String: Any] = [
                 "alpha": 1,
                 "color": "255 0 0 255",
                 "font": "systemfont_arial",
                 "horizontalalign": "center",
                 "id": 2,
                 "name": "Later text",
-                "origin": "5 0 0",
+                "origin": textOrigin,
                 "padding": "0 0",
                 "pointsize": 4,
                 "size": "6 8",
                 "spacing": "0 0",
-                "text": ["user": "label", "value": "I"],
+                "text": ["user": "label", "value": textValue],
                 "verticalalign": "center",
                 "visible": true,
-            ])
+            ]
+            if let textAngles {
+                textObject["angles"] = textAngles
+            }
+            objects.append(textObject)
         }
         let general: [String: Any] = [
             "cameraparallax": parallaxEnabled,

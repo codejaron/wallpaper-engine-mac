@@ -25,17 +25,18 @@ final class TextCoverageRendererTests: XCTestCase {
         XCTAssertEqual(cacheCount, 64)
     }
 
-    func testTopDownCoverageKeepsItsVerticalOrientation() {
+    func testTopDownCoverageKeepsWallpaperEngineInternalOrientation() {
         var pixels = [UInt8](repeating: 0, count: 2 * 2 * 4)
         XCTAssertEqual(
             we_scene_gl_test_render_text_orientation(&pixels, pixels.count),
             1
         )
-        // Device readback is normalized to top-down rows. The only covered
-        // texel therefore remains at top-left instead of being vertically flipped.
+        // The low-level readback normalizes an ordinary GL framebuffer. Scene
+        // coverage deliberately remains flipped inside that framebuffer so the
+        // final presentation boundary restores it exactly once.
         let topLeftAlpha = pixels[3]
         let bottomLeftAlpha = pixels[(2 * 4) + 3]
-        XCTAssertGreaterThan(topLeftAlpha, 0)
-        XCTAssertEqual(bottomLeftAlpha, 0)
+        XCTAssertEqual(topLeftAlpha, 0)
+        XCTAssertGreaterThan(bottomLeftAlpha, 0)
     }
 }

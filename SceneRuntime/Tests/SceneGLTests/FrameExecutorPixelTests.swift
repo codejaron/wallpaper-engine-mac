@@ -184,6 +184,24 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
     }
 
+    func testRawRGBA8PreservesTheSameTopDownOrientationAsEmbeddedPNG() throws {
+        let loaded = try loadFixture(
+            fragmentSource: textureOnlyFragmentShader,
+            textureData: makeRGBA8Texture2x2(pixels: [
+                255, 0, 0, 255, 255, 0, 0, 255,
+                0, 0, 255, 255, 0, 0, 255, 255,
+            ])
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            [255, 0, 0, 255, 255, 0, 0, 255,
+             0, 0, 255, 255, 0, 0, 255, 255]
+        )
+    }
+
     func testPrimaryRawTextureFormatOverridesAuthoredTextureZeroCombo() throws {
         let cases: [(format: UInt32, authored: Int, expected: Int, bytes: [UInt8])] = [
             (format: 9, authored: 8, expected: 9, bytes: [255, 255, 255, 255]),
@@ -441,8 +459,8 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
         XCTAssertEqual(
             try readPixels(loaded.executor),
-            repeatedPixel([191, 64, 191, 255]),
-            "g_PointerPositionLast must be the previous successful frame's pointer"
+            repeatedPixel([191, 64, 64, 255]),
+            "g_PointerPositionLast must expose the previous successful frame in Linux's top-left effect coordinates"
         )
     }
 
@@ -484,7 +502,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
         XCTAssertEqual(
             try readPixels(loaded.executor),
-            repeatedPixel([191, 64, 191, 255]),
+            repeatedPixel([191, 64, 64, 255]),
             "A frame failure must invalidate replay state without resetting the Linux pointer history"
         )
     }
@@ -658,7 +676,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
         XCTAssertEqual(
             greenPixels,
-            Set([1]),
+            Set([3]),
             "Aligned images must rotate around the center of their baked scene geometry"
         )
     }
@@ -736,7 +754,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
     }
 
-    func testAspectFillMapsScriptAndShaderPointersToSameBottomLeftCoordinate() throws {
+    func testAspectFillMapsScriptAndShaderPointersToTheirLinuxCoordinates() throws {
         let loaded = try loadFixture(
             fragmentSource: pointerContractFragmentShader,
             projectionWidth: 5,
@@ -770,11 +788,11 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertEqual(
             try readPixels(loaded.executor),
             repeatedPixel(pointerContractPixel(scenePointer), count: 10),
-            "The 5x2 to 2x2 aspect-fill crop starts at source x=1, so script and shader must both receive the bottom-left scene coordinate (0.2, 0.25)"
+            "The crop must give scripts bottom-left (0.2, 0.25) while g_PointerPosition receives Linux's top-left (0.2, 0.75)"
         )
     }
 
-    func testAspectFillMappedBottomLeftPointerDrivesParallaxUpward() throws {
+    func testAspectFillMapsBottomLeftHostPointerToLinuxParallaxY() throws {
         let loaded = try loadFixture(
             fragmentSource: constantRedFragmentShader,
             parallax: true,
@@ -811,7 +829,7 @@ final class FrameExecutorPixelTests: XCTestCase {
             repeatedPixel([0, 0, 0, 255], count: 4) +
                 repeatedPixel([255, 0, 0, 255], count: 2) +
                 repeatedPixel([0, 0, 0, 255], count: 4),
-            "The 2x5 to 2x2 aspect-fill crop exposes bottom-left Y [0.2, 0.6]; its top edge maps to Y=0.6, producing positive parallax that moves the strip up"
+            "The crop maps the host top to bottom-left Y=0.6, then Linux parallax consumes top-left Y=0.4 and moves the visible strip upward"
         )
     }
 
@@ -840,7 +858,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertEqual(
             try readPixels(loaded.executor),
             repeatedPixel(pointerContractPixel((x: 0.4, y: 0.25)), count: 10),
-            "Direct rendering must give script and shader the same clamped bottom-left pointer"
+            "Direct rendering must keep the script pointer bottom-left and derive the shader's top-left Y"
         )
 
         inputs.pointer_x = -0.5
@@ -861,7 +879,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertEqual(
             try readPixels(loaded.executor),
             repeatedPixel(pointerContractPixel((x: 0, y: 1)), count: 10),
-            "Stretch rendering must clamp the host pointer to bottom-left coordinate (0, 1)"
+            "Stretch rendering must clamp the host/script pointer to bottom-left (0, 1) and the shader pointer to top-left (0, 0)"
         )
 
         inputs.pointer_x = 0.4
@@ -882,7 +900,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertEqual(
             try readPixels(loaded.executor),
             repeatedPixel(pointerContractPixel((x: 0.4, y: 0)), count: 10),
-            "The lower aspect-fit black bar must clamp to the destination's bottom edge, preserving bottom-left scene Y=0"
+            "The lower aspect-fit bar must clamp scripts to bottom-left Y=0 and shaders to top-left Y=1"
         )
 
         inputs.pointer_x = 0.75
@@ -902,7 +920,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertEqual(
             try readPixels(loaded.executor),
             repeatedPixel(pointerContractPixel((x: 0.75, y: 0)), count: 10),
-            "Extreme aspect-fit letterboxing must still clamp to the finite bottom-left scene coordinate (0.75, 0)"
+            "Extreme aspect-fit letterboxing must preserve finite script and effect pointer coordinates"
         )
     }
 
@@ -3389,7 +3407,13 @@ final class FrameExecutorPixelTests: XCTestCase {
 
     private func makeRGBA8Texture2x2(pixel: [UInt8]) -> Data {
         precondition(pixel.count == 4)
-        let bytes = Array(repeating: pixel, count: 4).flatMap { $0 }
+        return makeRGBA8Texture2x2(
+            pixels: Array(repeating: pixel, count: 4).flatMap { $0 }
+        )
+    }
+
+    private func makeRGBA8Texture2x2(pixels: [UInt8]) -> Data {
+        precondition(pixels.count == 16)
         var result = Data()
         appendMagic("TEXV0005", to: &result)
         appendMagic("TEXI0001", to: &result)
@@ -3407,9 +3431,9 @@ final class FrameExecutorPixelTests: XCTestCase {
         appendUInt32(2, to: &result)
         appendUInt32(2, to: &result)
         appendUInt32(0, to: &result)
-        appendUInt32(UInt32(bytes.count), to: &result)
-        appendUInt32(UInt32(bytes.count), to: &result)
-        result.append(contentsOf: bytes)
+        appendUInt32(UInt32(pixels.count), to: &result)
+        appendUInt32(UInt32(pixels.count), to: &result)
+        result.append(contentsOf: pixels)
         return result
     }
 
@@ -3605,14 +3629,18 @@ final class FrameExecutorPixelTests: XCTestCase {
         data.replaceSubrange(offset..<(offset + 2), with: encoded)
     }
 
-    private func pointerContractPixel(_ pointer: (x: Double, y: Double)) -> [UInt8] {
+    private func pointerContractPixel(
+        _ bottomLeftPointer: (x: Double, y: Double)
+    ) -> [UInt8] {
         func normalizedByte(_ value: Double) -> UInt8 {
             UInt8(clamping: Int((value * 255).rounded()))
         }
         return [
-            normalizedByte(pointer.x),
-            normalizedByte(pointer.y),
-            normalizedByte(pointer.x + pointer.y / 4),
+            normalizedByte(bottomLeftPointer.x),
+            normalizedByte(1 - bottomLeftPointer.y),
+            normalizedByte(
+                bottomLeftPointer.x + bottomLeftPointer.y / 4
+            ),
             255,
         ]
     }

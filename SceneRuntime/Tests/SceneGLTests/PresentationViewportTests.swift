@@ -92,7 +92,7 @@ final class PresentationViewportTests: XCTestCase {
         XCTAssertEqual(result.mapped_pointer_y, 0.25, accuracy: 1e-12)
     }
 
-    func testBlitReadsOnlyTheSelectedHalfOfTheSceneOutput() {
+    func testBlitReadsTheSelectedHalfWithUserVisibleVerticalOrientation() {
         var left = viewport(canvasWidth: 8, canvasHeight: 4, x: 0, width: 4)
         var right = viewport(canvasWidth: 8, canvasHeight: 4, x: 4, width: 4)
         var leftPixels = [UInt8](repeating: 0, count: 4 * 4 * 4)
@@ -116,8 +116,66 @@ final class PresentationViewportTests: XCTestCase {
             ),
             1
         )
-        XCTAssertEqual(leftPixels, repeatedPixel([255, 0, 0, 255], count: 16))
-        XCTAssertEqual(rightPixels, repeatedPixel([0, 255, 0, 255], count: 16))
+        XCTAssertEqual(
+            leftPixels,
+            repeatedPixel([255, 0, 0, 255], count: 8)
+                + repeatedPixel([0, 0, 255, 255], count: 8)
+        )
+        XCTAssertEqual(
+            rightPixels,
+            repeatedPixel([0, 255, 0, 255], count: 8)
+                + repeatedPixel([255, 255, 0, 255], count: 8)
+        )
+    }
+
+    func testBlitMapsVerticalDisplaySlicesBeforeFlippingSceneOutput() {
+        var bottom = viewport(
+            canvasWidth: 4, canvasHeight: 8,
+            x: 0, y: 0, width: 4, height: 4,
+            drawableWidth: 4, drawableHeight: 4
+        )
+        var top = viewport(
+            canvasWidth: 4, canvasHeight: 8,
+            x: 0, y: 4, width: 4, height: 4,
+            drawableWidth: 4, drawableHeight: 4
+        )
+        var bottomPixels = [UInt8](repeating: 0, count: 4 * 4 * 4)
+        var topPixels = [UInt8](repeating: 0, count: 4 * 4 * 4)
+
+        XCTAssertEqual(
+            we_scene_gl_test_blit_presentation_slice(
+                &bottom,
+                Int32(WE_SCENE_PRESENTATION_STRETCH.rawValue),
+                &bottomPixels,
+                bottomPixels.count
+            ),
+            1
+        )
+        XCTAssertEqual(
+            we_scene_gl_test_blit_presentation_slice(
+                &top,
+                Int32(WE_SCENE_PRESENTATION_STRETCH.rawValue),
+                &topPixels,
+                topPixels.count
+            ),
+            1
+        )
+        XCTAssertEqual(
+            bottomPixels,
+            sideBySideRows(
+                left: [0, 0, 255, 255],
+                right: [255, 255, 0, 255],
+                rowCount: 4
+            )
+        )
+        XCTAssertEqual(
+            topPixels,
+            sideBySideRows(
+                left: [255, 0, 0, 255],
+                right: [0, 255, 0, 255],
+                rowCount: 4
+            )
+        )
     }
 
     func testViewportValidationRejectsZeroOutOfBoundsAndOpenGLOverflow() {
@@ -157,18 +215,22 @@ final class PresentationViewportTests: XCTestCase {
         canvasWidth: UInt32,
         canvasHeight: UInt32,
         x: UInt32,
+        y: UInt32 = 0,
         width: UInt32,
-        drawableWidth: UInt32 = 4
+        height: UInt32? = nil,
+        drawableWidth: UInt32 = 4,
+        drawableHeight: UInt32? = nil
     ) -> WESceneGLTestPresentationViewport {
-        WESceneGLTestPresentationViewport(
+        let viewportHeight = height ?? canvasHeight
+        return WESceneGLTestPresentationViewport(
             canvas_width: canvasWidth,
             canvas_height: canvasHeight,
             viewport_x: x,
-            viewport_y: 0,
+            viewport_y: y,
             viewport_width: width,
-            viewport_height: canvasHeight,
+            viewport_height: viewportHeight,
             drawable_width: drawableWidth,
-            drawable_height: canvasHeight
+            drawable_height: drawableHeight ?? viewportHeight
         )
     }
 
@@ -209,5 +271,17 @@ final class PresentationViewportTests: XCTestCase {
 
     private func repeatedPixel(_ pixel: [UInt8], count: Int) -> [UInt8] {
         Array(repeating: pixel, count: count).flatMap { $0 }
+    }
+
+    private func sideBySideRows(
+        left: [UInt8],
+        right: [UInt8],
+        rowCount: Int
+    ) -> [UInt8] {
+        Array(
+            repeating: repeatedPixel(left, count: 2)
+                + repeatedPixel(right, count: 2),
+            count: rowCount
+        ).flatMap { $0 }
     }
 }

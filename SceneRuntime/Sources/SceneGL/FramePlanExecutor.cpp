@@ -1,6 +1,7 @@
 #include <SceneGL/FramePlanExecutor.hpp>
 
 #include "SceneGLDevice.hpp"
+#include "SceneGLPresentation.hpp"
 #include "TextCoverageRenderer.hpp"
 
 #include <SceneCore/FormatError.hpp>
@@ -108,6 +109,8 @@ struct ParticleDrawBatch final {
 struct ResolvedFrameInputs final {
     FrameVector2 pointerPosition;
     FrameVector2 pointerPositionLast;
+    FrameVector2 effectPointerPosition;
+    FrameVector2 effectPointerPositionLast;
     bool pointerActive = false;
     bool pointerLeftDown = false;
     double timeSeconds = 0.0;
@@ -133,6 +136,22 @@ struct CursorProjection final {
     CursorHit hit;
     bool inside = false;
 };
+
+[[nodiscard]] double centeredWallpaperY(
+    double topDownY,
+    std::uint32_t sceneHeight
+) noexcept {
+    return topDownY - static_cast<double>(sceneHeight) * 0.5;
+}
+
+[[nodiscard]] FrameVector2 linuxEffectPointer(
+    FrameVector2 bottomLeftPointer
+) noexcept {
+    return {
+        .x = bottomLeftPointer.x,
+        .y = 1.0 - bottomLeftPointer.y,
+    };
+}
 
 // Project the canonical bottom-left pointer into one image's local space.  The
 // projection is deliberately usable outside the image bounds as well: a
@@ -164,14 +183,12 @@ struct CursorProjection final {
         return std::nullopt;
     }
 
-    // SceneFrameGraph/FramePlanExecutor use a centered, bottom-left scene
-    // coordinate system internally while scene.json origins are top-left
-    // pixels. Keep this inverse exactly paired with prepareDraw's
-    // center/alignment/rotation decomposition.
+    // Scene rendering keeps Wallpaper Engine's top-down Y in a centered
+    // coordinate until the final presentation. Keep this inverse exactly
+    // paired with prepareDraw's center/alignment/rotation decomposition.
     double centerX = transform.origin.x -
         static_cast<double>(plan.width) * 0.5;
-    double centerY = static_cast<double>(plan.height) * 0.5 -
-        transform.origin.y;
+    double centerY = centeredWallpaperY(transform.origin.y, plan.height);
     if (image.horizontalAlignment.find("left") != std::string::npos) {
         centerX += scaledWidth * 0.5;
     } else if (image.horizontalAlignment.find("right") != std::string::npos) {
@@ -184,7 +201,7 @@ struct CursorProjection final {
     }
 
     const double sceneX = worldX - static_cast<double>(plan.width) * 0.5;
-    const double sceneY = static_cast<double>(plan.height) * 0.5 - worldY;
+    const double sceneY = centeredWallpaperY(worldY, plan.height);
     const double dx = sceneX - centerX;
     const double dy = sceneY - centerY;
     const double cosine = std::cos(transform.angles.z);
@@ -2423,12 +2440,18 @@ struct FramePlanExecutor::Impl final {
         result.timeValue = checkedFloat(inputs.timeSeconds, "Frame time");
         result.daytimeValue = checkedFloat(inputs.daytime, "Local daytime");
         result.pointerValue = {
-            checkedFloat(inputs.pointerPosition.x, "Pointer position"),
-            checkedFloat(inputs.pointerPosition.y, "Pointer position"),
+            checkedFloat(inputs.effectPointerPosition.x, "Pointer position"),
+            checkedFloat(inputs.effectPointerPosition.y, "Pointer position"),
         };
         result.pointerLastValue = {
-            checkedFloat(inputs.pointerPositionLast.x, "Previous pointer position"),
-            checkedFloat(inputs.pointerPositionLast.y, "Previous pointer position"),
+            checkedFloat(
+                inputs.effectPointerPositionLast.x,
+                "Previous pointer position"
+            ),
+            checkedFloat(
+                inputs.effectPointerPositionLast.y,
+                "Previous pointer position"
+            ),
         };
         result.texelSizeValue = {
             1.0F / static_cast<float>(plan.width),
@@ -2969,17 +2992,19 @@ struct FramePlanExecutor::Impl final {
                    pass.geometry == FrameGeometryKind::passthroughCapture ||
                    puppetSceneSpace) {
             const auto& transform = image.worldTransform;
-            // Wallpaper Engine stores image origins in top-left scene pixels,
-            // while its orthographic camera is centered with Y pointing up.
-            // CImage::updateScenePosition bakes origin, alignment, and XY scale
-            // into scene-space geometry. Keep the same decomposition because
-            // shaders are allowed to inspect each common matrix separately.
+            // Wallpaper Engine stores image origins in top-left scene pixels.
+            // The internal scene framebuffer deliberately keeps that Y-down
+            // orientation until presentation, so its centered coordinate is
+            // origin.y - height/2 rather than a per-object GL normalization.
+            // Alignment and scale remain baked into geometry because shaders
+            // may inspect each common matrix separately.
             const double scaledWidth = image.size.x * transform.scale.x;
             const double scaledHeight = image.size.y * transform.scale.y;
             double centerX =
                 transform.origin.x - static_cast<double>(plan.width) * 0.5;
-            double centerY =
-                static_cast<double>(plan.height) * 0.5 - transform.origin.y;
+            double centerY = centeredWallpaperY(
+                transform.origin.y, plan.height
+            );
             if (image.horizontalAlignment.find("left") != std::string::npos) {
                 centerX += scaledWidth * 0.5;
             } else if (
@@ -3526,19 +3551,14 @@ struct FramePlanExecutor::Impl final {
             transform.origin.x - static_cast<double>(plan.width) * 0.5
         );
         const float originY = static_cast<float>(
-            static_cast<double>(plan.height) * 0.5 - transform.origin.y
+            centeredWallpaperY(transform.origin.y, plan.height)
         );
         const Matrix world = multiply(
             translation(originX, originY, float(transform.origin.z)),
-            multiply(
-                rotationZ(float(transform.angles.z)),
-                multiply(
-                    rotationY(float(transform.angles.y)),
-                    multiply(
-                        rotationX(float(transform.angles.x)),
-                        scaling(float(transform.scale.x), float(transform.scale.y), float(transform.scale.z))
-                    )
-                )
+            scaling(
+                float(transform.scale.x),
+                float(transform.scale.y),
+                float(transform.scale.z)
             )
         );
         const Matrix alignment = translation(
@@ -3590,6 +3610,17 @@ struct FramePlanExecutor::Impl final {
             );
         }
         return static_cast<float>(value);
+    }
+
+    [[nodiscard]] static float particleRenderY(
+        double simulationY,
+        std::string_view name
+    ) {
+        // ParticleSimulation intentionally mirrors Linux's centered Y-up
+        // simulation contract. Scene framebuffers now retain Wallpaper
+        // Engine's Y-down orientation until presentation, so convert local
+        // particle geometry exactly once at the simulation-to-render boundary.
+        return particleFloat(-simulationY, name);
     }
 
     [[nodiscard]] static ParticleAtlasMetadata particleAtlasMetadata(
@@ -3739,12 +3770,12 @@ struct FramePlanExecutor::Impl final {
             }};
             const auto position = std::array{
                 particleFloat(particle.position.x, "position"),
-                particleFloat(particle.position.y, "position"),
+                particleRenderY(particle.position.y, "position"),
                 particleFloat(particle.position.z, "position"),
             };
             const auto velocity = std::array{
                 particleFloat(particle.velocity.x, "velocity"),
-                particleFloat(particle.velocity.y, "velocity"),
+                particleRenderY(particle.velocity.y, "velocity"),
                 particleFloat(particle.velocity.z, "velocity"),
             };
             const auto rotation = std::array{
@@ -3955,19 +3986,19 @@ struct FramePlanExecutor::Impl final {
             const auto append = [&](float u, float v) {
                 RopeParticleVertex vertex{};
                 vertex.positionVec4[0] = particleFloat(start.position.x, "rope position");
-                vertex.positionVec4[1] = particleFloat(start.position.y, "rope position");
+                vertex.positionVec4[1] = particleRenderY(start.position.y, "rope position");
                 vertex.positionVec4[2] = particleFloat(start.position.z, "rope position");
                 vertex.positionVec4[3] = particleFloat(start.size, "rope size");
                 vertex.texCoordVec4[0] = particleFloat(end.position.x, "rope position");
-                vertex.texCoordVec4[1] = particleFloat(end.position.y, "rope position");
+                vertex.texCoordVec4[1] = particleRenderY(end.position.y, "rope position");
                 vertex.texCoordVec4[2] = particleFloat(end.position.z, "rope position");
                 vertex.texCoordVec4[3] = particleFloat(trailLength, "rope length");
                 vertex.texCoordVec4C1[0] = particleFloat(previous.position.x, "rope position");
-                vertex.texCoordVec4C1[1] = particleFloat(previous.position.y, "rope position");
+                vertex.texCoordVec4C1[1] = particleRenderY(previous.position.y, "rope position");
                 vertex.texCoordVec4C1[2] = particleFloat(previous.position.z, "rope position");
                 vertex.texCoordVec4C1[3] = particleFloat(trailPosition, "rope trail position");
                 vertex.texCoordVec4C2[0] = particleFloat(next.position.x, "rope position");
-                vertex.texCoordVec4C2[1] = particleFloat(next.position.y, "rope position");
+                vertex.texCoordVec4C2[1] = particleRenderY(next.position.y, "rope position");
                 vertex.texCoordVec4C2[2] = particleFloat(next.position.z, "rope position");
                 vertex.texCoordVec4C2[3] = particleFloat(end.size, "rope size");
                 for (int channel = 0; channel < 4; ++channel) {
@@ -4368,7 +4399,7 @@ struct FramePlanExecutor::Impl final {
             "object origin"
         );
         const float originY = particleFloat(
-            static_cast<double>(plan.height) * 0.5 - transform.origin.y,
+            centeredWallpaperY(transform.origin.y, plan.height),
             "object origin"
         );
         const float originZ = particleFloat(transform.origin.z, "object origin");
@@ -5534,9 +5565,9 @@ struct FramePlanExecutor::Impl final {
             return {};
         }
         const FrameVector2 target = {
-            (inputs.pointerPosition.x - 0.5) * plan.parallax.amount *
+            (inputs.effectPointerPosition.x - 0.5) * plan.parallax.amount *
                 plan.parallax.mouseInfluence,
-            (inputs.pointerPosition.y - 0.5) * plan.parallax.amount *
+            (inputs.effectPointerPosition.y - 0.5) * plan.parallax.amount *
                 plan.parallax.mouseInfluence,
         };
         if (!std::isfinite(target.x) || !std::isfinite(target.y)) {
@@ -5610,15 +5641,20 @@ struct FramePlanExecutor::Impl final {
                 *presentation,
                 *scaling
             );
-            // Host, script, shader, and parallax inputs share one canonical
-            // bottom-left normalized scene coordinate. Stock effect shaders apply
-            // their own texture-space adaptation where required; flipping here as
-            // well reverses cursor-driven effects such as xray. Resolve the visible
-            // crop once and share that result with every consumer.
+            // Resolve the visible crop once in the host's canonical bottom-left
+            // coordinates. Scripts, hit testing, and particle control points use
+            // this value directly; Linux material effects and camera parallax use
+            // a derived top-left Y below, matching CScene::getMousePosition().
             result.pointerPosition = transform.map(drawablePointer);
         }
         result.pointerPositionLast = hasPublishedPointer
             ? lastPublishedPointer
+            : FrameVector2{};
+        result.effectPointerPosition = linuxEffectPointer(
+            result.pointerPosition
+        );
+        result.effectPointerPositionLast = hasPublishedPointer
+            ? linuxEffectPointer(result.pointerPositionLast)
             : FrameVector2{};
         return result;
     }
@@ -5995,22 +6031,11 @@ struct FramePlanExecutor::Impl final {
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         if (slice.hasContent) {
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, output.framebuffer);
-            glReadBuffer(GL_COLOR_ATTACHMENT0);
-            glBlitFramebuffer(
-                static_cast<GLint>(slice.source.x),
-                static_cast<GLint>(slice.source.y),
-                static_cast<GLint>(slice.source.x + slice.source.width),
-                static_cast<GLint>(slice.source.y + slice.source.height),
-                static_cast<GLint>(slice.destination.x),
-                static_cast<GLint>(slice.destination.y),
-                static_cast<GLint>(
-                    slice.destination.x + slice.destination.width
-                ),
-                static_cast<GLint>(
-                    slice.destination.y + slice.destination.height
-                ),
-                GL_COLOR_BUFFER_BIT,
+            blitWallpaperEngineOutput(
+                output,
+                0,
+                GL_BACK,
+                slice,
                 GL_LINEAR
             );
         }
@@ -6152,7 +6177,7 @@ void FramePlanExecutor::readRGBA8(std::span<std::uint8_t> output) {
     session.readRGBA8(impl_->framebuffer({
         .kind = FrameResourceKind::framebuffer,
         .id = impl_->outputId,
-    }), output);
+    }), output, ReadbackSourceOrientation::wallpaperEngineTopLeft);
 }
 
 }  // namespace we::scene::gl

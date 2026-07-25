@@ -1,6 +1,7 @@
 #include <SceneParticle/ParticleSimulation.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -11,6 +12,7 @@ namespace we::scene::particle {
 namespace {
 
 constexpr double pi = 3.14159265358979323846264338327950288;
+constexpr double twoPi = 2.0 * pi;
 constexpr std::uint64_t fnvOffset = 14695981039346656037ULL;
 constexpr std::uint64_t fnvPrime = 1099511628211ULL;
 constexpr int particleControlPointSlotCount = 8;
@@ -108,18 +110,187 @@ constexpr std::uint64_t maximumPrewarmSteps = 1'000'000;
     );
 }
 
-[[nodiscard]] Vector3 turbulentDirection(Vector3 point) noexcept {
-    // A deterministic divergence-free-style field. Particle initialization
-    // needs spatial coherence, but not a second random-number source.
+constexpr std::array<int, 256> perlinPermutation = {
+    151, 160, 137, 91, 90, 15, 131, 13, 201, 95, 96, 53, 194, 233, 7, 225,
+    140, 36, 103, 30, 69, 142, 8, 99, 37, 240, 21, 10, 23, 190, 6, 148,
+    247, 120, 234, 75, 0, 26, 197, 62, 94, 252, 219, 203, 117, 35, 11, 32,
+    57, 177, 33, 88, 237, 149, 56, 87, 174, 20, 125, 136, 171, 168, 68,
+    175, 74, 165, 71, 134, 139, 48, 27, 166, 77, 146, 158, 231, 83, 111,
+    229, 122, 60, 211, 133, 230, 220, 105, 92, 41, 55, 46, 245, 40, 244,
+    102, 143, 54, 65, 25, 63, 161, 1, 216, 80, 73, 209, 76, 132, 187,
+    208, 89, 18, 169, 200, 196, 135, 130, 116, 188, 159, 86, 164, 100,
+    109, 198, 173, 186, 3, 64, 52, 217, 226, 250, 124, 123, 5, 202, 38,
+    147, 118, 126, 255, 82, 85, 212, 207, 206, 59, 227, 47, 16, 58, 17,
+    182, 189, 28, 42, 223, 183, 170, 213, 119, 248, 152, 2, 44, 154,
+    163, 70, 221, 153, 101, 155, 167, 43, 172, 9, 129, 22, 39, 253, 19,
+    98, 108, 110, 79, 113, 224, 232, 178, 185, 112, 104, 218, 246, 97,
+    228, 251, 34, 242, 193, 238, 210, 144, 12, 191, 179, 162, 241, 81,
+    51, 145, 235, 249, 14, 239, 107, 49, 192, 214, 31, 181, 199, 106,
+    157, 184, 84, 204, 176, 115, 121, 50, 45, 127, 4, 150, 254, 138,
+    236, 205, 93, 222, 114, 67, 29, 24, 72, 243, 141, 128, 195, 78, 66,
+    215, 61, 156, 180,
+};
+
+[[nodiscard]] int perlinAt(int index) noexcept {
+    return perlinPermutation[static_cast<std::size_t>(index & 255)];
+}
+
+[[nodiscard]] double perlinGradient(
+    int hash,
+    double x,
+    double y,
+    double z
+) noexcept {
+    switch (hash & 0x0f) {
+        case 0x0: return x + y;
+        case 0x1: return -x + y;
+        case 0x2: return x - y;
+        case 0x3: return -x - y;
+        case 0x4: return x + z;
+        case 0x5: return -x + z;
+        case 0x6: return x - z;
+        case 0x7: return -x - z;
+        case 0x8: return y + z;
+        case 0x9: return -y + z;
+        case 0xa: return y - z;
+        case 0xb: return -y - z;
+        case 0xc: return y + x;
+        case 0xd: return -y + z;
+        case 0xe: return y - x;
+        case 0xf: return -y - z;
+        default: return 0.0;
+    }
+}
+
+[[nodiscard]] double perlinEase(double value) noexcept {
+    return value * value * value *
+        (value * (value * 6.0 - 15.0) + 10.0);
+}
+
+[[nodiscard]] double perlinLerp(
+    double amount,
+    double first,
+    double second
+) noexcept {
+    return first + amount * (second - first);
+}
+
+[[nodiscard]] double perlinNoise(
+    double x,
+    double y,
+    double z
+) noexcept {
+    const double floorX = std::floor(x);
+    const double floorY = std::floor(y);
+    const double floorZ = std::floor(z);
+    const int cellX = static_cast<int>(floorX) & 255;
+    const int cellY = static_cast<int>(floorY) & 255;
+    const int cellZ = static_cast<int>(floorZ) & 255;
+    x -= floorX;
+    y -= floorY;
+    z -= floorZ;
+
+    const double u = perlinEase(x);
+    const double v = perlinEase(y);
+    const double w = perlinEase(z);
+    const int a = perlinAt(cellX) + cellY;
+    const int aa = perlinAt(a) + cellZ;
+    const int ab = perlinAt(a + 1) + cellZ;
+    const int b = perlinAt(cellX + 1) + cellY;
+    const int ba = perlinAt(b) + cellZ;
+    const int bb = perlinAt(b + 1) + cellZ;
+
+    return perlinLerp(
+        w,
+        perlinLerp(
+            v,
+            perlinLerp(
+                u,
+                perlinGradient(perlinAt(aa), x, y, z),
+                perlinGradient(perlinAt(ba), x - 1.0, y, z)
+            ),
+            perlinLerp(
+                u,
+                perlinGradient(perlinAt(ab), x, y - 1.0, z),
+                perlinGradient(perlinAt(bb), x - 1.0, y - 1.0, z)
+            )
+        ),
+        perlinLerp(
+            v,
+            perlinLerp(
+                u,
+                perlinGradient(perlinAt(aa + 1), x, y, z - 1.0),
+                perlinGradient(perlinAt(ba + 1), x - 1.0, y, z - 1.0)
+            ),
+            perlinLerp(
+                u,
+                perlinGradient(perlinAt(ab + 1), x, y - 1.0, z - 1.0),
+                perlinGradient(perlinAt(bb + 1), x - 1.0, y - 1.0, z - 1.0)
+            )
+        )
+    );
+}
+
+[[nodiscard]] Vector3 perlinNoiseVector(Vector3 point) noexcept {
     return {
-        std::sin(point.y + 1.7 * point.z) - std::cos(point.z - 0.6 * point.y),
-        std::sin(point.z + 1.3 * point.x) - std::cos(point.x - 0.8 * point.z),
-        std::sin(point.x + 1.1 * point.y) - std::cos(point.y - 0.9 * point.x),
+        perlinNoise(point.x, point.y, point.z),
+        perlinNoise(point.x + 89.2, point.y + 33.1, point.z + 57.3),
+        perlinNoise(point.x + 100.3, point.y + 120.1, point.z + 142.2),
+    };
+}
+
+[[nodiscard]] Vector3 curlNoise(Vector3 point) noexcept {
+    constexpr double epsilon = 1.0e-4;
+    const Vector3 dx{epsilon, 0.0, 0.0};
+    const Vector3 dy{0.0, epsilon, 0.0};
+    const Vector3 dz{0.0, 0.0, epsilon};
+    const Vector3 x0 = perlinNoiseVector({
+        point.x - dx.x, point.y - dx.y, point.z - dx.z,
+    });
+    const Vector3 x1 = perlinNoiseVector({
+        point.x + dx.x, point.y + dx.y, point.z + dx.z,
+    });
+    const Vector3 y0 = perlinNoiseVector({
+        point.x - dy.x, point.y - dy.y, point.z - dy.z,
+    });
+    const Vector3 y1 = perlinNoiseVector({
+        point.x + dy.x, point.y + dy.y, point.z + dy.z,
+    });
+    const Vector3 z0 = perlinNoiseVector({
+        point.x - dz.x, point.y - dz.y, point.z - dz.z,
+    });
+    const Vector3 z1 = perlinNoiseVector({
+        point.x + dz.x, point.y + dz.y, point.z + dz.z,
+    });
+    const double scale = 1.0 / (2.0 * epsilon);
+    return {
+        ((y1.z - y0.z) - (z1.y - z0.y)) * scale,
+        ((z1.x - z0.x) - (x1.z - x0.z)) * scale,
+        ((x1.y - x0.y) - (y1.x - y0.x)) * scale,
     };
 }
 
 [[nodiscard]] double interpolate(double first, double second, double unit) noexcept {
     return first + unit * (second - first);
+}
+
+// The Linux runtime samples oscillator phase from [phaseMin, phaseMax + 2π]
+// (and swaps reversed authored bounds before sampling).  Keeping the sample
+// as a stable unit lets copied simulations remain deterministic while
+// preserving that range exactly.
+[[nodiscard]] double oscillatorRandomRange(
+    double minimum,
+    double maximum,
+    double unit,
+    bool includeExtraCycle = false
+) noexcept {
+    if (includeExtraCycle) {
+        maximum += twoPi;
+    }
+    if (maximum < minimum) {
+        std::swap(minimum, maximum);
+    }
+    return interpolate(minimum, maximum, unit);
 }
 
 [[nodiscard]] Vector3 interpolate(
@@ -238,6 +409,8 @@ ParticleSimulation::ParticleSimulation(
 )
     : configuration_(std::move(configuration)),
       emitterStates_(configuration_.emitters.size()),
+      initializerStates_(configuration_.initializers.size()),
+      operatorStates_(configuration_.operators.size()),
       seed_(explicitSeed.value_or(stableSeed(objectId, assetIdentity))) {
     validateConfiguration(configuration_);
     particles_.reserve(configuration_.maxCount);
@@ -247,6 +420,7 @@ ParticleSimulation::ParticleSimulation(
     (void)nextRandomBits();
     randomState_ += seed_;
     (void)nextRandomBits();
+    initializeOperatorStates();
     prewarm();
 }
 
@@ -277,8 +451,13 @@ void ParticleSimulation::advance(
         simulateStep(step);
         accumulatorSeconds_ -= step;
     }
-    if (accumulatorSeconds_ >= 0.0 &&
-        accumulatorSeconds_ <= tolerance) {
+    // Subtracting a fixed step can leave a signed ulp-sized residue (for
+    // example, 0.3 - 3 * 0.1 becomes -2.77e-17).  The accumulator represents
+    // elapsed time that has not yet been simulated, so both signs are the
+    // same exact fixed-step boundary and must serialize identically.  Only
+    // canonicalize within the already-established numerical tolerance; a
+    // larger negative value remains an explicit invariant violation.
+    if (std::abs(accumulatorSeconds_) <= tolerance) {
         accumulatorSeconds_ = 0.0;
     }
 }
@@ -420,6 +599,9 @@ void ParticleSimulation::validateConfiguration(
                 requireFinite(concrete.phaseMinimum, "Particle turbulent minimum phase");
                 requireFinite(concrete.phaseMaximum, "Particle turbulent maximum phase");
                 requireFinite(concrete.right, "Particle turbulent right direction");
+            } else if constexpr (std::is_same_v<T, MapSequenceAroundControlPointInitializer>) {
+                requireFinite(concrete.speedMinimum, "Particle map sequence minimum speed");
+                requireFinite(concrete.speedMaximum, "Particle map sequence maximum speed");
             } else if constexpr (
                 std::is_same_v<T, ColorRandomInitializer> ||
                 std::is_same_v<T, VelocityRandomInitializer> ||
@@ -437,6 +619,13 @@ void ParticleSimulation::validateConfiguration(
                 }
             }
         }, initializer);
+        if (const auto* mapSequence = std::get_if<
+                MapSequenceAroundControlPointInitializer
+            >(&initializer); mapSequence != nullptr && mapSequence->count <= 0) {
+            throw std::invalid_argument(
+                "Particle map sequence count must be greater than zero"
+            );
+        }
     }
 
     for (const Operator& operation : configuration.operators) {
@@ -466,10 +655,52 @@ void ParticleSimulation::validateConfiguration(
                 requireFinite(concrete.scaleMaximum, "Particle alpha oscillator maximum scale");
                 requireFinite(concrete.phaseMinimum, "Particle alpha oscillator minimum phase");
                 requireFinite(concrete.phaseMaximum, "Particle alpha oscillator maximum phase");
+            } else if constexpr (std::is_same_v<T, OscillateSizeOperator>) {
+                requireFinite(concrete.frequencyMinimum, "Particle size oscillator minimum frequency");
+                requireFinite(concrete.frequencyMaximum, "Particle size oscillator maximum frequency");
+                requireFinite(concrete.scaleMinimum, "Particle size oscillator minimum scale");
+                requireFinite(concrete.scaleMaximum, "Particle size oscillator maximum scale");
+                requireFinite(concrete.phaseMinimum, "Particle size oscillator minimum phase");
+                requireFinite(concrete.phaseMaximum, "Particle size oscillator maximum phase");
             } else if constexpr (std::is_same_v<T, ControlPointAttractOperator>) {
                 requireFinite(concrete.origin, "Particle attract origin");
                 requireFinite(concrete.scale, "Particle attract scale");
                 requireFinite(concrete.threshold, "Particle attract threshold");
+            } else if constexpr (std::is_same_v<T, SizeChangeOperator>) {
+                requireFinite(concrete.startTime, "Particle size-change start time");
+                requireFinite(concrete.endTime, "Particle size-change end time");
+                requireFinite(concrete.startValue, "Particle size-change start value");
+                requireFinite(concrete.endValue, "Particle size-change end value");
+            } else if constexpr (std::is_same_v<T, AlphaChangeOperator>) {
+                requireFinite(concrete.startTime, "Particle alpha-change start time");
+                requireFinite(concrete.endTime, "Particle alpha-change end time");
+                requireFinite(concrete.startValue, "Particle alpha-change start value");
+                requireFinite(concrete.endValue, "Particle alpha-change end value");
+            } else if constexpr (std::is_same_v<T, ColorChangeOperator>) {
+                requireFinite(concrete.startTime, "Particle color-change start time");
+                requireFinite(concrete.endTime, "Particle color-change end time");
+                requireFinite(concrete.startValue, "Particle color-change start value");
+                requireFinite(concrete.endValue, "Particle color-change end value");
+            } else if constexpr (std::is_same_v<T, TurbulenceOperator>) {
+                requireFinite(concrete.scale, "Particle turbulence scale");
+                requireFinite(concrete.speedMinimum, "Particle turbulence minimum speed");
+                requireFinite(concrete.speedMaximum, "Particle turbulence maximum speed");
+                requireFinite(concrete.timeScale, "Particle turbulence time scale");
+                requireFinite(concrete.mask, "Particle turbulence mask");
+                requireFinite(concrete.phaseMinimum, "Particle turbulence minimum phase");
+                requireFinite(concrete.phaseMaximum, "Particle turbulence maximum phase");
+            } else if constexpr (std::is_same_v<T, VortexOperator>) {
+                requireFinite(concrete.axis, "Particle vortex axis");
+                requireFinite(concrete.offset, "Particle vortex offset");
+                requireFinite(concrete.distanceInner, "Particle vortex inner distance");
+                requireFinite(concrete.distanceOuter, "Particle vortex outer distance");
+                requireFinite(concrete.speedInner, "Particle vortex inner speed");
+                requireFinite(concrete.speedOuter, "Particle vortex outer speed");
+                requireFinite(concrete.centerForce, "Particle vortex center force");
+                requireFinite(concrete.ringRadius, "Particle vortex ring radius");
+                requireFinite(concrete.ringWidth, "Particle vortex ring width");
+                requireFinite(concrete.ringPullDistance, "Particle vortex ring pull distance");
+                requireFinite(concrete.ringPullForce, "Particle vortex ring pull force");
             }
         }, operation);
     }
@@ -533,6 +764,30 @@ void ParticleSimulation::prewarm() {
         step,
         configuration_.startTime
     );
+}
+
+void ParticleSimulation::initializeOperatorStates() {
+    for (std::size_t index = 0; index < configuration_.operators.size(); ++index) {
+        const auto* turbulence = std::get_if<TurbulenceOperator>(
+            &configuration_.operators[index]
+        );
+        if (turbulence == nullptr) {
+            continue;
+        }
+        OperatorState& state = operatorStates_[index];
+        // Linux samples these two values once when the operator is built,
+        // rather than once per particle or once per frame.  Keep that
+        // lifetime explicit so concrete property updates do not resample it.
+        state.turbulencePhase = randomRange(
+            turbulence->phaseMinimum,
+            turbulence->phaseMaximum
+        );
+        state.turbulenceSpeed = randomRange(
+            turbulence->speedMinimum,
+            turbulence->speedMaximum
+        );
+        state.turbulenceInitialized = true;
+    }
 }
 
 void ParticleSimulation::applyConcreteConfiguration(
@@ -851,8 +1106,11 @@ void ParticleSimulation::initialize(ParticleInstance& particle) {
         };
     }
 
-    for (const Initializer& initializer : configuration_.initializers) {
-        std::visit([this, &particle](const auto& concrete) {
+    for (std::size_t initializerIndex = 0;
+         initializerIndex < configuration_.initializers.size();
+         ++initializerIndex) {
+        const Initializer& initializer = configuration_.initializers[initializerIndex];
+        std::visit([this, &particle, initializerIndex](const auto& concrete) {
             using T = std::decay_t<decltype(concrete)>;
             if constexpr (std::is_same_v<T, LifetimeRandomInitializer>) {
                 particle.initialLifetime = randomRange(
@@ -911,6 +1169,12 @@ void ParticleSimulation::initialize(ParticleInstance& particle) {
                     ? normalized(right)
                     : Vector3{1.0, 0.0, 0.0};
 
+                // Match Linux's setup order: speed is sampled before the
+                // per-particle phase.
+                const double speed = randomRange(
+                    concrete.speedMinimum,
+                    concrete.speedMaximum
+                );
                 const double phase = randomRange(
                     concrete.phaseMinimum,
                     concrete.phaseMaximum
@@ -923,7 +1187,7 @@ void ParticleSimulation::initialize(ParticleInstance& particle) {
                         simulationTimeSeconds_ * concrete.timeScale + phase * 1.3,
                     }
                 );
-                Vector3 direction = turbulentDirection(sample);
+                Vector3 direction = curlNoise(sample);
                 direction = length(direction) > 0.0001
                     ? normalized(direction)
                     : forward;
@@ -961,14 +1225,43 @@ void ParticleSimulation::initialize(ParticleInstance& particle) {
                 }
                 particle.simulationVelocity = add(
                     particle.simulationVelocity,
-                    multiply(
-                        direction,
-                        randomRange(
-                            concrete.speedMinimum,
-                            concrete.speedMaximum
-                        )
-                    )
+                    multiply(direction, speed)
                 );
+            } else if constexpr (std::is_same_v<
+                                     T,
+                                     MapSequenceAroundControlPointInitializer
+                                 >) {
+                const int count = concrete.count;
+                if (count <= 0) {
+                    throw std::invalid_argument(
+                        "Particle map sequence count must be greater than zero"
+                    );
+                }
+                InitializerState& state = initializerStates_[initializerIndex];
+                const double angle =
+                    (static_cast<double>(state.mapSequenceIndex %
+                                         static_cast<std::uint64_t>(count)) /
+                     static_cast<double>(count)) * 2.0 * pi;
+                state.mapSequenceIndex =
+                    (state.mapSequenceIndex + 1U) %
+                    static_cast<std::uint64_t>(count);
+
+                particle.position = controlPointPosition(concrete.controlPoint)
+                    .value_or(Vector3{});
+                Vector3 speed = randomRange(
+                    concrete.speedMinimum,
+                    concrete.speedMaximum
+                );
+                speed.y = -speed.y;
+                // GLM's column-major matrix in the pinned implementation
+                // yields x' = cos*x + sin*y, y' = -sin*x + cos*y.
+                const double cosine = std::cos(angle);
+                const double sine = std::sin(angle);
+                particle.simulationVelocity = {
+                    cosine * speed.x + sine * speed.y,
+                    -sine * speed.x + cosine * speed.y,
+                    speed.z,
+                };
             }
         }, initializer);
     }
@@ -1028,6 +1321,66 @@ void ParticleSimulation::applyOperators(double stepSeconds) {
                         particle.alpha = baseAlpha;
                     }
                 }
+            } else if constexpr (std::is_same_v<T, SizeChangeOperator>) {
+                for (ParticleInstance& particle : particles_) {
+                    const double life = particle.lifetimePosition();
+                    const double multiplier = fadeValue(
+                        life,
+                        concrete.startTime,
+                        concrete.endTime,
+                        concrete.startValue,
+                        concrete.endValue
+                    );
+                    particle.size = particle.initialSize *
+                        concreteOverrides(configuration_).size * multiplier;
+                }
+            } else if constexpr (std::is_same_v<T, AlphaChangeOperator>) {
+                for (ParticleInstance& particle : particles_) {
+                    const double life = particle.lifetimePosition();
+                    const double multiplier = fadeValue(
+                        life,
+                        concrete.startTime,
+                        concrete.endTime,
+                        concrete.startValue,
+                        concrete.endValue
+                    );
+                    particle.alpha = particle.initialAlpha *
+                        concreteOverrides(configuration_).alpha * multiplier;
+                }
+            } else if constexpr (std::is_same_v<T, ColorChangeOperator>) {
+                for (ParticleInstance& particle : particles_) {
+                    const double life = particle.lifetimePosition();
+                    const Vector3 color = {
+                        fadeValue(
+                            life,
+                            concrete.startTime,
+                            concrete.endTime,
+                            concrete.startValue.x,
+                            concrete.endValue.x
+                        ),
+                        fadeValue(
+                            life,
+                            concrete.startTime,
+                            concrete.endTime,
+                            concrete.startValue.y,
+                            concrete.endValue.y
+                        ),
+                        fadeValue(
+                            life,
+                            concrete.startTime,
+                            concrete.endTime,
+                            concrete.startValue.z,
+                            concrete.endValue.z
+                        ),
+                    };
+                    particle.color = multiply(
+                        multiply(
+                            particle.initialColor,
+                            concreteOverrides(configuration_).colorMultiplier
+                        ),
+                        color
+                    );
+                }
             } else if constexpr (std::is_same_v<T, AngularMovementOperator>) {
                 const double dragFactor = std::max(
                     0.0,
@@ -1059,27 +1412,60 @@ void ParticleSimulation::applyOperators(double stepSeconds) {
                 for (ParticleInstance& particle : particles_) {
                     const ParticleOscillatorState& state =
                         particle.oscillatorStates[operationIndex];
-                    const Vector3 frequency = interpolate(
-                        {concrete.frequencyMinimum, concrete.frequencyMinimum,
-                         concrete.frequencyMinimum},
-                        {concrete.frequencyMaximum, concrete.frequencyMaximum,
-                         concrete.frequencyMaximum},
-                        state.frequencyUnit
-                    );
-                    const Vector3 scale = interpolate(
-                        {concrete.scaleMinimum, concrete.scaleMinimum,
-                         concrete.scaleMinimum},
-                        {concrete.scaleMaximum, concrete.scaleMaximum,
-                         concrete.scaleMaximum},
-                        state.scaleUnit
-                    );
-                    const Vector3 phase = interpolate(
-                        {concrete.phaseMinimum, concrete.phaseMinimum,
-                         concrete.phaseMinimum},
-                        {concrete.phaseMaximum, concrete.phaseMaximum,
-                         concrete.phaseMaximum},
-                        state.phaseUnit
-                    );
+                    const Vector3 frequency{
+                        oscillatorRandomRange(
+                            concrete.frequencyMinimum,
+                            concrete.frequencyMaximum,
+                            state.frequencyUnit.x
+                        ),
+                        oscillatorRandomRange(
+                            concrete.frequencyMinimum,
+                            concrete.frequencyMaximum,
+                            state.frequencyUnit.y
+                        ),
+                        oscillatorRandomRange(
+                            concrete.frequencyMinimum,
+                            concrete.frequencyMaximum,
+                            state.frequencyUnit.z
+                        ),
+                    };
+                    const Vector3 scale{
+                        oscillatorRandomRange(
+                            concrete.scaleMinimum,
+                            concrete.scaleMaximum,
+                            state.scaleUnit.x
+                        ),
+                        oscillatorRandomRange(
+                            concrete.scaleMinimum,
+                            concrete.scaleMaximum,
+                            state.scaleUnit.y
+                        ),
+                        oscillatorRandomRange(
+                            concrete.scaleMinimum,
+                            concrete.scaleMaximum,
+                            state.scaleUnit.z
+                        ),
+                    };
+                    const Vector3 phase{
+                        oscillatorRandomRange(
+                            concrete.phaseMinimum,
+                            concrete.phaseMaximum,
+                            state.phaseUnit.x,
+                            true
+                        ),
+                        oscillatorRandomRange(
+                            concrete.phaseMinimum,
+                            concrete.phaseMaximum,
+                            state.phaseUnit.y,
+                            true
+                        ),
+                        oscillatorRandomRange(
+                            concrete.phaseMinimum,
+                            concrete.phaseMaximum,
+                            state.phaseUnit.z,
+                            true
+                        ),
+                    };
                     const Vector3 movement{
                         -scale.x * frequency.x *
                             std::sin(frequency.x * particle.age + phase.x),
@@ -1100,19 +1486,43 @@ void ParticleSimulation::applyOperators(double stepSeconds) {
                 for (ParticleInstance& particle : particles_) {
                     const ParticleOscillatorState& state =
                         particle.oscillatorStates[operationIndex];
-                    const double frequency = interpolate(
+                    const double frequency = oscillatorRandomRange(
                         concrete.frequencyMinimum,
                         concrete.frequencyMaximum,
                         state.frequencyUnit.x
                     );
-                    const double phase = interpolate(
+                    const double phase = oscillatorRandomRange(
                         concrete.phaseMinimum,
                         concrete.phaseMaximum,
-                        state.phaseUnit.x
+                        state.phaseUnit.x,
+                        true
                     );
                     const double wave =
                         (std::cos(frequency * particle.age + phase) + 1.0) * 0.5;
                     particle.alpha *= interpolate(
+                        concrete.scaleMinimum,
+                        concrete.scaleMaximum,
+                        wave
+                    );
+                }
+            } else if constexpr (std::is_same_v<T, OscillateSizeOperator>) {
+                for (ParticleInstance& particle : particles_) {
+                    const ParticleOscillatorState& state =
+                        particle.oscillatorStates[operationIndex];
+                    const double frequency = oscillatorRandomRange(
+                        concrete.frequencyMinimum,
+                        concrete.frequencyMaximum,
+                        state.frequencyUnit.x
+                    );
+                    const double phase = oscillatorRandomRange(
+                        concrete.phaseMinimum,
+                        concrete.phaseMaximum,
+                        state.phaseUnit.x,
+                        true
+                    );
+                    const double wave =
+                        (std::cos(frequency * particle.age + phase) + 1.0) * 0.5;
+                    particle.size *= interpolate(
                         concrete.scaleMinimum,
                         concrete.scaleMaximum,
                         wave
@@ -1139,6 +1549,126 @@ void ParticleSimulation::applyOperators(double stepSeconds) {
                             multiply(
                                 normalized(towardCenter),
                                 concrete.scale * stepSeconds
+                            )
+                        );
+                    }
+                }
+            } else if constexpr (std::is_same_v<T, TurbulenceOperator>) {
+                const OperatorState& state = operatorStates_[operationIndex];
+                if (!state.turbulenceInitialized ||
+                    state.turbulenceSpeed <= 0.0001) {
+                    return;
+                }
+                const double noiseScale = concrete.scale * 2.0;
+                const double currentTime = simulationTimeSeconds_ + stepSeconds;
+                for (ParticleInstance& particle : particles_) {
+                    Vector3 noisePosition = particle.position;
+                    noisePosition.x += state.turbulencePhase +
+                        concrete.timeScale * currentTime;
+                    noisePosition = multiply(noisePosition, noiseScale);
+                    Vector3 direction = curlNoise(noisePosition);
+                    const double magnitude = length(direction);
+                    if (magnitude > 0.0001) {
+                        direction = multiply(
+                            direction,
+                            state.turbulenceSpeed / magnitude
+                        );
+                    }
+                    direction = multiply(direction, concrete.mask);
+                    particle.simulationVelocity = add(
+                        particle.simulationVelocity,
+                        multiply(direction, stepSeconds)
+                    );
+                }
+            } else if constexpr (std::is_same_v<T, VortexOperator>) {
+                // Linux leaves audio-modulated vortex operators inert when no
+                // spectrum is available. Never synthesize an amplitude here.
+                if (concrete.audioProcessingMode > 0) {
+                    return;
+                }
+                Vector3 axis = concrete.axis;
+                axis = length(axis) > 0.0 ? normalized(axis) : Vector3{0.0, 0.0, 1.0};
+                const Vector3 center = add(
+                    controlPointPosition(concrete.controlPoint).value_or(Vector3{}),
+                    concrete.offset
+                );
+                const bool infiniteAxis = (concrete.flags & 1U) != 0U;
+                const bool maintainDistance = (concrete.flags & 2U) != 0U;
+                const bool ringShape = (concrete.flags & 4U) != 0U;
+                for (ParticleInstance& particle : particles_) {
+                    const Vector3 toParticle = subtract(particle.position, center);
+                    double axialDistance = 0.0;
+                    Vector3 radialVector = toParticle;
+                    if (infiniteAxis) {
+                        axialDistance = dot(toParticle, axis);
+                        radialVector = subtract(
+                            toParticle,
+                            multiply(axis, axialDistance)
+                        );
+                    }
+                    (void)axialDistance;
+                    const double distance = length(radialVector);
+                    Vector3 tangent = cross(axis, radialVector);
+                    const double tangentLength = length(tangent);
+                    if (tangentLength <= 0.001) {
+                        continue;
+                    }
+                    tangent = multiply(tangent, 1.0 / tangentLength);
+
+                    double speed = 0.0;
+                    Vector3 radialForce{};
+                    if (ringShape) {
+                        const double ringInner = concrete.ringRadius -
+                            concrete.ringWidth * 0.5;
+                        const double ringOuter = concrete.ringRadius +
+                            concrete.ringWidth * 0.5;
+                        if (distance < ringInner) {
+                            speed = 0.0;
+                        } else if (distance <= ringOuter) {
+                            const double t = (distance - ringInner) /
+                                concrete.ringWidth;
+                            speed = concrete.speedInner + t *
+                                (concrete.speedOuter - concrete.speedInner);
+                        } else if (distance <= ringOuter + concrete.ringPullDistance) {
+                            const double pullT = (distance - ringOuter) /
+                                concrete.ringPullDistance;
+                            speed = concrete.speedOuter * (1.0 - pullT);
+                            if (distance > 0.001) {
+                                radialForce = multiply(
+                                    multiply(normalized(radialVector), -1.0),
+                                    concrete.ringPullForce * pullT
+                                );
+                            }
+                        }
+                    } else {
+                        const double disMid = concrete.distanceOuter -
+                            concrete.distanceInner + 0.1;
+                        if (disMid < 0.0 || distance < concrete.distanceInner) {
+                            speed = concrete.speedInner;
+                        } else if (distance > concrete.distanceOuter) {
+                            speed = concrete.speedOuter;
+                        } else {
+                            const double t = (distance - concrete.distanceInner) /
+                                disMid;
+                            speed = concrete.speedInner + t *
+                                (concrete.speedOuter - concrete.speedInner);
+                        }
+                    }
+
+                    particle.simulationVelocity = add(
+                        particle.simulationVelocity,
+                        multiply(tangent, speed * stepSeconds)
+                    );
+                    particle.simulationVelocity = add(
+                        particle.simulationVelocity,
+                        multiply(radialForce, stepSeconds)
+                    );
+                    if (maintainDistance && distance > 0.001) {
+                        particle.simulationVelocity = add(
+                            particle.simulationVelocity,
+                            multiply(
+                                multiply(normalized(radialVector), -1.0),
+                                concrete.centerForce * stepSeconds
                             )
                         );
                     }

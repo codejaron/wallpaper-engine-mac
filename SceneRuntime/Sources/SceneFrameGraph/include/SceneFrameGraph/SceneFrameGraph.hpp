@@ -25,6 +25,7 @@ enum class FrameGeometryKind {
     fullscreenLocal,
     imageScene,
     passthroughCapture,
+    puppetMesh,
 };
 enum class FrameTexCoordKind { image, full };
 enum class FrameOperationKind {
@@ -36,6 +37,12 @@ enum class FrameOperationKind {
     particle = 5,
 };
 enum class FrameSoundPlaybackMode { once, loop };
+enum class FrameSoundPlaybackCommandAction { play, pause, stop };
+struct FrameSoundPlaybackCommand final {
+    FrameSoundPlaybackCommandAction action =
+        FrameSoundPlaybackCommandAction::play;
+    std::uint64_t generation = 0;
+};
 enum class FramePlanIssueCode {
     textRenderingUnavailable,
     soundRuntimeUnavailable,
@@ -131,10 +138,18 @@ struct FrameParallaxDescriptor {
     double mouseInfluence = 1.0;
 };
 
+struct FrameTextureAnimationOverride final {
+    std::string assetIdentity;
+    std::size_t frame = 0;
+};
+
 struct FrameImageDescriptor {
     std::size_t objectIndex = 0;
     int objectId = 0;
     bool visible = false;
+    // Layer-level Solid flag controls SceneScript cursor hit testing. This is
+    // distinct from the model's procedural `solidLayer` image source flag.
+    bool solid = false;
     bool passthrough = false;
     bool fullscreen = false;
     FrameVector2 size;
@@ -142,12 +157,14 @@ struct FrameImageDescriptor {
     FrameResourceRef source;
     FrameResourceRef compositeA;
     FrameResourceRef compositeB;
+    std::shared_ptr<const PuppetMesh> puppetMesh;
     EvaluatedValue alpha;
     EvaluatedValue color;
     EvaluatedValue brightness;
     EvaluatedValue colorBlendMode;
     EvaluatedValue parallaxDepth;
     std::string horizontalAlignment;
+    std::optional<FrameTextureAnimationOverride> textureAnimation;
 };
 
 struct FrameTextDescriptor {
@@ -167,6 +184,27 @@ struct FrameTextDescriptor {
     std::string verticalAlignment;
 };
 
+enum class FrameParticleRendererKind {
+    sprite,
+    spriteTrail,
+    rope,
+    ropeTrail,
+};
+
+struct FrameParticleRendererDescriptor {
+    FrameParticleRendererKind kind = FrameParticleRendererKind::sprite;
+    double length = 0.05;
+    double maxLength = 10.0;
+    double minLength = 0.0;
+    double subdivision = 1.0;
+    double segments = 4.0;
+    double uvScale = 1.0;
+    bool uvScrolling = false;
+    bool uvSmoothing = true;
+    bool fadeAlpha = false;
+    bool fadeSize = false;
+};
+
 struct FrameParticleDescriptor {
     std::size_t objectIndex = 0;
     int objectId = 0;
@@ -181,11 +219,14 @@ struct FrameParticleDescriptor {
     DepthMode depthTest = DepthMode::disabled;
     DepthMode depthWrite = DepthMode::disabled;
     FrameResourceRef texture0;
+    std::map<int, FrameResourceRef> textures;
     ComboMap combos;
+    std::map<std::string, EvaluatedValue> constants;
     FrameVector2 parallaxDepth;
     bool perspective = false;
     std::string animationMode;
     double sequenceMultiplier = 1.0;
+    FrameParticleRendererDescriptor renderer;
     particle::Configuration configuration;
 };
 
@@ -200,6 +241,7 @@ struct FrameSoundDescriptor {
     bool muteInEditor = false;
     double minimumTime = 0.0;
     double maximumTime = 0.0;
+    std::optional<FrameSoundPlaybackCommand> playbackCommand;
 };
 
 struct FramePassOrigin {

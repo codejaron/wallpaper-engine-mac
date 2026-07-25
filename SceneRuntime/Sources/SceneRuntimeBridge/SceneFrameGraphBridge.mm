@@ -114,6 +114,8 @@ WESceneFrameGeometryKind geometryKind(FrameGeometryKind kind) noexcept {
             return WE_SCENE_FRAME_GEOMETRY_IMAGE_SCENE;
         case FrameGeometryKind::passthroughCapture:
             return WE_SCENE_FRAME_GEOMETRY_PASSTHROUGH_CAPTURE;
+        case FrameGeometryKind::puppetMesh:
+            return WE_SCENE_FRAME_GEOMETRY_PUPPET_MESH;
     }
     std::terminate();
 }
@@ -629,6 +631,19 @@ extern "C" int we_scene_frame_plan_particle_info(
     out_info->operator_count = value.configuration.operators.size();
     out_info->control_point_count = value.configuration.controlPoints.size();
     out_info->combo_count = value.combos.size();
+    out_info->renderer_kind = static_cast<int>(value.renderer.kind);
+    out_info->renderer_length = value.renderer.length;
+    out_info->renderer_max_length = value.renderer.maxLength;
+    out_info->renderer_min_length = value.renderer.minLength;
+    out_info->renderer_subdivision = value.renderer.subdivision;
+    out_info->renderer_segments = value.renderer.segments;
+    out_info->renderer_uv_scale = value.renderer.uvScale;
+    out_info->renderer_uv_scrolling = value.renderer.uvScrolling ? 1 : 0;
+    out_info->renderer_uv_smoothing = value.renderer.uvSmoothing ? 1 : 0;
+    out_info->renderer_fade_alpha = value.renderer.fadeAlpha ? 1 : 0;
+    out_info->renderer_fade_size = value.renderer.fadeSize ? 1 : 0;
+    out_info->texture_count = value.textures.size();
+    out_info->constant_count = value.constants.size();
     return 1;
 }
 

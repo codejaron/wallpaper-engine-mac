@@ -2,6 +2,7 @@
 
 #include <SceneCore/AssetResolver.hpp>
 #include <SceneCore/FormatError.hpp>
+#include <SceneCore/PuppetMesh.hpp>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -307,6 +308,24 @@ std::uint32_t uint32Value(
         );
     }
     return static_cast<std::uint32_t>(parsed);
+}
+
+std::optional<std::uint32_t> optionalUInt32(
+    const Document& document,
+    const Json& object,
+    std::string_view key,
+    std::string_view parentPointer
+) {
+    const Json* value = optionalField(object, key);
+    if (value == nullptr) {
+        return std::nullopt;
+    }
+    return uint32Value(
+        document,
+        *value,
+        childPointer(parentPointer, key),
+        std::string("Field '") + std::string(key) + "'"
+    );
 }
 
 double numberValue(
@@ -1235,7 +1254,83 @@ private:
             result.objects.push_back(std::move(object));
         }
         validateObjectReferences(document, result.objects, objectIndices);
+
+        const DynamicValue& bloom = result.generalValues.at("bloom");
+        if (bloom.value.boolean() || bloom.isDynamic()) {
+            result.bloomModel = makeLinuxBloomModel();
+            result.bloomEffect = makeLinuxBloomEffect();
+        }
         return result;
+    }
+
+    std::shared_ptr<const Model> makeLinuxBloomModel() {
+        auto material = std::make_shared<Material>();
+        material->assetPath = "materials/wpenginelinux.json";
+        MaterialPass pass;
+        pass.blending = BlendingMode::normal;
+        pass.culling = CullingMode::disabled;
+        pass.depthTest = DepthMode::disabled;
+        pass.depthWrite = DepthMode::disabled;
+        pass.shader = "genericimage2";
+        pass.textures.push_back(TextureSlot{
+            .name = std::string("_rt_FullFrameBuffer"),
+        });
+        material->passes.push_back(std::move(pass));
+
+        auto model = std::make_shared<Model>();
+        model->assetPath = "models/wpenginelinux.json";
+        model->material = std::move(material);
+        return model;
+    }
+
+    std::shared_ptr<const Effect> makeLinuxBloomEffect() {
+        auto effect = std::make_shared<Effect>();
+        effect->assetPath = "effects/wpenginelinux/bloomeffect.json";
+        effect->name = "camerabloom_wpengine_linux";
+        effect->group = "wpengine_linux_camera";
+
+        const auto addPass = [this, &effect](
+            std::string materialPath,
+            std::string target,
+            std::vector<EffectBind> binds
+        ) {
+            EffectPass pass;
+            pass.material = loadMaterial(
+                materialPath,
+                {
+                    "effects/wpenginelinux/bloomeffect.json#/passes -> " +
+                        materialPath,
+                }
+            );
+            pass.target = std::move(target);
+            pass.binds = std::move(binds);
+            effect->passes.push_back(std::move(pass));
+        };
+
+        addPass(
+            "materials/util/downsample_quarter_bloom.json",
+            "_rt_4FrameBuffer",
+            {{.index = 0, .name = "_rt_FullFrameBuffer"}}
+        );
+        addPass(
+            "materials/util/downsample_eighth_blur_v.json",
+            "_rt_8FrameBuffer",
+            {{.index = 0, .name = "_rt_4FrameBuffer"}}
+        );
+        addPass(
+            "materials/util/blur_h_bloom.json",
+            "_rt_Bloom",
+            {{.index = 0, .name = "_rt_8FrameBuffer"}}
+        );
+        addPass(
+            "materials/util/combine.json",
+            "_rt_FullFrameBuffer",
+            {
+                {.index = 0, .name = "_rt_imageLayerComposite_-1_a"},
+                {.index = 1, .name = "_rt_Bloom"},
+            }
+        );
+        return effect;
     }
 
     ParticleVector3 particleVector3(
@@ -1725,6 +1820,29 @@ private:
                 ),
             };
         }
+        if (name == "mapsequencearoundcontrolpoint") {
+            return ParticleMapSequenceAroundControlPointInitializer{
+                .id = id,
+                .controlPoint = optionalParticleDynamic(
+                    document, source, "controlpoint", pointer, literal(0),
+                    DynamicValueParseMode::standard
+                ),
+                .count = optionalParticleDynamic(
+                    document, source, "count", pointer, literal(1),
+                    DynamicValueParseMode::standard
+                ),
+                .speedMinimum = optionalParticleDynamic(
+                    document, source, "speedmin", pointer,
+                    literal(std::string("0 0 0")),
+                    DynamicValueParseMode::standard
+                ),
+                .speedMaximum = optionalParticleDynamic(
+                    document, source, "speedmax", pointer,
+                    literal(std::string("100 100 100")),
+                    DynamicValueParseMode::standard
+                ),
+            };
+        }
         return std::nullopt;
     }
 
@@ -1845,6 +1963,221 @@ private:
                 ),
             };
         }
+        if (name == "oscillatesize") {
+            return ParticleOscillateSizeOperator{
+                .id = id,
+                .frequencyMinimum = optionalParticleDynamic(
+                    document, source, "frequencymin", pointer, literal(0.0),
+                    DynamicValueParseMode::standard
+                ),
+                .frequencyMaximum = optionalParticleDynamic(
+                    document, source, "frequencymax", pointer, literal(10.0),
+                    DynamicValueParseMode::standard
+                ),
+                .scaleMinimum = optionalParticleDynamic(
+                    document, source, "scalemin", pointer, literal(0.8),
+                    DynamicValueParseMode::standard
+                ),
+                .scaleMaximum = optionalParticleDynamic(
+                    document, source, "scalemax", pointer, literal(1.2),
+                    DynamicValueParseMode::standard
+                ),
+                .phaseMinimum = optionalParticleDynamic(
+                    document, source, "phasemin", pointer, literal(0.0),
+                    DynamicValueParseMode::standard
+                ),
+                .phaseMaximum = optionalParticleDynamic(
+                    document, source, "phasemax", pointer,
+                    literal(6.283185307179586), DynamicValueParseMode::standard
+                ),
+            };
+        }
+        if (name == "sizechange") {
+            return ParticleSizeChangeOperator{
+                .id = id,
+                .startTime = optionalParticleDynamic(
+                    document, source, "starttime", pointer, literal(0.0),
+                    DynamicValueParseMode::standard
+                ),
+                .endTime = optionalParticleDynamic(
+                    document, source, "endtime", pointer, literal(1.0),
+                    DynamicValueParseMode::standard
+                ),
+                .startValue = optionalParticleDynamic(
+                    document, source, "startvalue", pointer, literal(1.0),
+                    DynamicValueParseMode::standard
+                ),
+                .endValue = optionalParticleDynamic(
+                    document, source, "endvalue", pointer, literal(0.0),
+                    DynamicValueParseMode::standard
+                ),
+            };
+        }
+        if (name == "alphachange") {
+            return ParticleAlphaChangeOperator{
+                .id = id,
+                .startTime = optionalParticleDynamic(
+                    document, source, "starttime", pointer, literal(0.0),
+                    DynamicValueParseMode::standard
+                ),
+                .endTime = optionalParticleDynamic(
+                    document, source, "endtime", pointer, literal(1.0),
+                    DynamicValueParseMode::standard
+                ),
+                .startValue = optionalParticleDynamic(
+                    document, source, "startvalue", pointer, literal(1.0),
+                    DynamicValueParseMode::standard
+                ),
+                .endValue = optionalParticleDynamic(
+                    document, source, "endvalue", pointer, literal(0.0),
+                    DynamicValueParseMode::standard
+                ),
+            };
+        }
+        if (name == "colorchange") {
+            return ParticleColorChangeOperator{
+                .id = id,
+                .startTime = optionalParticleDynamic(
+                    document, source, "starttime", pointer, literal(0.0),
+                    DynamicValueParseMode::standard
+                ),
+                .endTime = optionalParticleDynamic(
+                    document, source, "endtime", pointer, literal(1.0),
+                    DynamicValueParseMode::standard
+                ),
+                .startValue = optionalParticleDynamic(
+                    document, source, "startvalue", pointer,
+                    literal(std::string("1 1 1")),
+                    DynamicValueParseMode::standard
+                ),
+                .endValue = optionalParticleDynamic(
+                    document, source, "endvalue", pointer,
+                    literal(std::string("1 1 1")),
+                    DynamicValueParseMode::standard
+                ),
+            };
+        }
+        if (name == "turbulence") {
+            return ParticleTurbulenceOperator{
+                .id = id,
+                .scale = optionalParticleDynamic(
+                    document, source, "scale", pointer, literal(0.005),
+                    DynamicValueParseMode::standard
+                ),
+                .speedMinimum = optionalParticleDynamic(
+                    document, source, "speedmin", pointer, literal(500.0),
+                    DynamicValueParseMode::standard
+                ),
+                .speedMaximum = optionalParticleDynamic(
+                    document, source, "speedmax", pointer, literal(1000.0),
+                    DynamicValueParseMode::standard
+                ),
+                .timeScale = optionalParticleDynamic(
+                    document, source, "timescale", pointer, literal(0.01),
+                    DynamicValueParseMode::standard
+                ),
+                .mask = optionalParticleDynamic(
+                    document, source, "mask", pointer,
+                    literal(std::string("1 1 0")),
+                    DynamicValueParseMode::standard
+                ),
+                .phaseMinimum = optionalParticleDynamic(
+                    document, source, "phasemin", pointer, literal(0.0),
+                    DynamicValueParseMode::standard
+                ),
+                .phaseMaximum = optionalParticleDynamic(
+                    document, source, "phasemax", pointer, literal(0.0),
+                    DynamicValueParseMode::standard
+                ),
+                .audioProcessingMode = optionalParticleDynamic(
+                    document, source, "audioprocessingmode", pointer,
+                    literal(0), DynamicValueParseMode::standard
+                ),
+                .audioProcessingBounds = optionalParticleDynamic(
+                    document, source, "audioprocessingbounds", pointer,
+                    literal(std::string("0 1")),
+                    DynamicValueParseMode::standard
+                ),
+                .audioProcessingExponent = optionalParticleDynamic(
+                    document, source, "audioprocessingexponent", pointer,
+                    literal(1.0), DynamicValueParseMode::standard
+                ),
+                .audioProcessingFrequencyStart = optionalParticleDynamic(
+                    document, source, "audioprocessingfrequencystart", pointer,
+                    literal(0), DynamicValueParseMode::standard
+                ),
+                .audioProcessingFrequencyEnd = optionalParticleDynamic(
+                    document, source, "audioprocessingfrequencyend", pointer,
+                    literal(15), DynamicValueParseMode::standard
+                ),
+            };
+        }
+        if (name == "vortex" || name == "vortex_v2") {
+            return ParticleVortexOperator{
+                .id = id,
+                .controlPoint = optionalInt(
+                    document, source, "controlpoint", pointer
+                ).value_or(0),
+                .flags = optionalUInt32(
+                    document, source, "flags", pointer
+                ).value_or(0),
+                .axis = optionalParticleDynamic(
+                    document, source, "axis", pointer,
+                    literal(std::string("0 0 1")),
+                    DynamicValueParseMode::standard
+                ),
+                .offset = optionalParticleDynamic(
+                    document, source, "offset", pointer,
+                    literal(std::string("0 0 0")),
+                    DynamicValueParseMode::standard
+                ),
+                .distanceInner = optionalParticleDynamic(
+                    document, source, "distanceinner", pointer, literal(500.0),
+                    DynamicValueParseMode::standard
+                ),
+                .distanceOuter = optionalParticleDynamic(
+                    document, source, "distanceouter", pointer, literal(650.0),
+                    DynamicValueParseMode::standard
+                ),
+                .speedInner = optionalParticleDynamic(
+                    document, source, "speedinner", pointer, literal(2500.0),
+                    DynamicValueParseMode::standard
+                ),
+                .speedOuter = optionalParticleDynamic(
+                    document, source, "speedouter", pointer, literal(0.0),
+                    DynamicValueParseMode::standard
+                ),
+                .centerForce = optionalParticleDynamic(
+                    document, source, "centerforce", pointer, literal(1.0),
+                    DynamicValueParseMode::standard
+                ),
+                .ringRadius = optionalParticleDynamic(
+                    document, source, "ringradius", pointer, literal(300.0),
+                    DynamicValueParseMode::standard
+                ),
+                .ringWidth = optionalParticleDynamic(
+                    document, source, "ringwidth", pointer, literal(50.0),
+                    DynamicValueParseMode::standard
+                ),
+                .ringPullDistance = optionalParticleDynamic(
+                    document, source, "ringpulldistance", pointer, literal(50.0),
+                    DynamicValueParseMode::standard
+                ),
+                .ringPullForce = optionalParticleDynamic(
+                    document, source, "ringpullforce", pointer, literal(10.0),
+                    DynamicValueParseMode::standard
+                ),
+                .audioProcessingMode = optionalParticleDynamic(
+                    document, source, "audioprocessingmode", pointer,
+                    literal(0), DynamicValueParseMode::standard
+                ),
+                .audioProcessingBounds = optionalParticleDynamic(
+                    document, source, "audioprocessingbounds", pointer,
+                    literal(std::string("0 1")),
+                    DynamicValueParseMode::standard
+                ),
+            };
+        }
         if (name == "controlpointattract") {
             const int controlPoint = optionalInt(
                 document, source, "controlpoint", pointer
@@ -1878,42 +2211,80 @@ private:
         const std::string name = optionalString(
             document, source, "name", pointer, false
         ).value_or("sprite");
-        if (name != "sprite") {
-            fail(
-                document,
-                childPointer(pointer, "name"),
-                SceneModelErrorCode::unsupportedObject,
-                "Unsupported particle renderer '" + name + "'"
-            );
-        }
         ParticleSpriteRenderer result;
         result.id = optionalParticleId(document, source, pointer);
+        result.name = name;
+        result.length = optionalNumber(
+            document, source, "length", pointer
+        ).value_or(name == "ropetrail" ? 1.0 : 0.05);
+        result.maxLength = optionalNumber(
+            document, source, "maxlength", pointer
+        ).value_or(10.0);
+        result.minLength = optionalNumber(
+            document, source, "minlength", pointer
+        ).value_or(0.0);
+        result.subdivision = optionalNumber(
+            document, source, "subdivision", pointer
+        ).value_or(name == "rope" ? 4.0 : 1.0);
+        result.segments = optionalNumber(
+            document, source, "segments", pointer
+        ).value_or(4.0);
+        result.uvScale = optionalNumber(
+            document, source, "uvscale", pointer
+        ).value_or(1.0);
+        result.uvScrolling = optionalBool(
+            document, source, "uvscrolling", pointer, false
+        );
+        result.uvSmoothing = optionalBool(
+            document, source, "uvsmoothing", pointer, true
+        );
+        result.fadeAlpha = optionalBool(
+            document, source, "fadealpha", pointer, false
+        );
+        result.fadeSize = optionalBool(
+            document, source, "fadesize", pointer, false
+        );
         // The pinned Linux renderer always uses screen-facing sprites and
         // does not consume authored orientation/axis metadata.
         return result;
     }
 
-    void validateEmptyParticleCollection(
+    ParticleChild parseParticleChild(
         const Document& document,
         const Json& source,
-        std::string_view key,
         std::string_view pointer
     ) const {
-        const Json* value = optionalField(source, key);
-        if (value == nullptr || value->is_null()) {
-            return;
-        }
-        const std::string fieldPointer = childPointer(pointer, key);
-        requireArray(document, *value, fieldPointer, "Particle collection");
-        if (!value->empty()) {
-            fail(
-                document,
-                fieldPointer,
-                SceneModelErrorCode::unsupportedObject,
-                "Particle " + std::string(key) +
-                    " is not supported by the phase-one particle runtime"
-            );
-        }
+        requireObject(document, source, pointer, "Particle child");
+
+        ParticleChild result;
+        result.particlePath = optionalString(
+            document, source, "particle", pointer
+        ).value_or("");
+        result.type = optionalString(
+            document, source, "type", pointer
+        ).value_or("static");
+        result.name = optionalString(
+            document, source, "name", pointer
+        ).value_or("");
+        result.maxCount = optionalInt(
+            document, source, "maxcount", pointer
+        ).value_or(20);
+        result.controlPointStartIndex = optionalInt(
+            document, source, "controlpointstartindex", pointer
+        ).value_or(0);
+        result.probability = optionalNumber(
+            document, source, "probability", pointer
+        ).value_or(1.0);
+        result.angles = optionalParticleVector3(
+            document, source, "angles", pointer, {}
+        );
+        result.origin = optionalParticleVector3(
+            document, source, "origin", pointer, {}
+        );
+        result.scale = optionalParticleVector3(
+            document, source, "scale", pointer, {1.0, 1.0, 1.0}
+        );
+        return result;
     }
 
     std::shared_ptr<const ParticleDefinition> parseParticleDefinition(
@@ -1923,7 +2294,6 @@ private:
         std::string assetPath
     ) {
         requireObject(document, source, pointer, "Particle definition");
-        validateEmptyParticleCollection(document, source, "children", pointer);
 
         auto result = std::make_shared<ParticleDefinition>();
         result->assetPath = std::move(assetPath);
@@ -2106,14 +2476,36 @@ private:
                 }
             }
         }
+        if (const Json* children = optionalField(source, "children");
+            children != nullptr && children->is_array()) {
+            const std::string collectionPointer = childPointer(pointer, "children");
+            requireArray(document, *children, collectionPointer, "Particle children");
+            result->children.reserve(children->size());
+            for (std::size_t index = 0; index < children->size(); ++index) {
+                result->children.push_back(parseParticleChild(
+                    document,
+                    (*children)[index],
+                    childPointer(collectionPointer, index)
+                ));
+            }
+        }
         if (const Json* renderers = optionalField(source, "renderer");
             renderers != nullptr && !renderers->is_null()) {
             const std::string collectionPointer = childPointer(pointer, "renderer");
             if (renderers->is_array() && !renderers->empty()) {
-                result->renderer = parseParticleRenderer(
-                    document, (*renderers)[0], childPointer(collectionPointer, 0)
-                );
+                result->renderers.reserve(renderers->size());
+                for (std::size_t index = 0; index < renderers->size(); ++index) {
+                    result->renderers.push_back(parseParticleRenderer(
+                        document,
+                        (*renderers)[index],
+                        childPointer(collectionPointer, index)
+                    ));
+                }
+                result->renderer = result->renderers.front();
             }
+        }
+        if (result->renderers.empty()) {
+            result->renderers.push_back(result->renderer);
         }
         return result;
     }
@@ -2487,6 +2879,17 @@ private:
             literal(std::int64_t(0)),
             DynamicValueParseMode::standard
         );
+        if (result.colorBlendMode.value.number() > 0.0 ||
+            result.colorBlendMode.isDynamic()) {
+            result.colorBlendMaterial = loadMaterial(
+                "materials/util/effectpassthrough.json",
+                referenceChain(
+                    document,
+                    childPointer(pointer, "colorBlendMode"),
+                    "materials/util/effectpassthrough.json"
+                )
+            );
+        }
         result.horizontalAlignment = optionalString(
             document,
             source,
@@ -2524,12 +2927,33 @@ private:
             const std::string effectsPointer = childPointer(pointer, "effects");
             requireArray(document, *effects, effectsPointer, "Image effects");
             result.effects.reserve(effects->size());
+            bool needsMagentaCompositeTintMaterial = false;
             for (std::size_t index = 0; index < effects->size(); ++index) {
                 result.effects.push_back(parseImageEffect(
                     document,
                     (*effects)[index],
                     childPointer(effectsPointer, index)
                 ));
+                for (const EffectPassOverride& passOverride :
+                     result.effects.back().passOverrides) {
+                    const auto composite = passOverride.combos.find("COMPOSITE");
+                    if (composite != passOverride.combos.end() &&
+                        composite->second == 2 &&
+                        passOverride.constants.contains("compositecolor")) {
+                        needsMagentaCompositeTintMaterial = true;
+                        break;
+                    }
+                }
+            }
+            if (needsMagentaCompositeTintMaterial) {
+                result.magentaCompositeTintMaterial = loadMaterial(
+                    "materials/effects/tint.json",
+                    referenceChain(
+                        document,
+                        effectsPointer,
+                        "materials/effects/tint.json"
+                    )
+                );
             }
         }
 
@@ -2853,7 +3277,38 @@ private:
             );
             result->width = optionalInt(document, document.root, "width", "");
             result->height = optionalInt(document, document.root, "height", "");
-            result->puppet = optionalString(document, document.root, "puppet", "");
+            if (const Json* puppet = optionalField(document.root, "puppet")) {
+                const std::string puppetPath = stringValue(
+                    document,
+                    *puppet,
+                    "/puppet",
+                    "Puppet model path",
+                    false
+                );
+                const std::vector<std::string> puppetChain = referenceChain(
+                    document,
+                    "/puppet",
+                    puppetPath
+                );
+                try {
+                    const ResolvedAsset asset = resolver_.resolve(puppetPath);
+                    result->puppetMesh = std::make_shared<const PuppetMesh>(
+                        PuppetMeshParser::parse(asset.bytes, puppetPath)
+                    );
+                } catch (const FormatError& error) {
+                    const SceneModelErrorCode code =
+                        error.code() == FormatErrorCode::assetNotFound
+                            ? SceneModelErrorCode::danglingReference
+                            : SceneModelErrorCode::assetFailure;
+                    throw SceneModelError(
+                        code,
+                        puppetPath,
+                        "/puppet",
+                        puppetChain,
+                        error.what()
+                    );
+                }
+            }
             if (const Json* cropOffset = optionalField(document.root, "cropoffset")) {
                 result->cropOffset = parseDynamic(
                     document,

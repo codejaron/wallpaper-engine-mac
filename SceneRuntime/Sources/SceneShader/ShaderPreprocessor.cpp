@@ -9,6 +9,7 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <locale>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -323,17 +324,60 @@ std::vector<double> parseVectorDefault(
     std::string_view parameterName,
     std::string_view sourceName
 ) {
-    std::istringstream stream{std::string(value)};
+    const auto malformed = [&]() -> void {
+        preprocessError(
+            sourceName,
+            "Uniform metadata default for vector '" +
+                std::string(parameterName) + "' must contain exactly " +
+                std::to_string(expectedCount) + " numbers"
+        );
+    };
+
     std::vector<double> components;
-    double component = 0.0;
-    while (stream >> component) {
+    std::size_t position = 0;
+    bool expectsValue = true;
+    while (position < value.size()) {
+        bool skippedWhitespace = false;
+        while (position < value.size() &&
+               std::isspace(
+                   static_cast<unsigned char>(value[position])
+               ) != 0) {
+            skippedWhitespace = true;
+            ++position;
+        }
+        if (position == value.size()) {
+            if (expectsValue) malformed();
+            break;
+        }
+
+        if (!expectsValue) {
+            if (value[position] == ',') {
+                ++position;
+                expectsValue = true;
+                continue;
+            }
+            if (!skippedWhitespace) malformed();
+            expectsValue = true;
+        }
+        if (value[position] == ',') malformed();
+
+        const std::size_t tokenStart = position;
+        while (position < value.size() && value[position] != ',' &&
+               std::isspace(
+                   static_cast<unsigned char>(value[position])
+               ) == 0) {
+            ++position;
+        }
+        std::istringstream tokenStream{
+            std::string(value.substr(tokenStart, position - tokenStart))
+        };
+        tokenStream.imbue(std::locale::classic());
+        double component = 0.0;
+        if (!(tokenStream >> component)) malformed();
+        if (tokenStream.peek() != std::char_traits<char>::eof()) malformed();
+
         if (components.size() == expectedCount) {
-            preprocessError(
-                sourceName,
-                "Uniform metadata default for vector '" +
-                    std::string(parameterName) + "' must contain exactly " +
-                    std::to_string(expectedCount) + " numbers"
-            );
+            malformed();
         }
         if (!std::isfinite(component)) {
             preprocessError(
@@ -343,15 +387,9 @@ std::vector<double> parseVectorDefault(
             );
         }
         components.push_back(component);
+        expectsValue = false;
     }
-    if (!stream.eof() || components.size() != expectedCount) {
-        preprocessError(
-            sourceName,
-            "Uniform metadata default for vector '" +
-                std::string(parameterName) + "' must contain exactly " +
-                std::to_string(expectedCount) + " numbers"
-        );
-    }
+    if (expectsValue || components.size() != expectedCount) malformed();
     return components;
 }
 
@@ -681,18 +719,35 @@ PreprocessedShaderPair ShaderPreprocessor::preprocessSources(
 ) const {
     SourceExpander vertexExpander(resolver_, std::string(vertexName));
     SourceExpander fragmentExpander(resolver_, std::string(fragmentName));
+    std::string expandedVertex = vertexExpander.expand(vertexSource, vertexName);
+    std::string expandedFragment = fragmentExpander.expand(
+        fragmentSource, fragmentName
+    );
+
+    // Wallpaper Engine treats a vertex/fragment pair as one shader program:
+    // combo metadata discovered in either stage is visible to both. Official
+    // effects commonly declare a combo only beside the fragment parameter
+    // that controls it while using the same macro to guard vertex varyings.
+    // Resolving each stage independently therefore creates incompatible
+    // interfaces even though both sources are valid as a linked pair.
+    std::map<std::string, int> linkedCombos;
+    parseCombos(expandedVertex, options, linkedCombos);
+    parseCombos(expandedFragment, options, linkedCombos);
+    ShaderPreprocessOptions linkedOptions = options;
+    linkedOptions.combos = std::move(linkedCombos);
+
     PreprocessedShaderPair result {
         makeShader(
             false,
-            vertexExpander.expand(vertexSource, vertexName),
+            std::move(expandedVertex),
             std::string(vertexName),
-            options
+            linkedOptions
         ),
         makeShader(
             true,
-            fragmentExpander.expand(fragmentSource, fragmentName),
+            std::move(expandedFragment),
             std::string(fragmentName),
-            options
+            linkedOptions
         ),
     };
     result.vertex.source = applyLinkedVaryingCompatibility(

@@ -133,6 +133,78 @@ final class SceneRuntimeBridgeTests: XCTestCase {
         )
     }
 
+    func testShaderTranslationSharesDiscoveredCombosAcrossLinkedStages() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let assets = root.appendingPathComponent("assets", isDirectory: true)
+        let packageURL = root.appendingPathComponent("scene.pkg")
+        try FileManager.default.createDirectory(
+            at: assets.appendingPathComponent("shaders", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let vertex = """
+        attribute vec3 a_Position;
+        #if NOISE == 1
+        varying vec2 v_NoiseTexCoord;
+        #endif
+        void main() {
+            gl_Position = vec4(a_Position, 1.0);
+        #if NOISE == 1
+            v_NoiseTexCoord = a_Position.xy;
+        #endif
+        }
+        """
+        let fragment = """
+        // [COMBO] {"combo":"NOISE","default":1}
+        #if NOISE == 1
+        varying vec2 v_NoiseTexCoord;
+        #endif
+        void main() {
+        #if NOISE == 1
+            gl_FragColor = vec4(v_NoiseTexCoord, 0.0, 1.0);
+        #else
+            gl_FragColor = vec4(0.0);
+        #endif
+        }
+        """
+        try makePackage([
+            ("shaders/combo.vert", Data(vertex.utf8)),
+            ("shaders/combo.frag", Data(fragment.utf8)),
+        ]).write(to: packageURL)
+        let runtime = try createRuntime(assets: assets, package: packageURL)
+        defer { we_scene_runtime_destroy(runtime) }
+
+        var error: WESceneRuntimeErrorRef?
+        let translation = "shaders/combo.vert".withCString { vertexPath in
+            "shaders/combo.frag".withCString { fragmentPath in
+                we_scene_runtime_shader_translate_files(
+                    runtime,
+                    vertexPath,
+                    fragmentPath,
+                    &error
+                )
+            }
+        }
+        guard let translation else {
+            let message = errorMessage(error)
+            we_scene_runtime_error_destroy(error)
+            XCTFail("Shader translation failed: \(message)")
+            throw TestFailure.shaderTranslation
+        }
+        defer { we_scene_shader_translation_destroy(translation) }
+        XCTAssertNil(error)
+
+        let preprocessedVertex = runtimeString(
+            we_scene_shader_translation_preprocessed_vertex_source(translation)
+        )
+        let preprocessedFragment = runtimeString(
+            we_scene_shader_translation_preprocessed_fragment_source(translation)
+        )
+        XCTAssertTrue(preprocessedVertex.contains("#define NOISE 1"), preprocessedVertex)
+        XCTAssertTrue(preprocessedFragment.contains("#define NOISE 1"), preprocessedFragment)
+    }
+
     func testShaderParseFailurePreservesStageAndSourceName() {
         let vertex = """
         #version 330
@@ -364,7 +436,14 @@ final class SceneRuntimeBridgeTests: XCTestCase {
         uniform bool g_Enabled; // {"material":"enabled","default":true}
         uniform int g_Count; // {"material":"count","default":-3}
         uniform vec3 g_Tint; // {"material":"tint","default":"1 -0.5 2.25"}
-        void main() { gl_Position = vec4(g_Tint, g_Enabled ? float(g_Count) : 1.0); }
+        uniform vec2 g_Bounds; // {"material":"bounds","default":"0.0, 1.0"}
+        uniform vec3 g_Mixed; // {"material":"mixed","default":"1, -2 3"}
+        void main() {
+            gl_Position = vec4(
+                g_Tint + g_Mixed * g_Bounds.x,
+                g_Enabled ? float(g_Count) : g_Bounds.y
+            );
+        }
         """
         let fragment = """
         uniform float g_Amount; // {"material":"amount","default":0.125}
@@ -430,6 +509,35 @@ final class SceneRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(vector[0], 1.0, accuracy: 0.000_001)
         XCTAssertEqual(vector[1], -0.5, accuracy: 0.000_001)
         XCTAssertEqual(vector[2], 2.25, accuracy: 0.000_001)
+
+        let bounds = try shaderParameter(
+            translation,
+            stage: WE_SCENE_SHADER_STAGE_VERTEX,
+            named: "g_Bounds"
+        )
+        XCTAssertEqual(bounds.default_type, WE_SCENE_SHADER_PARAMETER_DEFAULT_VECTOR)
+        XCTAssertEqual(bounds.default_vector_count, 2)
+        guard let boundsVector = bounds.default_vector else {
+            XCTFail("Comma-separated vector metadata has no component storage")
+            throw TestFailure.shaderMetadataQuery("Missing comma vector storage")
+        }
+        XCTAssertEqual(boundsVector[0], 0.0, accuracy: 0.000_001)
+        XCTAssertEqual(boundsVector[1], 1.0, accuracy: 0.000_001)
+
+        let mixed = try shaderParameter(
+            translation,
+            stage: WE_SCENE_SHADER_STAGE_VERTEX,
+            named: "g_Mixed"
+        )
+        XCTAssertEqual(mixed.default_type, WE_SCENE_SHADER_PARAMETER_DEFAULT_VECTOR)
+        XCTAssertEqual(mixed.default_vector_count, 3)
+        guard let mixedVector = mixed.default_vector else {
+            XCTFail("Mixed-separator vector metadata has no component storage")
+            throw TestFailure.shaderMetadataQuery("Missing mixed vector storage")
+        }
+        XCTAssertEqual(mixedVector[0], 1.0, accuracy: 0.000_001)
+        XCTAssertEqual(mixedVector[1], -2.0, accuracy: 0.000_001)
+        XCTAssertEqual(mixedVector[2], 3.0, accuracy: 0.000_001)
     }
 
     func testShaderMetadataRejectsMalformedTypedFields() throws {
@@ -470,6 +578,21 @@ final class SceneRuntimeBridgeTests: XCTestCase {
                 "g_BadVector",
                 "uniform vec3 g_BadVector; // {\"default\":\"1 2\"}",
                 "exactly 3 numbers"
+            ),
+            (
+                "g_LeadingComma",
+                "uniform vec2 g_LeadingComma; // {\"default\":\",1 2\"}",
+                "exactly 2 numbers"
+            ),
+            (
+                "g_RepeatedComma",
+                "uniform vec2 g_RepeatedComma; // {\"default\":\"1,,2\"}",
+                "exactly 2 numbers"
+            ),
+            (
+                "g_TrailingComma",
+                "uniform vec2 g_TrailingComma; // {\"default\":\"1,2,\"}",
+                "exactly 2 numbers"
             ),
         ]
 

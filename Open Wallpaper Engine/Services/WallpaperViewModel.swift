@@ -9,6 +9,7 @@ import SwiftUI
 import ColorSync
 
 /// Provide Wallpaper Database for WallpaperView and ContentView etc.
+@MainActor
 class WallpaperViewModel: ObservableObject {
     private static let scenePropertyPersistenceKey = "ScenePropertyPersistenceV1"
 
@@ -268,6 +269,10 @@ class WallpaperViewModel: ObservableObject {
         }
     }
 
+    private(set) var playbackPolicyAction = GSPlayback.keepRunning
+    @Published private(set) var effectivePlayRate: Float = 1.0
+    @Published private(set) var effectivePlayVolume: Float = 1.0
+
     var lastPlayRate: Float = 1.0
     @Published public var playRate: Float = 1.0 {
         willSet {
@@ -289,6 +294,7 @@ class WallpaperViewModel: ObservableObject {
         }
         didSet {
             self.lastPlayRate = oldValue
+            refreshEffectivePlaybackState()
         }
     }
 
@@ -313,6 +319,38 @@ class WallpaperViewModel: ObservableObject {
         }
         didSet {
             self.lastPlayVolume = oldValue
+            refreshEffectivePlaybackState()
+        }
+    }
+
+    /// Applies a host-policy override without overwriting the user's playback
+    /// intent. Views consume the derived effective values, while sliders and
+    /// menu actions continue to edit `playRate` and `playVolume` directly.
+    func setPlaybackPolicyAction(_ action: GSPlayback) {
+        guard playbackPolicyAction != action else { return }
+        playbackPolicyAction = action
+        refreshEffectivePlaybackState()
+    }
+
+    private func refreshEffectivePlaybackState() {
+        let nextRate: Float
+        let nextVolume: Float
+        switch playbackPolicyAction {
+        case .keepRunning:
+            nextRate = playRate
+            nextVolume = playVolume
+        case .mute:
+            nextRate = playRate
+            nextVolume = 0
+        case .pause, .stop:
+            nextRate = 0
+            nextVolume = playVolume
+        }
+        if effectivePlayRate != nextRate {
+            effectivePlayRate = nextRate
+        }
+        if effectivePlayVolume != nextVolume {
+            effectivePlayVolume = nextVolume
         }
     }
 

@@ -22,6 +22,51 @@ int we_scene_gl_test_particle_first_lifetime(
     const WESceneGLTestParticleObjects* objects,
     float* lifetime
 );
+int we_scene_gl_test_decode_video(
+    const uint8_t* bytes,
+    size_t length,
+    const char* source,
+    uint32_t* width,
+    uint32_t* height
+);
+typedef struct WESceneGLTestPresentationViewport {
+    uint32_t canvas_width;
+    uint32_t canvas_height;
+    uint32_t viewport_x;
+    uint32_t viewport_y;
+    uint32_t viewport_width;
+    uint32_t viewport_height;
+    uint32_t drawable_width;
+    uint32_t drawable_height;
+} WESceneGLTestPresentationViewport;
+typedef struct WESceneGLTestPresentationRect {
+    uint32_t x;
+    uint32_t y;
+    uint32_t width;
+    uint32_t height;
+} WESceneGLTestPresentationRect;
+typedef struct WESceneGLTestPresentationResult {
+    double mapped_pointer_x;
+    double mapped_pointer_y;
+    int has_content;
+    WESceneGLTestPresentationRect source;
+    WESceneGLTestPresentationRect destination;
+} WESceneGLTestPresentationResult;
+int we_scene_gl_test_presentation_transform(
+    uint32_t source_width,
+    uint32_t source_height,
+    const WESceneGLTestPresentationViewport* viewport,
+    int scaling,
+    double pointer_x,
+    double pointer_y,
+    WESceneGLTestPresentationResult* result
+);
+int we_scene_gl_test_blit_presentation_slice(
+    const WESceneGLTestPresentationViewport* viewport,
+    int scaling,
+    uint8_t* rgba,
+    size_t length
+);
 #ifdef __cplusplus
 }
 #endif

@@ -1,4 +1,5 @@
 #include "SceneGLDevice.hpp"
+#include "SceneVideoDecoder.hpp"
 
 #include <CoreGraphics/CoreGraphics.h>
 #include <ImageIO/ImageIO.h>
@@ -597,11 +598,20 @@ AssetTextureResource::AssetTextureResource(AssetTextureResource&& other) noexcep
       spritesheetColumns(std::exchange(other.spritesheetColumns, 0)),
       spritesheetRows(std::exchange(other.spritesheetRows, 0)),
       spritesheetFrameCount(std::exchange(other.spritesheetFrameCount, 0)),
-      spritesheetDuration(std::exchange(other.spritesheetDuration, 0.0F)) {
+      spritesheetDuration(std::exchange(other.spritesheetDuration, 0.0F)),
+      videoDecoder(std::exchange(other.videoDecoder, nullptr)),
+      video(std::exchange(other.video, false)) {
     other.images.clear();
     other.imageWidths.clear();
     other.imageHeights.clear();
     other.frames.clear();
+}
+
+AssetTextureResource::~AssetTextureResource() {
+    if (videoDecoder != nullptr) {
+        destroyVideoDecoder(videoDecoder);
+        videoDecoder = nullptr;
+    }
 }
 
 AssetTextureResource& AssetTextureResource::operator=(
@@ -612,6 +622,9 @@ AssetTextureResource& AssetTextureResource::operator=(
     }
     if (!images.empty()) {
         std::terminate();
+    }
+    if (videoDecoder != nullptr) {
+        destroyVideoDecoder(videoDecoder);
     }
     images = std::move(other.images);
     imageWidths = std::move(other.imageWidths);
@@ -624,6 +637,8 @@ AssetTextureResource& AssetTextureResource::operator=(
     spritesheetRows = std::exchange(other.spritesheetRows, 0);
     spritesheetFrameCount = std::exchange(other.spritesheetFrameCount, 0);
     spritesheetDuration = std::exchange(other.spritesheetDuration, 0.0F);
+    videoDecoder = std::exchange(other.videoDecoder, nullptr);
+    video = std::exchange(other.video, false);
     other.images.clear();
     other.imageWidths.clear();
     other.imageHeights.clear();
@@ -860,13 +875,7 @@ AssetTextureResource Device::Session::uploadTexture(
     const Texture& texture,
     std::string_view source
 ) {
-    if (texture.isVideoMp4 || (texture.flags & textureFlagVideo) != 0) {
-        throw Error(
-            ErrorCode::textureUpload,
-            "Video-backed TEX asset is outside the Scene texture runtime: '" +
-                std::string(source) + "'"
-        );
-    }
+    const bool isVideo = texture.isVideoMp4 || (texture.flags & textureFlagVideo) != 0;
     if (texture.imageCount == 0 || texture.images.size() != texture.imageCount) {
         throw Error(
             ErrorCode::textureUpload,
@@ -899,6 +908,61 @@ AssetTextureResource Device::Session::uploadTexture(
     result.spritesheetFrameCount = texture.spritesheetFrameCount;
     result.spritesheetDuration = texture.spritesheetDuration;
     try {
+        if (isVideo) {
+            if (texture.images.empty() || texture.images.front().mipmaps.empty()) {
+                throw Error(
+                    ErrorCode::textureUpload,
+                    "Video-backed TEX asset has no encoded media payload: '" +
+                        std::string(source) + "'"
+                );
+            }
+            const TextureMipmap& mipmap = texture.images.front().mipmaps.front();
+            result.videoDecoder = createVideoDecoder(
+                mipmap.bytes.data(), mipmap.bytes.size(), std::string(source).c_str()
+            );
+            if (result.videoDecoder == nullptr) {
+                throw Error(
+                    ErrorCode::textureDecode,
+                    "Unable to initialize AVFoundation decoder for video texture '" +
+                        std::string(source) + "'"
+                );
+            }
+            VideoFrameRGBA8 frame;
+            if (!decodeVideoFrame(result.videoDecoder, 0.0, frame) ||
+                frame.bytes == nullptr || frame.byteCount == 0) {
+                throw Error(
+                    ErrorCode::textureDecode,
+                    "Unable to decode the first frame of video texture '" +
+                        std::string(source) + "'"
+                );
+            }
+            result.images.resize(1);
+            result.imageWidths.resize(1);
+            result.imageHeights.resize(1);
+            glGenTextures(1, result.images.data());
+            if (result.images.front() == 0) {
+                throw Error(ErrorCode::textureUpload, "OpenGL returned texture zero for video texture");
+            }
+            device_.textures_.insert(result.images.front());
+            glBindTexture(GL_TEXTURE_2D, result.images.front());
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+            configureTextureParameters(texture, 1);
+            glTexImage2D(
+                GL_TEXTURE_2D, 0, GL_RGBA8,
+                static_cast<GLsizei>(frame.width), static_cast<GLsizei>(frame.height),
+                0, GL_RGBA, GL_UNSIGNED_BYTE, frame.bytes
+            );
+            checkError(ErrorCode::textureUpload, "Uploading the first video texture frame");
+            result.imageWidths.front() = frame.width;
+            result.imageHeights.front() = frame.height;
+            result.resolution = {
+                static_cast<float>(frame.width), static_cast<float>(frame.height),
+                static_cast<float>(texture.width), static_cast<float>(texture.height),
+            };
+            result.video = true;
+            return result;
+        }
         glGenTextures(
             static_cast<GLsizei>(result.images.size()),
             result.images.data()
@@ -1033,7 +1097,43 @@ AssetTextureResource Device::Session::uploadTexture(
     }
 }
 
+void Device::Session::updateVideoTexture(
+    AssetTextureResource& texture,
+    double timeSeconds
+) {
+    if (!texture.video || texture.videoDecoder == nullptr || texture.images.empty()) return;
+    VideoFrameRGBA8 frame;
+    if (!decodeVideoFrame(texture.videoDecoder, timeSeconds, frame) ||
+        frame.bytes == nullptr || frame.byteCount == 0) {
+        throw Error(ErrorCode::textureDecode, "Unable to decode a video texture frame");
+    }
+    const TextureBindingGuard textureBinding;
+    glBindTexture(GL_TEXTURE_2D, texture.images.front());
+    if (texture.imageWidths.front() != frame.width || texture.imageHeights.front() != frame.height) {
+        glTexImage2D(
+            GL_TEXTURE_2D, 0, GL_RGBA8,
+            static_cast<GLsizei>(frame.width), static_cast<GLsizei>(frame.height),
+            0, GL_RGBA, GL_UNSIGNED_BYTE, frame.bytes
+        );
+        texture.imageWidths.front() = frame.width;
+        texture.imageHeights.front() = frame.height;
+        texture.resolution[0] = static_cast<float>(frame.width);
+        texture.resolution[1] = static_cast<float>(frame.height);
+    } else {
+        glTexSubImage2D(
+            GL_TEXTURE_2D, 0, 0, 0,
+            static_cast<GLsizei>(frame.width), static_cast<GLsizei>(frame.height),
+            GL_RGBA, GL_UNSIGNED_BYTE, frame.bytes
+        );
+    }
+    checkError(ErrorCode::textureUpload, "Updating a video texture frame");
+}
+
 void Device::Session::destroyTexture(AssetTextureResource& texture) noexcept {
+    if (texture.videoDecoder != nullptr) {
+        destroyVideoDecoder(texture.videoDecoder);
+        texture.videoDecoder = nullptr;
+    }
     if (!texture.images.empty()) {
         for (const GLuint identifier : texture.images) {
             device_.textures_.erase(identifier);
@@ -1054,6 +1154,7 @@ void Device::Session::destroyTexture(AssetTextureResource& texture) noexcept {
     texture.spritesheetRows = 0;
     texture.spritesheetFrameCount = 0;
     texture.spritesheetDuration = 0.0F;
+    texture.video = false;
 }
 
 GLuint Device::Session::uploadCoverageTexture(

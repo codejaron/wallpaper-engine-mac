@@ -4,6 +4,7 @@
 #include "TextCoverageRenderer.hpp"
 
 #include <SceneCore/FormatError.hpp>
+#include <SceneCore/PuppetMesh.hpp>
 #include <SceneCore/Runtime.hpp>
 #include <SceneShader/ShaderCompiler.hpp>
 #include <SceneShader/ShaderPreprocessor.hpp>
@@ -43,6 +44,11 @@ struct ActiveUniform final {
     bool isArray = false;
 };
 
+struct PreparedAudioSpectrumUniform final {
+    GLint location = -1;
+    GLsizei activeElementCount = 0;
+};
+
 struct ProgramResource final {
     GLuint program = 0;
     std::vector<ShaderParameterMetadata> parameters;
@@ -66,6 +72,21 @@ struct ParticleVertex final {
 
 static_assert(sizeof(ParticleVertex) == sizeof(float) * 17);
 
+// genericropeparticle consumes the thick-format 26-float vertex contract used
+// by linux-wallpaperengine's CParticle::renderRope().  Keep a separate POD
+// layout so the sprite path can continue to use the compact 17-float format.
+struct RopeParticleVertex final {
+    float positionVec4[4];
+    float texCoordVec4[4];
+    float texCoordVec4C1[4];
+    float texCoordVec4C2[4];
+    float texCoordVec4C3[4];
+    float texCoordC4[2];
+    float color[4];
+};
+
+static_assert(sizeof(RopeParticleVertex) == sizeof(float) * 26);
+
 struct ParticleAtlasMetadata final {
     std::uint32_t columns = 0;
     std::uint32_t rows = 0;
@@ -78,17 +99,154 @@ struct ParticleAtlasMetadata final {
 
 struct ParticleDrawBatch final {
     std::vector<ParticleVertex> vertices;
+    std::vector<RopeParticleVertex> ropeVertices;
     std::vector<std::uint32_t> indices;
     ParticleAtlasMetadata atlas;
+    bool rope = false;
 };
 
 struct ResolvedFrameInputs final {
     FrameVector2 pointerPosition;
     FrameVector2 pointerPositionLast;
+    bool pointerActive = false;
+    bool pointerLeftDown = false;
     double timeSeconds = 0.0;
     double frameTimeSeconds = 0.0;
+    std::optional<bool> isScreensaver;
     float daytime = 0.0F;
+    double timeOfDay = 0.0;
+    std::optional<AudioSpectrumFrame> audioSpectrum;
+    std::optional<script::ScriptMediaSnapshot> mediaSnapshot;
 };
+
+struct CursorHit final {
+    int layerId = 0;
+    double worldX = 0.0;
+    double worldY = 0.0;
+    double worldZ = 0.0;
+    double localX = 0.0;
+    double localY = 0.0;
+    double localZ = 0.0;
+};
+
+struct CursorProjection final {
+    CursorHit hit;
+    bool inside = false;
+};
+
+// Project the canonical bottom-left pointer into one image's local space.  The
+// projection is deliberately usable outside the image bounds as well: a
+// pressed layer keeps receiving drag/up events after the pointer leaves it.
+[[nodiscard]] std::optional<CursorProjection> projectCursorImage(
+    const FramePlan& plan,
+    const FrameImageDescriptor& image,
+    FrameVector2 pointer
+) {
+    if (!std::isfinite(pointer.x) || !std::isfinite(pointer.y) ||
+        plan.width == 0 || plan.height == 0) {
+        return std::nullopt;
+    }
+    const double worldX = std::clamp(pointer.x, 0.0, 1.0) *
+        static_cast<double>(plan.width);
+    const double worldY = (1.0 - std::clamp(pointer.y, 0.0, 1.0)) *
+        static_cast<double>(plan.height);
+    const auto& transform = image.worldTransform;
+    const double scaledWidth = image.size.x * transform.scale.x;
+    const double scaledHeight = image.size.y * transform.scale.y;
+    if (!std::isfinite(worldX) || !std::isfinite(worldY) ||
+        !std::isfinite(scaledWidth) || !std::isfinite(scaledHeight) ||
+        image.size.x <= 0.0 || image.size.y <= 0.0 ||
+        transform.scale.x == 0.0 || transform.scale.y == 0.0 ||
+        !std::isfinite(transform.origin.x) ||
+        !std::isfinite(transform.origin.y) ||
+        !std::isfinite(transform.origin.z) ||
+        !std::isfinite(transform.angles.z)) {
+        return std::nullopt;
+    }
+
+    // SceneFrameGraph/FramePlanExecutor use a centered, bottom-left scene
+    // coordinate system internally while scene.json origins are top-left
+    // pixels. Keep this inverse exactly paired with prepareDraw's
+    // center/alignment/rotation decomposition.
+    double centerX = transform.origin.x -
+        static_cast<double>(plan.width) * 0.5;
+    double centerY = static_cast<double>(plan.height) * 0.5 -
+        transform.origin.y;
+    if (image.horizontalAlignment.find("left") != std::string::npos) {
+        centerX += scaledWidth * 0.5;
+    } else if (image.horizontalAlignment.find("right") != std::string::npos) {
+        centerX -= scaledWidth * 0.5;
+    }
+    if (image.horizontalAlignment.find("top") != std::string::npos) {
+        centerY += scaledHeight * 0.5;
+    } else if (image.horizontalAlignment.find("bottom") != std::string::npos) {
+        centerY -= scaledHeight * 0.5;
+    }
+
+    const double sceneX = worldX - static_cast<double>(plan.width) * 0.5;
+    const double sceneY = static_cast<double>(plan.height) * 0.5 - worldY;
+    const double dx = sceneX - centerX;
+    const double dy = sceneY - centerY;
+    const double cosine = std::cos(transform.angles.z);
+    const double sine = std::sin(transform.angles.z);
+    // prepareDraw applies R(-angle); inverse it with R(+angle).
+    const double rotatedX = cosine * dx - sine * dy;
+    const double rotatedY = sine * dx + cosine * dy;
+    const double localX = rotatedX / transform.scale.x + image.size.x * 0.5;
+    const double localY = rotatedY / transform.scale.y + image.size.y * 0.5;
+    const double epsilon = 1e-9;
+    return CursorProjection{
+        .hit = CursorHit{
+            .layerId = image.objectId,
+            .worldX = worldX,
+            .worldY = worldY,
+            .worldZ = transform.origin.z,
+            .localX = std::clamp(localX, 0.0, image.size.x),
+            .localY = std::clamp(localY, 0.0, image.size.y),
+            .localZ = 0.0,
+        },
+        .inside = localX >= -epsilon && localX <= image.size.x + epsilon &&
+            localY >= -epsilon && localY <= image.size.y + epsilon,
+    };
+}
+
+[[nodiscard]] std::optional<CursorHit> hitTestSolidImage(
+    const FramePlan& plan,
+    const FrameImageDescriptor& image,
+    FrameVector2 pointer
+) {
+    if (!image.visible || !image.solid) return std::nullopt;
+    const auto projection = projectCursorImage(plan, image, pointer);
+    if (!projection || !projection->inside) return std::nullopt;
+    return projection->hit;
+}
+
+[[nodiscard]] std::optional<CursorHit> hitTestSolidLayer(
+    const FramePlan& plan,
+    FrameVector2 pointer
+) {
+    // FrameGraph appends image descriptors in render order. The last visible
+    // solid image is therefore the front-most hit target for 2D cursor input.
+    for (auto iterator = plan.images.rbegin(); iterator != plan.images.rend(); ++iterator) {
+        if (const auto hit = hitTestSolidImage(plan, *iterator, pointer)) {
+            return hit;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<CursorHit> projectCursorLayer(
+    const FramePlan& plan,
+    int layerId,
+    FrameVector2 pointer
+) {
+    for (auto iterator = plan.images.rbegin(); iterator != plan.images.rend(); ++iterator) {
+        if (iterator->objectId != layerId) continue;
+        const auto projection = projectCursorImage(plan, *iterator, pointer);
+        if (projection) return projection->hit;
+    }
+    return std::nullopt;
+}
 
 struct TextureAnimationSelection final {
     std::size_t imageIndex = 0;
@@ -96,6 +254,63 @@ struct TextureAnimationSelection final {
     std::array<float, 4> rotation{0.0F, 0.0F, 0.0F, 0.0F};
     bool animated = false;
 };
+
+TextureAnimationSelection textureAnimationSelection(
+    const AssetTextureResource& texture,
+    const TextureFrame& selected
+) {
+    TextureAnimationSelection selection;
+    selection.imageIndex = selected.frameNumber;
+    if (selection.imageIndex >= texture.images.size() ||
+        selection.imageIndex >= texture.imageWidths.size() ||
+        selection.imageIndex >= texture.imageHeights.size()) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Animated texture frame references an image outside the uploaded resource"
+        );
+    }
+    const std::uint32_t width = texture.imageWidths[selection.imageIndex];
+    const std::uint32_t height = texture.imageHeights[selection.imageIndex];
+    if (width == 0 || height == 0) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Animated texture frame references an image with zero dimensions"
+        );
+    }
+    const float inverseWidth = 1.0F / static_cast<float>(width);
+    const float inverseHeight = 1.0F / static_cast<float>(height);
+    selection.translation = {
+        selected.x * inverseWidth,
+        selected.y * inverseHeight,
+    };
+    selection.rotation = {
+        selected.width * inverseWidth,
+        selected.widthAux * inverseWidth,
+        selected.heightAux * inverseHeight,
+        selected.height * inverseHeight,
+    };
+    selection.animated = true;
+    return selection;
+}
+
+TextureAnimationSelection selectTextureAnimationFrame(
+    const AssetTextureResource& texture,
+    std::size_t frame
+) {
+    if (!texture.isAnimated() || texture.frames.empty()) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Texture animation controller targets a static texture"
+        );
+    }
+    if (frame >= texture.frames.size()) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Texture animation controller frame is outside the uploaded timeline"
+        );
+    }
+    return textureAnimationSelection(texture, texture.frames[frame]);
+}
 
 TextureAnimationSelection selectTextureAnimation(
     const AssetTextureResource& texture,
@@ -138,37 +353,27 @@ TextureAnimationSelection selectTextureAnimation(
     // owns that tail; trailing zero-duration entries do not occupy any time.
     if (selected == nullptr) selected = lastPositiveDurationFrame;
 
-    selection.imageIndex = selected->frameNumber;
-    if (selection.imageIndex >= texture.images.size() ||
-        selection.imageIndex >= texture.imageWidths.size() ||
-        selection.imageIndex >= texture.imageHeights.size()) {
-        throw Error(
-            ErrorCode::resourceValidation,
-            "Animated texture frame references an image outside the uploaded resource"
-        );
+    return textureAnimationSelection(texture, *selected);
+}
+
+void applyTexture0FormatCombo(
+    ComboMap& combos,
+    TextureFormat format
+) {
+    switch (format) {
+        case TextureFormat::rg88:
+            combos.insert_or_assign(
+                "TEX0FORMAT", static_cast<int>(TextureFormat::rg88)
+            );
+            break;
+        case TextureFormat::r8:
+            combos.insert_or_assign(
+                "TEX0FORMAT", static_cast<int>(TextureFormat::r8)
+            );
+            break;
+        default:
+            break;
     }
-    const std::uint32_t width = texture.imageWidths[selection.imageIndex];
-    const std::uint32_t height = texture.imageHeights[selection.imageIndex];
-    if (width == 0 || height == 0) {
-        throw Error(
-            ErrorCode::resourceValidation,
-            "Animated texture frame references an image with zero dimensions"
-        );
-    }
-    const float inverseWidth = 1.0F / static_cast<float>(width);
-    const float inverseHeight = 1.0F / static_cast<float>(height);
-    selection.translation = {
-        selected->x * inverseWidth,
-        selected->y * inverseHeight,
-    };
-    selection.rotation = {
-        selected->width * inverseWidth,
-        selected->widthAux * inverseWidth,
-        selected->heightAux * inverseHeight,
-        selected->height * inverseHeight,
-    };
-    selection.animated = true;
-    return selection;
 }
 
 PixelFormat pixelFormat(FramebufferFormat format) {
@@ -209,104 +414,348 @@ static_assert(noexcept(std::declval<Device::Session&>().destroyFramebuffer(
     std::declval<FramebufferResource&>()
 )));
 
-struct PresentationRect final {
-    GLint x = 0;
-    GLint y = 0;
-    GLsizei width = 0;
-    GLsizei height = 0;
-};
+}  // namespace
 
-struct PresentationTransform final {
-    GLsizei sourceWidth = 0;
-    GLsizei sourceHeight = 0;
-    GLsizei drawableWidth = 0;
-    GLsizei drawableHeight = 0;
-    PresentationRect source;
-    PresentationRect destination;
+namespace {
 
-    [[nodiscard]] FrameVector2 map(FrameVector2 drawablePoint) const {
-        drawablePoint.x = std::clamp(drawablePoint.x, 0.0, 1.0);
-        drawablePoint.y = std::clamp(drawablePoint.y, 0.0, 1.0);
-        const double pixelX = std::clamp(
-            drawablePoint.x * drawableWidth,
-            static_cast<double>(destination.x),
-            static_cast<double>(destination.x + destination.width)
-        );
-        const double pixelY = std::clamp(
-            drawablePoint.y * drawableHeight,
-            static_cast<double>(destination.y),
-            static_cast<double>(destination.y + destination.height)
-        );
-        const double sourceX = source.x +
-            (pixelX - destination.x) * source.width / destination.width;
-        const double sourceY = source.y +
-            (pixelY - destination.y) * source.height / destination.height;
-        return {
-            sourceX / sourceWidth,
-            sourceY / sourceHeight,
-        };
-    }
-};
+constexpr std::uint32_t maximumPresentationDimension =
+    static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max());
 
-PresentationTransform presentationTransform(
-    GLsizei sourceWidth,
-    GLsizei sourceHeight,
-    GLsizei drawableWidth,
-    GLsizei drawableHeight,
-    PresentationScaling scaling
+[[nodiscard]] std::uint64_t rectEnd(
+    std::uint32_t origin,
+    std::uint32_t extent
+) noexcept {
+    return static_cast<std::uint64_t>(origin) + extent;
+}
+
+[[nodiscard]] PresentationRect intersectRect(
+    const PresentationRect& lhs,
+    const PresentationRect& rhs
+) noexcept {
+    const std::uint64_t left = std::max<std::uint64_t>(lhs.x, rhs.x);
+    const std::uint64_t bottom = std::max<std::uint64_t>(lhs.y, rhs.y);
+    const std::uint64_t right = std::min(
+        rectEnd(lhs.x, lhs.width), rectEnd(rhs.x, rhs.width)
+    );
+    const std::uint64_t top = std::min(
+        rectEnd(lhs.y, lhs.height), rectEnd(rhs.y, rhs.height)
+    );
+    if (right <= left || top <= bottom) return {};
+    return {
+        .x = static_cast<std::uint32_t>(left),
+        .y = static_cast<std::uint32_t>(bottom),
+        .width = static_cast<std::uint32_t>(right - left),
+        .height = static_cast<std::uint32_t>(top - bottom),
+    };
+}
+
+[[nodiscard]] std::uint32_t mapRectEdge(
+    std::uint32_t value,
+    std::uint32_t inputOrigin,
+    std::uint32_t inputExtent,
+    std::uint32_t outputOrigin,
+    std::uint32_t outputExtent
 ) {
-    if (sourceWidth <= 0 || sourceHeight <= 0 ||
-        drawableWidth <= 0 || drawableHeight <= 0) {
+    const long double fraction = static_cast<long double>(value - inputOrigin) /
+        static_cast<long double>(inputExtent);
+    const long double mapped = static_cast<long double>(outputOrigin) +
+        fraction * static_cast<long double>(outputExtent);
+    const auto rounded = static_cast<std::int64_t>(std::llround(mapped));
+    const std::int64_t lower = outputOrigin;
+    const std::int64_t upper = static_cast<std::int64_t>(outputOrigin) +
+        outputExtent;
+    return static_cast<std::uint32_t>(std::clamp(rounded, lower, upper));
+}
+
+void ensureMappedInterval(
+    std::uint32_t& start,
+    std::uint32_t& end,
+    std::uint32_t lower,
+    std::uint32_t upper
+) noexcept {
+    if (end > start) return;
+    if (start < upper) {
+        end = start + 1;
+    } else {
+        start = upper - 1;
+        end = upper;
+    }
+    start = std::max(start, lower);
+}
+
+}  // namespace
+
+PresentationViewport drawablePresentationViewport(
+    std::uint32_t drawableWidth,
+    std::uint32_t drawableHeight
+) {
+    return {
+        .canvasWidth = drawableWidth,
+        .canvasHeight = drawableHeight,
+        .viewportX = 0,
+        .viewportY = 0,
+        .viewportWidth = drawableWidth,
+        .viewportHeight = drawableHeight,
+        .drawableWidth = drawableWidth,
+        .drawableHeight = drawableHeight,
+    };
+}
+
+void validatePresentationViewport(const PresentationViewport& viewport) {
+    if (viewport.canvasWidth == 0 || viewport.canvasHeight == 0 ||
+        viewport.canvasWidth > maximumPresentationDimension ||
+        viewport.canvasHeight > maximumPresentationDimension) {
         throw Error(
             ErrorCode::invalidArgument,
-            "Presentation dimensions must be greater than zero"
+            "Virtual canvas dimensions must be non-zero and fit OpenGL's signed range"
+        );
+    }
+    if (viewport.viewportWidth == 0 || viewport.viewportHeight == 0) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Display viewport dimensions must be greater than zero"
+        );
+    }
+    if (rectEnd(viewport.viewportX, viewport.viewportWidth) >
+            viewport.canvasWidth ||
+        rectEnd(viewport.viewportY, viewport.viewportHeight) >
+            viewport.canvasHeight) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Display viewport must fit entirely within the virtual canvas"
+        );
+    }
+    if (viewport.drawableWidth == 0 || viewport.drawableHeight == 0 ||
+        viewport.drawableWidth > maximumPresentationDimension ||
+        viewport.drawableHeight > maximumPresentationDimension) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Drawable dimensions must be non-zero and fit OpenGL's signed range"
+        );
+    }
+}
+
+PresentationTransform makePresentationTransform(
+    std::uint32_t sourceWidth,
+    std::uint32_t sourceHeight,
+    const PresentationViewport& viewport,
+    PresentationScaling scaling
+) {
+    validatePresentationViewport(viewport);
+    if (sourceWidth == 0 || sourceHeight == 0 ||
+        sourceWidth > maximumPresentationDimension ||
+        sourceHeight > maximumPresentationDimension) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Scene presentation dimensions must be non-zero and fit OpenGL's signed range"
         );
     }
     PresentationTransform result{
         .sourceWidth = sourceWidth,
         .sourceHeight = sourceHeight,
-        .drawableWidth = drawableWidth,
-        .drawableHeight = drawableHeight,
+        .viewport = viewport,
         .source = {.width = sourceWidth, .height = sourceHeight},
-        .destination = {.width = drawableWidth, .height = drawableHeight},
+        .canvasDestination = {
+            .width = viewport.canvasWidth,
+            .height = viewport.canvasHeight,
+        },
     };
-    if (scaling == PresentationScaling::aspectFit) {
-        const double scaleX = static_cast<double>(drawableWidth) / sourceWidth;
-        const double scaleY = static_cast<double>(drawableHeight) / sourceHeight;
-        const double scale = std::min(scaleX, scaleY);
-        result.destination.width = std::clamp<GLsizei>(
-            static_cast<GLsizei>(std::lround(sourceWidth * scale)),
-            1,
-            drawableWidth
-        );
-        result.destination.height = std::clamp<GLsizei>(
-            static_cast<GLsizei>(std::lround(sourceHeight * scale)),
-            1,
-            drawableHeight
-        );
-        result.destination.x = (drawableWidth - result.destination.width) / 2;
-        result.destination.y = (drawableHeight - result.destination.height) / 2;
-    } else if (scaling == PresentationScaling::aspectFill) {
-        const double sourceAspect = static_cast<double>(sourceWidth) / sourceHeight;
-        const double drawableAspect = static_cast<double>(drawableWidth) / drawableHeight;
-        if (sourceAspect > drawableAspect) {
-            result.source.width = std::clamp<GLsizei>(
-                static_cast<GLsizei>(std::lround(sourceHeight * drawableAspect)),
+    switch (scaling) {
+        case PresentationScaling::stretch:
+            break;
+        case PresentationScaling::aspectFit: {
+            const double scaleX = static_cast<double>(viewport.canvasWidth) /
+                sourceWidth;
+            const double scaleY = static_cast<double>(viewport.canvasHeight) /
+                sourceHeight;
+            const double scale = std::min(scaleX, scaleY);
+            result.canvasDestination.width = std::clamp<std::uint32_t>(
+                static_cast<std::uint32_t>(std::lround(sourceWidth * scale)),
                 1,
-                sourceWidth
+                viewport.canvasWidth
             );
-            result.source.x = (sourceWidth - result.source.width) / 2;
-        } else if (sourceAspect < drawableAspect) {
-            result.source.height = std::clamp<GLsizei>(
-                static_cast<GLsizei>(std::lround(sourceWidth / drawableAspect)),
+            result.canvasDestination.height = std::clamp<std::uint32_t>(
+                static_cast<std::uint32_t>(std::lround(sourceHeight * scale)),
                 1,
-                sourceHeight
+                viewport.canvasHeight
             );
-            result.source.y = (sourceHeight - result.source.height) / 2;
+            result.canvasDestination.x =
+                (viewport.canvasWidth - result.canvasDestination.width) / 2;
+            result.canvasDestination.y =
+                (viewport.canvasHeight - result.canvasDestination.height) / 2;
+            break;
         }
+        case PresentationScaling::aspectFill: {
+            const double sourceAspect =
+                static_cast<double>(sourceWidth) / sourceHeight;
+            const double canvasAspect =
+                static_cast<double>(viewport.canvasWidth) /
+                viewport.canvasHeight;
+            if (sourceAspect > canvasAspect) {
+                result.source.width = std::clamp<std::uint32_t>(
+                    static_cast<std::uint32_t>(std::lround(
+                        sourceHeight * canvasAspect
+                    )),
+                    1,
+                    sourceWidth
+                );
+                result.source.x = (sourceWidth - result.source.width) / 2;
+            } else if (sourceAspect < canvasAspect) {
+                result.source.height = std::clamp<std::uint32_t>(
+                    static_cast<std::uint32_t>(std::lround(
+                        sourceWidth / canvasAspect
+                    )),
+                    1,
+                    sourceHeight
+                );
+                result.source.y = (sourceHeight - result.source.height) / 2;
+            }
+            break;
+        }
+        default:
+            throw Error(
+                ErrorCode::invalidArgument,
+                "Unknown scene presentation scaling mode"
+            );
     }
     return result;
 }
+
+FrameVector2 PresentationTransform::map(FrameVector2 drawablePoint) const {
+    drawablePoint.x = std::clamp(drawablePoint.x, 0.0, 1.0);
+    drawablePoint.y = std::clamp(drawablePoint.y, 0.0, 1.0);
+    const double localPixelX = drawablePoint.x * viewport.drawableWidth;
+    const double localPixelY = drawablePoint.y * viewport.drawableHeight;
+    const double canvasPixelX = viewport.viewportX +
+        localPixelX * viewport.viewportWidth / viewport.drawableWidth;
+    const double canvasPixelY = viewport.viewportY +
+        localPixelY * viewport.viewportHeight / viewport.drawableHeight;
+    const double contentLeft = canvasDestination.x;
+    const double contentBottom = canvasDestination.y;
+    const double contentRight = rectEnd(
+        canvasDestination.x, canvasDestination.width
+    );
+    const double contentTop = rectEnd(
+        canvasDestination.y, canvasDestination.height
+    );
+    const double clampedX = std::clamp(
+        canvasPixelX, contentLeft, contentRight
+    );
+    const double clampedY = std::clamp(
+        canvasPixelY, contentBottom, contentTop
+    );
+    const double sourceX = source.x +
+        (clampedX - canvasDestination.x) * source.width /
+            canvasDestination.width;
+    const double sourceY = source.y +
+        (clampedY - canvasDestination.y) * source.height /
+            canvasDestination.height;
+    return {
+        sourceX / sourceWidth,
+        sourceY / sourceHeight,
+    };
+}
+
+PresentationSlice PresentationTransform::slice() const {
+    const PresentationRect display{
+        .x = viewport.viewportX,
+        .y = viewport.viewportY,
+        .width = viewport.viewportWidth,
+        .height = viewport.viewportHeight,
+    };
+    const PresentationRect visible = intersectRect(
+        canvasDestination, display
+    );
+    if (visible.width == 0 || visible.height == 0) return {};
+
+    std::uint32_t sourceLeft = mapRectEdge(
+        visible.x,
+        canvasDestination.x,
+        canvasDestination.width,
+        source.x,
+        source.width
+    );
+    std::uint32_t sourceRight = mapRectEdge(
+        visible.x + visible.width,
+        canvasDestination.x,
+        canvasDestination.width,
+        source.x,
+        source.width
+    );
+    std::uint32_t sourceBottom = mapRectEdge(
+        visible.y,
+        canvasDestination.y,
+        canvasDestination.height,
+        source.y,
+        source.height
+    );
+    std::uint32_t sourceTop = mapRectEdge(
+        visible.y + visible.height,
+        canvasDestination.y,
+        canvasDestination.height,
+        source.y,
+        source.height
+    );
+    ensureMappedInterval(
+        sourceLeft, sourceRight, source.x, source.x + source.width
+    );
+    ensureMappedInterval(
+        sourceBottom, sourceTop, source.y, source.y + source.height
+    );
+
+    std::uint32_t destinationLeft = mapRectEdge(
+        visible.x,
+        viewport.viewportX,
+        viewport.viewportWidth,
+        0,
+        viewport.drawableWidth
+    );
+    std::uint32_t destinationRight = mapRectEdge(
+        visible.x + visible.width,
+        viewport.viewportX,
+        viewport.viewportWidth,
+        0,
+        viewport.drawableWidth
+    );
+    std::uint32_t destinationBottom = mapRectEdge(
+        visible.y,
+        viewport.viewportY,
+        viewport.viewportHeight,
+        0,
+        viewport.drawableHeight
+    );
+    std::uint32_t destinationTop = mapRectEdge(
+        visible.y + visible.height,
+        viewport.viewportY,
+        viewport.viewportHeight,
+        0,
+        viewport.drawableHeight
+    );
+    ensureMappedInterval(
+        destinationLeft, destinationRight, 0, viewport.drawableWidth
+    );
+    ensureMappedInterval(
+        destinationBottom, destinationTop, 0, viewport.drawableHeight
+    );
+
+    return {
+        .hasContent = true,
+        .source = {
+            .x = sourceLeft,
+            .y = sourceBottom,
+            .width = sourceRight - sourceLeft,
+            .height = sourceTop - sourceBottom,
+        },
+        .destination = {
+            .x = destinationLeft,
+            .y = destinationBottom,
+            .width = destinationRight - destinationLeft,
+            .height = destinationTop - destinationBottom,
+        },
+    };
+}
+
+namespace {
 
 std::string planIssues(const FramePlan& plan) {
     std::ostringstream message;
@@ -860,6 +1309,49 @@ GLint prepareBuiltinUniform(
     return uniform->location;
 }
 
+PreparedAudioSpectrumUniform prepareAudioSpectrumUniform(
+    const ProgramResource& program,
+    const std::string& name,
+    GLint expectedSize
+) {
+    const ActiveUniform* uniform = activeUniform(program, name);
+    if (uniform == nullptr) return {};
+    if (uniform->blockIndex >= 0) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Builtin audio uniform '" + name +
+                "' must not be declared in a uniform block"
+        );
+    }
+    // GL_ACTIVE_UNIFORM_SIZE is the number of active array elements, not
+    // necessarily the source declaration length. A shader that only reads
+    // element zero commonly reflects size 1 even when it declares float[16].
+    if (!uniform->isArray || uniform->size <= 0 ||
+        uniform->size > expectedSize) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Builtin audio uniform '" + name + "' must be compatible with "
+                "the float[" + std::to_string(expectedSize) + "] contract"
+        );
+    }
+    if (uniform->type != GL_FLOAT) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Builtin audio uniform '" + name + "' has an incompatible type"
+        );
+    }
+    if (uniform->location < 0) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Builtin audio uniform '" + name + "' has no bindable location"
+        );
+    }
+    return {
+        .location = uniform->location,
+        .activeElementCount = static_cast<GLsizei>(uniform->size),
+    };
+}
+
 std::optional<int> textureSlot(std::string_view name) {
     constexpr std::string_view prefix = "g_Texture";
     if (!name.starts_with(prefix) || name.size() == prefix.size()) {
@@ -982,7 +1474,8 @@ void configureState(const FrameRenderPass& pass) {
     // visible without discarding the camera's near/far range for depth tests.
     const bool sceneGeometry =
         pass.geometry == FrameGeometryKind::imageScene ||
-        pass.geometry == FrameGeometryKind::passthroughCapture;
+        pass.geometry == FrameGeometryKind::passthroughCapture ||
+        pass.geometry == FrameGeometryKind::puppetMesh;
     sceneGeometry ? glEnable(GL_DEPTH_CLAMP) : glDisable(GL_DEPTH_CLAMP);
 }
 
@@ -1042,6 +1535,12 @@ struct FramePlanExecutor::Impl final {
         GLint effectTextureProjectionInverse = -1;
         GLint texelSize = -1;
         GLint texelSizeHalf = -1;
+        PreparedAudioSpectrumUniform audioSpectrum16Left;
+        PreparedAudioSpectrumUniform audioSpectrum16Right;
+        PreparedAudioSpectrumUniform audioSpectrum32Left;
+        PreparedAudioSpectrumUniform audioSpectrum32Right;
+        PreparedAudioSpectrumUniform audioSpectrum64Left;
+        PreparedAudioSpectrumUniform audioSpectrum64Right;
         bool compositeColorProvidedByShader = false;
         Matrix modelViewProjectionInverseValue = identityMatrix();
         std::array<float, 3> ambientColorValue{};
@@ -1056,6 +1555,7 @@ struct FramePlanExecutor::Impl final {
         std::array<float, 2> pointerLastValue{};
         std::array<float, 2> texelSizeValue{};
         std::array<float, 2> texelSizeHalfValue{};
+        AudioSpectrumFrame audioSpectrumValue;
     };
 
     struct CommonRenderableValues final {
@@ -1083,6 +1583,8 @@ struct FramePlanExecutor::Impl final {
         Matrix modelViewProjection = identityMatrix();
         std::vector<PreparedUniform> materialUniforms;
         std::array<Vertex, 6> vertices{};
+        std::vector<Vertex> puppetVertices;
+        std::vector<std::uint16_t> puppetIndices;
         GLint positionLocation = -1;
         GLint texCoordLocation = -1;
     };
@@ -1099,8 +1601,8 @@ struct FramePlanExecutor::Impl final {
     };
 
     struct PreparedParticleUniforms final {
-        GLint texture0 = -1;
-        GLint texture0Resolution = -1;
+        GLint texture0Translation = -1;
+        GLint texture0Rotation = -1;
         GLint modelInverse = -1;
         GLint orientationUp = -1;
         GLint orientationRight = -1;
@@ -1110,6 +1612,7 @@ struct FramePlanExecutor::Impl final {
         GLint eyePosition = -1;
         GLint renderVar0 = -1;
         GLint renderVar1 = -1;
+        GLint refractAmount = -1;
     };
 
     struct PreparedParticle final {
@@ -1119,8 +1622,8 @@ struct FramePlanExecutor::Impl final {
         DepthMode depthTest = DepthMode::disabled;
         DepthMode depthWrite = DepthMode::disabled;
         GLuint program = 0;
-        GLuint texture = 0;
-        std::array<float, 4> textureResolution{};
+        std::vector<PreparedTextureBinding> textures;
+        TextureAnimationSelection texture0Animation;
         PreparedParticleUniforms uniforms;
         PreparedCommonUniforms commonUniforms;
         Matrix model = identityMatrix();
@@ -1128,9 +1631,12 @@ struct FramePlanExecutor::Impl final {
         Matrix viewProjection = identityMatrix();
         Matrix modelViewProjection = identityMatrix();
         std::array<float, 3> eyePosition{};
+        std::array<float, 4> renderVar0{};
         std::array<float, 4> renderVar1{};
         std::vector<PreparedUniform> materialUniforms;
-        std::array<GLint, 5> attributeLocations{};
+        std::array<GLint, 7> attributeLocations{};
+        bool rope = false;
+        bool refract = false;
         std::size_t operationIndex = 0;
     };
 
@@ -1198,6 +1704,8 @@ struct FramePlanExecutor::Impl final {
             auto session = device->activate();
             textRenderer.release(session);
             releaseParticleGeometry(session);
+            releasePuppetGeometry(session);
+            session.destroyFramebuffer(particleRefractSnapshot);
         } catch (const std::exception& error) {
             std::fprintf(stderr, "FramePlanExecutor failed to release renderer resources: %s\n", error.what());
         } catch (...) {
@@ -1482,7 +1990,8 @@ struct FramePlanExecutor::Impl final {
 
     AssetTextureResource& assetTexture(
         Device::Session& session,
-        const FrameResourceRef& ref
+        const FrameResourceRef& ref,
+        double timeSeconds = 0.0
     ) {
         if (ref.kind != FrameResourceKind::assetTexture) {
             throw Error(ErrorCode::resourceValidation, "Resource is not an asset texture");
@@ -1507,6 +2016,9 @@ struct FramePlanExecutor::Impl final {
                 throw;
             }
         }
+        if (found->second.video) {
+            session.updateVideoTexture(found->second, timeSeconds);
+        }
         if (found->second.images.empty()) {
             throw Error(ErrorCode::resourceValidation, "Texture has no uploaded image: '" + ref.id + "'");
         }
@@ -1516,10 +2028,11 @@ struct FramePlanExecutor::Impl final {
     GLuint texture(
         Device::Session& session,
         const FrameResourceRef& ref,
-        std::size_t imageIndex = 0
+        std::size_t imageIndex = 0,
+        double timeSeconds = 0.0
     ) {
         if (ref.kind == FrameResourceKind::framebuffer) return framebuffer(ref).colorTexture;
-        auto& resource = assetTexture(session, ref);
+        auto& resource = assetTexture(session, ref, timeSeconds);
         if (imageIndex >= resource.images.size()) {
             throw Error(
                 ErrorCode::resourceValidation,
@@ -1619,16 +2132,6 @@ struct FramePlanExecutor::Impl final {
         }
     }
 
-    ProgramResource& program(Device::Session& session, const FrameRenderPass& pass) {
-        return program(
-            session,
-            pass.vertexShaderPath,
-            pass.fragmentShaderPath,
-            pass.combos,
-            "Frame render pass"
-        );
-    }
-
     FrameResourceRef samplerDefaultResource(
         const FramePlan& plan,
         const FrameRenderPass& pass,
@@ -1640,6 +2143,21 @@ struct FramePlanExecutor::Impl final {
         if (name == "_rt_FullFrameBuffer" ||
             name == "_rt_MipMappedFrameBuffer") {
             return plan.output;
+        }
+        if (name == "_alias_lightCookie") {
+            for (const FramebufferDescriptor& descriptor : plan.framebuffers) {
+                if (descriptor.resource.logicalName == "_rt_shadowAtlas") {
+                    return {
+                        .kind = FrameResourceKind::framebuffer,
+                        .id = descriptor.resource.id,
+                        .logicalName = "_alias_lightCookie",
+                    };
+                }
+            }
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Sampler metadata default references unavailable runtime alias '_alias_lightCookie'"
+            );
         }
         if (matches(pass.input)) {
             return pass.input;
@@ -1665,6 +2183,46 @@ struct FramePlanExecutor::Impl final {
             throw Error(
                 ErrorCode::resourceValidation,
                 "Sampler metadata default references unavailable runtime texture '" +
+                    std::string(name) + "'"
+            );
+        }
+        return frameAssetTextureResource(name);
+    }
+
+    FrameResourceRef particleSamplerDefaultResource(
+        const FramePlan& plan,
+        const FrameParticleDescriptor& descriptor,
+        std::string_view name
+    ) const {
+        if (name == "_rt_FullFrameBuffer" ||
+            name == "_rt_MipMappedFrameBuffer") {
+            return plan.output;
+        }
+        if (name == "_alias_lightCookie") {
+            for (const FramebufferDescriptor& framebuffer : plan.framebuffers) {
+                if (framebuffer.resource.logicalName == "_rt_shadowAtlas") {
+                    return framebuffer.resource;
+                }
+            }
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Particle sampler metadata default references unavailable runtime alias '_alias_lightCookie'"
+            );
+        }
+        for (const auto& [slot, resource] : descriptor.textures) {
+            static_cast<void>(slot);
+            if (resource.logicalName == name || resource.id == name) return resource;
+        }
+        for (const FramebufferDescriptor& framebuffer : plan.framebuffers) {
+            if (framebuffer.resource.logicalName == name ||
+                framebuffer.resource.id == name) {
+                return framebuffer.resource;
+            }
+        }
+        if (name.starts_with("_rt_") || name.starts_with("_alias_")) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Particle sampler metadata default references unavailable runtime texture '" +
                     std::string(name) + "'"
             );
         }
@@ -1718,14 +2276,18 @@ struct FramePlanExecutor::Impl final {
             "g_AudioSpectrum64Left",
             "g_AudioSpectrum64Right",
         };
-        for (const std::string_view name : audioUniforms) {
-            if (activeUniform(program, name) != nullptr) {
-                throw Error(
-                    ErrorCode::resourceValidation,
-                    "Active builtin uniform '" + std::string(name) +
-                        "' requires unavailable system audio spectrum input"
-                );
+        const bool audioRequested = std::any_of(
+            audioUniforms.begin(), audioUniforms.end(),
+            [&program](std::string_view name) {
+                return activeUniform(program, name) != nullptr;
             }
+        );
+        if (audioRequested && !inputs.audioSpectrum) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Active builtin audio uniform requires unavailable system "
+                "audio spectrum input"
+            );
         }
         if (plan.width == 0 || plan.height == 0) {
             throw Error(
@@ -1809,6 +2371,24 @@ struct FramePlanExecutor::Impl final {
         result.texelSizeHalf = prepareBuiltinUniform(
             program, "g_TexelSizeHalf", GL_FLOAT_VEC2
         );
+        result.audioSpectrum16Left = prepareAudioSpectrumUniform(
+            program, "g_AudioSpectrum16Left", 16
+        );
+        result.audioSpectrum16Right = prepareAudioSpectrumUniform(
+            program, "g_AudioSpectrum16Right", 16
+        );
+        result.audioSpectrum32Left = prepareAudioSpectrumUniform(
+            program, "g_AudioSpectrum32Left", 32
+        );
+        result.audioSpectrum32Right = prepareAudioSpectrumUniform(
+            program, "g_AudioSpectrum32Right", 32
+        );
+        result.audioSpectrum64Left = prepareAudioSpectrumUniform(
+            program, "g_AudioSpectrum64Left", 64
+        );
+        result.audioSpectrum64Right = prepareAudioSpectrumUniform(
+            program, "g_AudioSpectrum64Right", 64
+        );
 
         if (result.modelViewProjectionInverse >= 0) {
             result.modelViewProjectionInverseValue = inverse(
@@ -1858,6 +2438,9 @@ struct FramePlanExecutor::Impl final {
             result.texelSizeValue[0] * 0.5F,
             result.texelSizeValue[1] * 0.5F,
         };
+        if (inputs.audioSpectrum) {
+            result.audioSpectrumValue = *inputs.audioSpectrum;
+        }
         validateMatrix(model, "Model matrix");
         validateMatrix(viewProjection, "View-projection matrix");
         validateMatrix(modelViewProjection, "Model-view-projection matrix");
@@ -1917,6 +2500,40 @@ struct FramePlanExecutor::Impl final {
         bindMatrix(uniforms.effectTextureProjectionInverse, identity4);
         bindVector2(uniforms.texelSize, uniforms.texelSizeValue);
         bindVector2(uniforms.texelSizeHalf, uniforms.texelSizeHalfValue);
+        const auto bindAudio = [](
+            const PreparedAudioSpectrumUniform& uniform,
+            const float* values
+        ) {
+            if (uniform.location >= 0) {
+                glUniform1fv(
+                    uniform.location, uniform.activeElementCount, values
+                );
+            }
+        };
+        bindAudio(
+            uniforms.audioSpectrum16Left,
+            uniforms.audioSpectrumValue.spectrum16Left.data()
+        );
+        bindAudio(
+            uniforms.audioSpectrum16Right,
+            uniforms.audioSpectrumValue.spectrum16Right.data()
+        );
+        bindAudio(
+            uniforms.audioSpectrum32Left,
+            uniforms.audioSpectrumValue.spectrum32Left.data()
+        );
+        bindAudio(
+            uniforms.audioSpectrum32Right,
+            uniforms.audioSpectrumValue.spectrum32Right.data()
+        );
+        bindAudio(
+            uniforms.audioSpectrum64Left,
+            uniforms.audioSpectrumValue.spectrum64Left.data()
+        );
+        bindAudio(
+            uniforms.audioSpectrum64Right,
+            uniforms.audioSpectrumValue.spectrum64Right.data()
+        );
     }
 
     [[nodiscard]] static std::optional<PreparedUniform> prepareRuntimeUniform(
@@ -2098,6 +2715,50 @@ struct FramePlanExecutor::Impl final {
         session.destroyVertexArray(particleVertexArray);
     }
 
+    void ensurePuppetGeometry(Device::Session& session) {
+        if (puppetVertexArray != 0 || puppetVertexBuffer != 0 ||
+            puppetElementBuffer != 0) {
+            if (puppetVertexArray == 0 || puppetVertexBuffer == 0 ||
+                puppetElementBuffer == 0) {
+                throw Error(
+                    ErrorCode::internalFailure,
+                    "Puppet OpenGL geometry is only partially initialized"
+                );
+            }
+            return;
+        }
+
+        GLuint vertexArray = 0;
+        GLuint vertexBuffer = 0;
+        GLuint elementBuffer = 0;
+        try {
+            vertexArray = session.createVertexArray();
+            vertexBuffer = session.createBuffer();
+            elementBuffer = session.createBuffer();
+            glBindVertexArray(vertexArray);
+            glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, elementBuffer);
+            session.checkError(
+                ErrorCode::internalFailure,
+                "initializing shared Puppet geometry"
+            );
+            puppetVertexArray = vertexArray;
+            puppetVertexBuffer = vertexBuffer;
+            puppetElementBuffer = elementBuffer;
+        } catch (...) {
+            session.destroyBuffer(elementBuffer);
+            session.destroyBuffer(vertexBuffer);
+            session.destroyVertexArray(vertexArray);
+            throw;
+        }
+    }
+
+    void releasePuppetGeometry(Device::Session& session) noexcept {
+        session.destroyBuffer(puppetElementBuffer);
+        session.destroyBuffer(puppetVertexBuffer);
+        session.destroyVertexArray(puppetVertexArray);
+    }
+
     [[nodiscard]] PreparedDraw prepareDraw(
         Device::Session& session,
         const FramePlan& plan,
@@ -2113,12 +2774,41 @@ struct FramePlanExecutor::Impl final {
                 "Render pass image index is invalid"
             );
         }
+        const FrameImageDescriptor& image =
+            plan.images[pass.origin.imageIndex];
         auto& destination = framebuffer(pass.destination, aliases);
-        ProgramResource& programResource = program(session, pass);
+        ComboMap effectiveCombos = pass.combos;
+        if (image.source.kind == FrameResourceKind::assetTexture) {
+            applyTexture0FormatCombo(
+                effectiveCombos,
+                assetTexture(session, image.source, inputs.timeSeconds).format
+            );
+        }
+        ProgramResource& programResource = program(
+            session,
+            pass.vertexShaderPath,
+            pass.fragmentShaderPath,
+            effectiveCombos,
+            "Frame render pass"
+        );
         const GLuint activeProgram = programResource.program;
         PreparedDraw result{
             .pass = pass,
             .program = activeProgram,
+        };
+        const auto selectTexture0 = [&](const FrameResourceRef& resource) {
+            AssetTextureResource& textureResource = assetTexture(
+                session, resource, inputs.timeSeconds
+            );
+            if (image.textureAnimation &&
+                image.textureAnimation->assetIdentity == resource.id) {
+                return selectTextureAnimationFrame(
+                    textureResource, image.textureAnimation->frame
+                );
+            }
+            return selectTextureAnimation(
+                textureResource, inputs.timeSeconds
+            );
         };
 
         std::array<bool, 32> boundTextureSlots{};
@@ -2141,13 +2831,11 @@ struct FramePlanExecutor::Impl final {
             std::size_t imageIndex = 0;
             GLuint assetTextureValue = 0;
             if (slot == 0 && ref.kind == FrameResourceKind::assetTexture) {
-                result.texture0Animation = selectTextureAnimation(
-                    assetTexture(session, ref), inputs.timeSeconds
-                );
+                result.texture0Animation = selectTexture0(ref);
                 imageIndex = result.texture0Animation.imageIndex;
             }
             if (ref.kind == FrameResourceKind::assetTexture) {
-                assetTextureValue = texture(session, ref, imageIndex);
+                assetTextureValue = texture(session, ref, imageIndex, inputs.timeSeconds);
             } else {
                 static_cast<void>(framebuffer(ref, aliases));
             }
@@ -2216,15 +2904,13 @@ struct FramePlanExecutor::Impl final {
             GLuint assetTextureValue = 0;
             if (*slot == 0 &&
                 defaultResource.kind == FrameResourceKind::assetTexture) {
-                result.texture0Animation = selectTextureAnimation(
-                    assetTexture(session, defaultResource), inputs.timeSeconds
-                );
+                result.texture0Animation = selectTexture0(defaultResource);
                 imageIndex = result.texture0Animation.imageIndex;
             }
             if (defaultResource.kind == FrameResourceKind::assetTexture) {
-                assetTextureValue = texture(
-                    session, defaultResource, imageIndex
-                );
+                    assetTextureValue = texture(
+                        session, defaultResource, imageIndex, inputs.timeSeconds
+                    );
             } else {
                 static_cast<void>(framebuffer(defaultResource, aliases));
             }
@@ -2254,8 +2940,6 @@ struct FramePlanExecutor::Impl final {
         result.uniforms.alternateViewProjection = prepareBuiltinUniform(
             programResource, "g_AltViewProjectionMatrix", GL_FLOAT_MAT4
         );
-        const FrameImageDescriptor& image =
-            plan.images[pass.origin.imageIndex];
         const auto identity = identityMatrix();
         const float imageWidth = checkedFloat(image.size.x, "Image width");
         const float imageHeight = checkedFloat(image.size.y, "Image height");
@@ -2269,14 +2953,21 @@ struct FramePlanExecutor::Impl final {
         float right = 1.0F;
         float bottom = -1.0F;
         float top = 1.0F;
-        if (pass.geometry == FrameGeometryKind::imageLocal) {
+        const bool puppetGeometry =
+            pass.geometry == FrameGeometryKind::puppetMesh;
+        const bool puppetSceneSpace = puppetGeometry &&
+            pass.destination.kind == plan.output.kind &&
+            pass.destination.id == plan.output.id;
+        if (pass.geometry == FrameGeometryKind::imageLocal ||
+            (puppetGeometry && !puppetSceneSpace)) {
             left = 0.0F;
             right = imageWidth;
             bottom = 0.0F;
             top = imageHeight;
             result.modelViewProjection = localProjection;
         } else if (pass.geometry == FrameGeometryKind::imageScene ||
-                   pass.geometry == FrameGeometryKind::passthroughCapture) {
+                   pass.geometry == FrameGeometryKind::passthroughCapture ||
+                   puppetSceneSpace) {
             const auto& transform = image.worldTransform;
             // Wallpaper Engine stores image origins in top-left scene pixels,
             // while its orthographic camera is centered with Y pointing up.
@@ -2359,10 +3050,35 @@ struct FramePlanExecutor::Impl final {
                     "Scene orthographic camera was not prepared"
                 );
             }
-            result.modelViewProjection = multiply(
-                *camera.orthographicViewProjection,
-                screenTransform
-            );
+            if (puppetSceneSpace) {
+                // MDLV positions are image-local offsets around the mesh
+                // centre. Map those local coordinates through the authored
+                // image transform before applying the scene camera.
+                const Matrix localToScene = multiply(
+                    translation(pivotX, pivotY, 0.0F),
+                    multiply(
+                        scaling(
+                            checkedFloat(transform.scale.x, "Image scale X"),
+                            checkedFloat(transform.scale.y, "Image scale Y"),
+                            checkedFloat(transform.scale.z, "Image scale Z")
+                        ),
+                        translation(
+                            -imageWidth * 0.5F,
+                            -imageHeight * 0.5F,
+                            0.0F
+                        )
+                    )
+                );
+                result.modelViewProjection = multiply(
+                    *camera.orthographicViewProjection,
+                    multiply(screenTransform, localToScene)
+                );
+            } else {
+                result.modelViewProjection = multiply(
+                    *camera.orthographicViewProjection,
+                    screenTransform
+                );
+            }
         } else {
             result.modelViewProjection = identity;
         }
@@ -2426,15 +3142,52 @@ struct FramePlanExecutor::Impl final {
                 vMax = resolution[3] / resolution[1];
             }
         }
-        result.vertices = {{
-            {{left, bottom, 0}, {0, 0}},
-            {{right, bottom, 0}, {uMax, 0}},
-            {{right, top, 0}, {uMax, vMax}},
-            {{left, bottom, 0}, {0, 0}},
-            {{right, top, 0}, {uMax, vMax}},
-            {{left, top, 0}, {0, vMax}},
-        }};
-        ensureGeometry(session);
+        if (puppetGeometry) {
+            if (!image.puppetMesh) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Puppet render pass has no decoded mesh descriptor"
+                );
+            }
+            const PuppetMesh& mesh = *image.puppetMesh;
+            if (mesh.vertices.empty() || mesh.indices.empty() ||
+                mesh.indices.size() > static_cast<std::size_t>(
+                    std::numeric_limits<GLsizei>::max()
+                )) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Puppet mesh has no drawable geometry or too many indices"
+                );
+            }
+            result.puppetVertices.reserve(mesh.vertices.size());
+            for (const PuppetVertex& vertex : mesh.vertices) {
+                const float localX = imageWidth * 0.5F + vertex.position[0];
+                const float localY = imageHeight * 0.5F - vertex.position[1];
+                if (!std::isfinite(localX) || !std::isfinite(localY) ||
+                    !std::isfinite(vertex.position[2])) {
+                    throw Error(
+                        ErrorCode::resourceValidation,
+                        "Puppet mesh position is non-finite after image-size conversion"
+                    );
+                }
+                result.puppetVertices.push_back({
+                    .position = {localX, localY, vertex.position[2]},
+                    .texCoord = {vertex.texCoord[0], vertex.texCoord[1]},
+                });
+            }
+            result.puppetIndices = mesh.indices;
+            ensurePuppetGeometry(session);
+        } else {
+            result.vertices = {{
+                {{left, bottom, 0}, {0, 0}},
+                {{right, bottom, 0}, {uMax, 0}},
+                {{right, top, 0}, {uMax, vMax}},
+                {{left, bottom, 0}, {0, 0}},
+                {{right, top, 0}, {uMax, vMax}},
+                {{left, top, 0}, {0, vMax}},
+            }};
+            ensureGeometry(session);
+        }
         result.positionLocation = glGetAttribLocation(
             activeProgram, "a_Position"
         );
@@ -2499,35 +3252,86 @@ struct FramePlanExecutor::Impl final {
             prepared.viewProjection
         );
 
-        glBindVertexArray(vertexArray);
-        glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
-        disableVertexAttributes();
-        glBufferSubData(
-            GL_ARRAY_BUFFER, 0, sizeof(prepared.vertices),
-            prepared.vertices.data()
-        );
-        if (prepared.positionLocation >= 0) {
-            glEnableVertexAttribArray(
-                static_cast<GLuint>(prepared.positionLocation)
+        const auto bindImageAttributes = [&prepared](GLsizei stride) {
+            if (prepared.positionLocation >= 0) {
+                glEnableVertexAttribArray(
+                    static_cast<GLuint>(prepared.positionLocation)
+                );
+                glVertexAttribPointer(
+                    static_cast<GLuint>(prepared.positionLocation),
+                    3, GL_FLOAT, GL_FALSE, stride,
+                    reinterpret_cast<const void*>(offsetof(Vertex, position))
+                );
+            }
+            if (prepared.texCoordLocation >= 0) {
+                glEnableVertexAttribArray(
+                    static_cast<GLuint>(prepared.texCoordLocation)
+                );
+                glVertexAttribPointer(
+                    static_cast<GLuint>(prepared.texCoordLocation),
+                    2, GL_FLOAT, GL_FALSE, stride,
+                    reinterpret_cast<const void*>(offsetof(Vertex, texCoord))
+                );
+            }
+        };
+        if (prepared.pass.geometry == FrameGeometryKind::puppetMesh) {
+            if (prepared.puppetVertices.empty() ||
+                prepared.puppetIndices.empty() ||
+                prepared.puppetIndices.size() > static_cast<std::size_t>(
+                    std::numeric_limits<GLsizei>::max()
+                ) ||
+                prepared.puppetVertices.size() >
+                    std::numeric_limits<std::size_t>::max() / sizeof(Vertex) ||
+                prepared.puppetIndices.size() >
+                    std::numeric_limits<std::size_t>::max() /
+                        sizeof(std::uint16_t) ||
+                prepared.puppetVertices.size() * sizeof(Vertex) >
+                    static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max()) ||
+                prepared.puppetIndices.size() * sizeof(std::uint16_t) >
+                    static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max())) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Puppet draw data exceeds OpenGL buffer limits"
+                );
+            }
+            glBindVertexArray(puppetVertexArray);
+            glBindBuffer(GL_ARRAY_BUFFER, puppetVertexBuffer);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, puppetElementBuffer);
+            disableVertexAttributes();
+            glBufferData(
+                GL_ARRAY_BUFFER,
+                static_cast<GLsizeiptr>(
+                    prepared.puppetVertices.size() * sizeof(Vertex)
+                ),
+                prepared.puppetVertices.data(),
+                GL_DYNAMIC_DRAW
             );
-            glVertexAttribPointer(
-                static_cast<GLuint>(prepared.positionLocation),
-                3, GL_FLOAT, GL_FALSE,
-                sizeof(Vertex), nullptr
+            glBufferData(
+                GL_ELEMENT_ARRAY_BUFFER,
+                static_cast<GLsizeiptr>(
+                    prepared.puppetIndices.size() * sizeof(std::uint16_t)
+                ),
+                prepared.puppetIndices.data(),
+                GL_STATIC_DRAW
             );
+            bindImageAttributes(static_cast<GLsizei>(sizeof(Vertex)));
+            glDrawElements(
+                GL_TRIANGLES,
+                static_cast<GLsizei>(prepared.puppetIndices.size()),
+                GL_UNSIGNED_SHORT,
+                nullptr
+            );
+        } else {
+            glBindVertexArray(vertexArray);
+            glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
+            disableVertexAttributes();
+            glBufferSubData(
+                GL_ARRAY_BUFFER, 0, sizeof(prepared.vertices),
+                prepared.vertices.data()
+            );
+            bindImageAttributes(static_cast<GLsizei>(sizeof(Vertex)));
+            glDrawArrays(GL_TRIANGLES, 0, 6);
         }
-        if (prepared.texCoordLocation >= 0) {
-            glEnableVertexAttribArray(
-                static_cast<GLuint>(prepared.texCoordLocation)
-            );
-            glVertexAttribPointer(
-                static_cast<GLuint>(prepared.texCoordLocation),
-                2, GL_FLOAT, GL_FALSE,
-                sizeof(Vertex),
-                reinterpret_cast<const void*>(offsetof(Vertex, texCoord))
-            );
-        }
-        glDrawArrays(GL_TRIANGLES, 0, 6);
         session.checkError(ErrorCode::draw, "executing frame render pass");
     }
 
@@ -2664,13 +3468,8 @@ struct FramePlanExecutor::Impl final {
 
         text::FontSource font;
         std::optional<ResolvedAsset> fontAsset;
-        if (descriptor.font == "systemfont_arial") {
+        if (descriptor.font.starts_with("systemfont_")) {
             font = text::FontSource::system("Arial");
-        } else if (descriptor.font.starts_with("systemfont_")) {
-            throw Error(
-                ErrorCode::resourceValidation,
-                "Unsupported system font identifier '" + descriptor.font + "'"
-            );
         } else {
             fontAsset = resolver().resolve(descriptor.font);
             font = text::FontSource::bytes(fontAsset->bytes);
@@ -2796,10 +3595,10 @@ struct FramePlanExecutor::Impl final {
     [[nodiscard]] static ParticleAtlasMetadata particleAtlasMetadata(
         const AssetTextureResource& texture
     ) {
-        if (texture.isAnimated() || texture.images.size() != 1) {
+        if (texture.images.empty()) {
             throw Error(
                 ErrorCode::resourceValidation,
-                "Particle rendering does not support multi-image animated textures"
+                "Particle rendering requires at least one uploaded texture image"
             );
         }
         const bool hasColumns = texture.spritesheetColumns > 0;
@@ -2988,6 +3787,215 @@ struct FramePlanExecutor::Impl final {
         return batch;
     }
 
+    [[nodiscard]] static ParticleDrawBatch particleRopeBatch(
+        const particle::ParticleSimulation& simulation,
+        const FrameParticleDescriptor& descriptor,
+        ParticleAtlasMetadata atlas
+    ) {
+        const auto& particles = simulation.particles();
+        ParticleDrawBatch batch;
+        batch.atlas = atlas;
+        batch.rope = true;
+        if (particles.size() < 2) return batch;
+
+        const auto positiveInteger = [](double value, int fallback) {
+            if (!std::isfinite(value) || value <= 0.0) return fallback;
+            const double rounded = std::floor(value);
+            if (rounded > static_cast<double>(std::numeric_limits<int>::max())) {
+                return std::numeric_limits<int>::max();
+            }
+            return std::max(1, static_cast<int>(rounded));
+        };
+        // Linux clamps an authored zero/negative subdivision to one at render
+        // time.  The parser's rope default is four, but that default is
+        // already present in the descriptor; it must not be reused for an
+        // explicitly invalid value here.
+        const int subdivision = positiveInteger(
+            descriptor.renderer.subdivision, 1
+        );
+        const std::size_t segmentCount = particles.size() - 1;
+        if (segmentCount > (std::numeric_limits<std::size_t>::max() - 1U) /
+                static_cast<std::size_t>(subdivision)) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Particle rope subdivision overflows geometry size"
+            );
+        }
+        const std::size_t totalPoints =
+            segmentCount * static_cast<std::size_t>(subdivision) + 1U;
+        if (totalPoints >
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) / 4U) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Particle rope geometry exceeds the uint32 vertex-index range"
+            );
+        }
+        if (totalPoints > std::numeric_limits<std::size_t>::max() / 4U) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Particle rope geometry vertex count overflows size_t"
+            );
+        }
+
+        struct Point final {
+            particle::Vector3 position;
+            double size = 0.0;
+            std::array<double, 4> color{};
+        };
+        std::vector<Point> points(totalPoints);
+        const auto catmullRom = [](particle::Vector3 p0,
+                                   particle::Vector3 p1,
+                                   particle::Vector3 p2,
+                                   particle::Vector3 p3,
+                                   double t) {
+            const double t2 = t * t;
+            const double t3 = t2 * t;
+            return particle::Vector3{
+                0.5 * ((2.0 * p1.x) + (-p0.x + p2.x) * t +
+                       (2.0 * p0.x - 5.0 * p1.x + 4.0 * p2.x - p3.x) * t2 +
+                       (-p0.x + 3.0 * p1.x - 3.0 * p2.x + p3.x) * t3),
+                0.5 * ((2.0 * p1.y) + (-p0.y + p2.y) * t +
+                       (2.0 * p0.y - 5.0 * p1.y + 4.0 * p2.y - p3.y) * t2 +
+                       (-p0.y + 3.0 * p1.y - 3.0 * p2.y + p3.y) * t3),
+                0.5 * ((2.0 * p1.z) + (-p0.z + p2.z) * t +
+                       (2.0 * p0.z - 5.0 * p1.z + 4.0 * p2.z - p3.z) * t2 +
+                       (-p0.z + 3.0 * p1.z - 3.0 * p2.z + p3.z) * t3),
+            };
+        };
+        const auto particleColor = [](const particle::ParticleInstance& p) {
+            return std::array<double, 4>{p.color.x, p.color.y, p.color.z, p.alpha};
+        };
+        for (std::size_t segment = 0; segment < segmentCount; ++segment) {
+            const auto& p1 = particles[segment];
+            const auto& p2 = particles[segment + 1U];
+            const auto& p0 = segment > 0 ? particles[segment - 1U] : p1;
+            const auto& p3 = segment + 2U < particles.size()
+                ? particles[segment + 2U] : p2;
+            for (int step = 0; step < subdivision; ++step) {
+                const double t = static_cast<double>(step) /
+                    static_cast<double>(subdivision);
+                const std::size_t index = segment * static_cast<std::size_t>(subdivision) +
+                    static_cast<std::size_t>(step);
+                const auto c1 = particleColor(p1);
+                const auto c2 = particleColor(p2);
+                points[index] = {
+                    .position = catmullRom(p0.position, p1.position, p2.position, p3.position, t),
+                    .size = p1.size + (p2.size - p1.size) * t,
+                    .color = {
+                        c1[0] + (c2[0] - c1[0]) * t,
+                        c1[1] + (c2[1] - c1[1]) * t,
+                        c1[2] + (c2[2] - c1[2]) * t,
+                        c1[3] + (c2[3] - c1[3]) * t,
+                    },
+                };
+            }
+        }
+        const auto& last = particles.back();
+        points.back() = {
+            .position = last.position,
+            .size = last.size,
+            .color = particleColor(last),
+        };
+
+        const double uvScale = descriptor.renderer.uvScale > 0.0 &&
+                std::isfinite(descriptor.renderer.uvScale)
+            ? descriptor.renderer.uvScale : 1.0;
+        const double trailLength =
+            static_cast<double>(totalPoints - 1U) / uvScale + 1.0;
+        const double usableLength = trailLength - 1.0;
+        // CParticle records this from the lifetime initializer range, not
+        // from the random values of the currently alive particles.  In
+        // particular, a fixed range enables smoothing even before all
+        // particles happen to share an identical sampled lifetime.
+        bool uniformLifetimes = false;
+        for (const auto& initializer : descriptor.configuration.initializers) {
+            if (const auto* lifetime =
+                    std::get_if<particle::LifetimeRandomInitializer>(&initializer)) {
+                uniformLifetimes = lifetime->minimum == lifetime->maximum;
+            }
+        }
+        const bool smooth = descriptor.renderer.uvSmoothing &&
+            uniformLifetimes && !descriptor.renderer.uvScrolling;
+        std::vector<double> arc;
+        double arcTotal = 0.0;
+        if (smooth) {
+            arc.assign(totalPoints, 0.0);
+            for (std::size_t index = 1; index < totalPoints; ++index) {
+                const auto& a = points[index - 1].position;
+                const auto& b = points[index].position;
+                const double dx = b.x - a.x;
+                const double dy = b.y - a.y;
+                const double dz = b.z - a.z;
+                arcTotal += std::sqrt(dx * dx + dy * dy + dz * dz);
+                arc[index] = arcTotal;
+            }
+        }
+        const double scrollOffset = descriptor.renderer.uvScrolling &&
+                usableLength > 0.0
+            ? std::fmod(simulation.simulationTimeSeconds(), 10000.0) * usableLength
+            : 0.0;
+
+        batch.ropeVertices.reserve((totalPoints - 1U) * 4U);
+        batch.indices.reserve((totalPoints - 1U) * 6U);
+        for (std::size_t segment = 0; segment + 1U < totalPoints; ++segment) {
+            const Point& start = points[segment];
+            const Point& end = points[segment + 1U];
+            const Point& previous = segment > 0 ? points[segment - 1U] : start;
+            const Point& next = segment + 2U < totalPoints
+                ? points[segment + 2U] : end;
+            double trailPosition = static_cast<double>(segment);
+            if (smooth && arcTotal > 0.0) {
+                trailPosition = arc[segment] / arcTotal *
+                    static_cast<double>(totalPoints - 1U);
+            }
+            trailPosition += scrollOffset;
+            const std::uint32_t base = static_cast<std::uint32_t>(
+                batch.ropeVertices.size()
+            );
+            const auto append = [&](float u, float v) {
+                RopeParticleVertex vertex{};
+                vertex.positionVec4[0] = particleFloat(start.position.x, "rope position");
+                vertex.positionVec4[1] = particleFloat(start.position.y, "rope position");
+                vertex.positionVec4[2] = particleFloat(start.position.z, "rope position");
+                vertex.positionVec4[3] = particleFloat(start.size, "rope size");
+                vertex.texCoordVec4[0] = particleFloat(end.position.x, "rope position");
+                vertex.texCoordVec4[1] = particleFloat(end.position.y, "rope position");
+                vertex.texCoordVec4[2] = particleFloat(end.position.z, "rope position");
+                vertex.texCoordVec4[3] = particleFloat(trailLength, "rope length");
+                vertex.texCoordVec4C1[0] = particleFloat(previous.position.x, "rope position");
+                vertex.texCoordVec4C1[1] = particleFloat(previous.position.y, "rope position");
+                vertex.texCoordVec4C1[2] = particleFloat(previous.position.z, "rope position");
+                vertex.texCoordVec4C1[3] = particleFloat(trailPosition, "rope trail position");
+                vertex.texCoordVec4C2[0] = particleFloat(next.position.x, "rope position");
+                vertex.texCoordVec4C2[1] = particleFloat(next.position.y, "rope position");
+                vertex.texCoordVec4C2[2] = particleFloat(next.position.z, "rope position");
+                vertex.texCoordVec4C2[3] = particleFloat(end.size, "rope size");
+                for (int channel = 0; channel < 4; ++channel) {
+                    vertex.texCoordVec4C3[channel] = particleFloat(
+                        end.color[static_cast<std::size_t>(channel)],
+                        "rope color"
+                    );
+                    vertex.color[channel] = particleFloat(
+                        start.color[static_cast<std::size_t>(channel)],
+                        "rope color"
+                    );
+                }
+                vertex.texCoordC4[0] = u;
+                vertex.texCoordC4[1] = v;
+                batch.ropeVertices.push_back(vertex);
+            };
+            append(0.0F, 0.0F);
+            append(1.0F, 0.0F);
+            append(1.0F, 1.0F);
+            append(0.0F, 1.0F);
+            batch.indices.insert(
+                batch.indices.end(),
+                {base, base + 1U, base + 2U, base + 2U, base + 3U, base}
+            );
+        }
+        return batch;
+    }
+
     [[nodiscard]] std::string particleAssetIdentity(
         const FrameParticleDescriptor& descriptor
     ) const {
@@ -3041,9 +4049,11 @@ struct FramePlanExecutor::Impl final {
                 inputs.frameTimeSeconds,
                 descriptor.configuration
             );
-            ParticleDrawBatch batch = particleBatch(
-                state.simulation, descriptor, atlas
-            );
+            ParticleDrawBatch batch =
+                descriptor.renderer.kind == FrameParticleRendererKind::rope ||
+                    descriptor.renderer.kind == FrameParticleRendererKind::ropeTrail
+                ? particleRopeBatch(state.simulation, descriptor, atlas)
+                : particleBatch(state.simulation, descriptor, atlas);
             return {std::move(state), std::move(batch)};
         } catch (const std::bad_alloc&) {
             throw;
@@ -3093,13 +4103,17 @@ struct FramePlanExecutor::Impl final {
                 "Particle phase one requires the scene output as its destination"
             );
         }
-        if (descriptor.shader != "genericparticle") {
+        const bool ropeRenderer =
+            descriptor.renderer.kind == FrameParticleRendererKind::rope ||
+            descriptor.renderer.kind == FrameParticleRendererKind::ropeTrail;
+        if (ropeRenderer && descriptor.shader != "genericropeparticle") {
             throw Error(
                 ErrorCode::resourceValidation,
-                "Particle phase one requires the genericparticle shader"
+                "Rope particle renderer requires the genericropeparticle shader"
             );
         }
-        if (descriptor.texture0.kind != FrameResourceKind::assetTexture ||
+        if (descriptor.textures.empty() ||
+            descriptor.texture0.kind != FrameResourceKind::assetTexture ||
             descriptor.texture0.id.empty()) {
             throw Error(
                 ErrorCode::resourceValidation,
@@ -3109,8 +4123,10 @@ struct FramePlanExecutor::Impl final {
         static_cast<void>(framebuffer(command.destination, aliases));
 
         AssetTextureResource& textureResource = assetTexture(
-            session, descriptor.texture0
+            session, descriptor.texture0, inputs.timeSeconds
         );
+        const TextureAnimationSelection texture0Animation =
+            selectTextureAnimation(textureResource, inputs.timeSeconds);
         const ParticleAtlasMetadata atlas = particleAtlasMetadata(
             textureResource
         );
@@ -3127,6 +4143,7 @@ struct FramePlanExecutor::Impl final {
         }
 
         ComboMap effectiveCombos = descriptor.combos;
+        applyTexture0FormatCombo(effectiveCombos, textureResource.format);
         const auto requireCombo = [&](const char* name, int expected) {
             const auto authored = effectiveCombos.find(name);
             if (authored != effectiveCombos.end() &&
@@ -3141,7 +4158,12 @@ struct FramePlanExecutor::Impl final {
         };
         requireCombo("GS_ENABLED", 0);
         requireCombo("THICKFORMAT", 1);
-        requireCombo("TRAILRENDERER", 0);
+        requireCombo(
+            "TRAILRENDERER",
+            descriptor.renderer.kind == FrameParticleRendererKind::spriteTrail ||
+                descriptor.renderer.kind == FrameParticleRendererKind::ropeTrail
+                ? 1 : 0
+        );
         effectiveCombos["SPRITESHEET"] = batch->atlas.enabled() ? 1 : 0;
         ProgramResource& programResource = program(
             session,
@@ -3151,12 +4173,6 @@ struct FramePlanExecutor::Impl final {
             "Particle render pass"
         );
         const GLuint activeProgram = programResource.program;
-        if (textureResource.isAnimated() || textureResource.images.size() != 1) {
-            throw Error(
-                ErrorCode::resourceValidation,
-                "Particle phase one requires one static texture image in slot zero"
-            );
-        }
 
         PreparedParticle prepared{
             .destination = command.destination,
@@ -3165,16 +4181,154 @@ struct FramePlanExecutor::Impl final {
             .depthTest = descriptor.depthTest,
             .depthWrite = descriptor.depthWrite,
             .program = activeProgram,
-            .texture = textureResource.images.front(),
-            .textureResolution = textureResource.resolution,
+            .texture0Animation = texture0Animation,
+            .rope = ropeRenderer,
+            .refract = effectiveCombos.contains("REFRACT") &&
+                effectiveCombos.at("REFRACT") != 0,
             .operationIndex = operationIndex,
         };
+        const FrameResourceRef destination = command.destination;
+        std::array<bool, 32> boundTextureSlots{};
+        for (const auto& [slot, resource] : descriptor.textures) {
+            if (slot < 0 || slot >= 32) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Particle texture slot is outside the supported range 0...31"
+                );
+            }
+            if (resource.id.empty()) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Particle texture slot has an empty resource identity"
+                );
+            }
+            GLuint assetTextureValue = 0;
+            if (resource.kind == FrameResourceKind::assetTexture) {
+                const std::size_t imageIndex = slot == 0
+                    ? texture0Animation.imageIndex : 0;
+                if (slot == 0 && resource.id == descriptor.texture0.id) {
+                    if (imageIndex >= textureResource.images.size()) {
+                        throw Error(
+                            ErrorCode::resourceValidation,
+                            "Particle texture animation selected an unavailable image"
+                        );
+                    }
+                    assetTextureValue = textureResource.images[imageIndex];
+                } else {
+                    assetTextureValue = texture(
+                        session, resource, imageIndex, inputs.timeSeconds
+                    );
+                }
+            } else if (resource.kind == FrameResourceKind::framebuffer) {
+                const auto& source = framebuffer(resource, aliases);
+                const auto& target = framebuffer(destination, aliases);
+                if (source.framebuffer == target.framebuffer && !prepared.refract) {
+                    throw Error(
+                        ErrorCode::resourceValidation,
+                        "Particle texture slot " + std::to_string(slot) +
+                            " resolves to the render destination without REFRACT snapshot support"
+                    );
+                }
+            } else {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Particle texture slots must reference asset textures or framebuffers"
+                );
+            }
+            PreparedTextureBinding binding{
+                .slot = slot,
+                .resource = resource,
+                .assetTexture = assetTextureValue,
+                .resolution = textureResolution(resource, aliases),
+                .samplerLocation = prepareBuiltinUniform(
+                    programResource,
+                    "g_Texture" + std::to_string(slot),
+                    GL_SAMPLER_2D
+                ),
+                .resolutionLocation = prepareBuiltinUniform(
+                    programResource,
+                    "g_Texture" + std::to_string(slot) + "Resolution",
+                    GL_FLOAT_VEC4
+                ),
+            };
+            prepared.textures.push_back(std::move(binding));
+            boundTextureSlots[static_cast<std::size_t>(slot)] = true;
+        }
+        for (const auto& uniform : programResource.uniforms) {
+            if (!isOpenGLSamplerType(uniform.type)) continue;
+            if (uniform.type != GL_SAMPLER_2D) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active particle sampler '" + uniform.name +
+                        "' uses an unsupported non-2D texture type"
+                );
+            }
+            const std::optional<int> slot = textureSlot(uniform.name);
+            if (!slot) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active particle sampler '" + uniform.name +
+                        "' does not follow the g_TextureN binding contract"
+                );
+            }
+            if (boundTextureSlots[static_cast<std::size_t>(*slot)]) continue;
+            const std::string* defaultTexture = samplerDefaultTexture(
+                programResource.parameters, uniform.name
+            );
+            if (defaultTexture == nullptr || defaultTexture->empty()) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active particle sampler '" + uniform.name +
+                        "' requires texture slot " + std::to_string(*slot) +
+                        ", but the frame pass provides no texture or metadata default"
+                );
+            }
+            const FrameResourceRef defaultResource =
+                particleSamplerDefaultResource(plan, descriptor, *defaultTexture);
+            GLuint assetTextureValue = 0;
+            if (defaultResource.kind == FrameResourceKind::assetTexture) {
+                const std::size_t imageIndex = *slot == 0
+                    ? texture0Animation.imageIndex : 0;
+                assetTextureValue = texture(
+                    session, defaultResource, imageIndex, inputs.timeSeconds
+                );
+            } else if (defaultResource.kind == FrameResourceKind::framebuffer) {
+                const auto& source = framebuffer(defaultResource, aliases);
+                const auto& target = framebuffer(destination, aliases);
+                if (source.framebuffer == target.framebuffer && !prepared.refract) {
+                    throw Error(
+                        ErrorCode::resourceValidation,
+                        "Active particle sampler '" + uniform.name +
+                            "' resolves to the render destination without REFRACT snapshot support"
+                    );
+                }
+            } else {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Particle sampler metadata default resolves to an unsupported resource"
+                );
+            }
+            prepared.textures.push_back({
+                .slot = *slot,
+                .resource = defaultResource,
+                .assetTexture = assetTextureValue,
+                .resolution = textureResolution(defaultResource, aliases),
+                .samplerLocation = prepareBuiltinUniform(
+                    programResource, uniform.name, GL_SAMPLER_2D
+                ),
+                .resolutionLocation = prepareBuiltinUniform(
+                    programResource,
+                    uniform.name + "Resolution", GL_FLOAT_VEC4
+                ),
+            });
+            boundTextureSlots[static_cast<std::size_t>(*slot)] = true;
+        }
         prepared.attributeLocations.fill(-1);
-        prepared.uniforms.texture0 = prepareBuiltinUniform(
-            programResource, "g_Texture0", GL_SAMPLER_2D
+        prepared.uniforms.texture0Translation = prepareBuiltinUniform(
+            programResource, "g_Texture0Translation", GL_FLOAT_VEC2
         );
-        prepared.uniforms.texture0Resolution = prepareBuiltinUniform(
-            programResource, "g_Texture0Resolution", GL_FLOAT_VEC4
+        prepared.uniforms.texture0Rotation = prepareBuiltinUniform(
+            programResource, "g_Texture0Rotation", GL_FLOAT_VEC4
         );
         prepared.uniforms.modelInverse = prepareBuiltinUniform(
             programResource, "g_ModelMatrixInverse", GL_FLOAT_MAT4
@@ -3203,6 +4357,11 @@ struct FramePlanExecutor::Impl final {
         prepared.uniforms.renderVar1 = prepareBuiltinUniform(
             programResource, "g_RenderVar1", GL_FLOAT_VEC4
         );
+        if (prepared.refract) {
+            prepared.uniforms.refractAmount = prepareBuiltinUniform(
+                programResource, "g_RefractAmount", GL_FLOAT
+            );
+        }
         const auto& transform = descriptor.worldTransform;
         const float originX = particleFloat(
             transform.origin.x - static_cast<double>(plan.width) * 0.5,
@@ -3321,6 +4480,12 @@ struct FramePlanExecutor::Impl final {
                 0.0F, 0.0F, 0.0F, textureHeight / textureWidth,
             };
         }
+        prepared.renderVar0 = {
+            particleFloat(descriptor.renderer.length, "renderer length"),
+            particleFloat(descriptor.renderer.maxLength, "renderer maximum length"),
+            particleFloat(descriptor.renderer.minLength, "renderer minimum length"),
+            0.0F,
+        };
         static_cast<void>(particleFloat(inputs.timeSeconds, "frame time"));
         const auto& overrides = descriptor.configuration.overrides;
         prepared.commonUniforms = prepareCommonUniforms(
@@ -3345,7 +4510,13 @@ struct FramePlanExecutor::Impl final {
         );
         for (const auto& metadata : programResource.parameters) {
             if (!metadata.material || isSamplerParameter(metadata)) continue;
-            if (metadata.defaultValue) {
+            const auto authored = descriptor.constants.find(metadata.name);
+            if (authored != descriptor.constants.end()) {
+                if (auto uniform = prepareRuntimeUniform(
+                        programResource, metadata.name, authored->second.value)) {
+                    prepared.materialUniforms.push_back(std::move(*uniform));
+                }
+            } else if (metadata.defaultValue) {
                 if (auto uniform = prepareRuntimeUniform(
                         programResource,
                         metadata.name,
@@ -3362,9 +4533,13 @@ struct FramePlanExecutor::Impl final {
             }
         }
 
-        if (batch->vertices.size() >
+        const std::size_t vertexCount = batch->rope
+            ? batch->ropeVertices.size() : batch->vertices.size();
+        const std::size_t vertexStride = batch->rope
+            ? sizeof(RopeParticleVertex) : sizeof(ParticleVertex);
+        if (vertexCount >
                 static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max()) /
-                    sizeof(ParticleVertex) ||
+                    vertexStride ||
             batch->indices.size() >
                 static_cast<std::size_t>(std::numeric_limits<GLsizeiptr>::max()) /
                     sizeof(std::uint32_t) ||
@@ -3383,11 +4558,21 @@ struct FramePlanExecutor::Impl final {
                 activeProgram, name
             );
         };
-        prepareAttribute(0, "a_Position");
-        prepareAttribute(1, "a_TexCoordVec4");
-        prepareAttribute(2, "a_Color");
-        prepareAttribute(3, "a_TexCoordVec4C1");
-        prepareAttribute(4, "a_TexCoordC2");
+        if (ropeRenderer) {
+            prepareAttribute(0, "a_PositionVec4");
+            prepareAttribute(1, "a_TexCoordVec4");
+            prepareAttribute(2, "a_TexCoordVec4C1");
+            prepareAttribute(3, "a_TexCoordVec4C2");
+            prepareAttribute(4, "a_TexCoordVec4C3");
+            prepareAttribute(5, "a_TexCoordC4");
+            prepareAttribute(6, "a_Color");
+        } else {
+            prepareAttribute(0, "a_Position");
+            prepareAttribute(1, "a_TexCoordVec4");
+            prepareAttribute(2, "a_Color");
+            prepareAttribute(3, "a_TexCoordVec4C1");
+            prepareAttribute(4, "a_TexCoordC2");
+        }
         session.checkError(
             ErrorCode::draw,
             "preparing particle rendering"
@@ -3399,16 +4584,78 @@ struct FramePlanExecutor::Impl final {
         };
     }
 
+    void ensureParticleRefractSnapshot(
+        Device::Session& session,
+        const FramebufferResource& destination
+    ) {
+        if (particleRefractSnapshot.framebuffer != 0 &&
+            particleRefractSnapshot.width == destination.width &&
+            particleRefractSnapshot.height == destination.height &&
+            particleRefractSnapshot.format == PixelFormat::rgba8) {
+            return;
+        }
+        FramebufferResource candidate = session.createFramebuffer(
+            PixelFormat::rgba8,
+            destination.width,
+            destination.height,
+            TextureWrap::clampToEdge,
+            false
+        );
+        session.destroyFramebuffer(particleRefractSnapshot);
+        particleRefractSnapshot = std::move(candidate);
+    }
+
+    void snapshotParticleRefractInput(
+        Device::Session& session,
+        const FramebufferResource& destination
+    ) {
+        ensureParticleRefractSnapshot(session, destination);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, destination.framebuffer);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, particleRefractSnapshot.framebuffer);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        glBlitFramebuffer(
+            0, 0,
+            static_cast<GLint>(destination.width),
+            static_cast<GLint>(destination.height),
+            0, 0,
+            static_cast<GLint>(particleRefractSnapshot.width),
+            static_cast<GLint>(particleRefractSnapshot.height),
+            GL_COLOR_BUFFER_BIT,
+            GL_NEAREST
+        );
+        session.checkError(
+            ErrorCode::draw,
+            "snapshotting the particle REFRACT input framebuffer"
+        );
+    }
+
     void drawParticle(
         Device::Session& session,
         const PreparedParticle& prepared,
         const ParticleDrawBatch& batch
     ) {
-        if (batch.vertices.empty()) {
+        if ((!batch.rope && batch.vertices.empty()) ||
+            (batch.rope && batch.ropeVertices.empty())) {
             glDisable(GL_DEPTH_CLAMP);
             return;
         }
         auto& destination = framebuffer(prepared.destination);
+        bool needsRefractSnapshot = false;
+        if (prepared.refract) {
+            for (const PreparedTextureBinding& binding : prepared.textures) {
+                if (binding.resource.kind != FrameResourceKind::framebuffer) {
+                    continue;
+                }
+                if (framebuffer(binding.resource).framebuffer == destination.framebuffer) {
+                    needsRefractSnapshot = true;
+                    break;
+                }
+            }
+        }
+        if (needsRefractSnapshot) {
+            snapshotParticleRefractInput(session, destination);
+        }
         glBindFramebuffer(GL_FRAMEBUFFER, destination.framebuffer);
         glViewport(
             0, 0,
@@ -3424,17 +4671,44 @@ struct FramePlanExecutor::Impl final {
         });
         glEnable(GL_DEPTH_CLAMP);
         glUseProgram(prepared.program);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, prepared.texture);
-        if (prepared.uniforms.texture0 >= 0) {
-            glUniform1i(prepared.uniforms.texture0, 0);
+        for (const PreparedTextureBinding& binding : prepared.textures) {
+            glActiveTexture(
+                static_cast<GLenum>(GL_TEXTURE0 + binding.slot)
+            );
+            GLuint textureValue = binding.assetTexture;
+            if (textureValue == 0 &&
+                binding.resource.kind == FrameResourceKind::framebuffer) {
+                const auto& source = framebuffer(binding.resource);
+                textureValue = source.framebuffer == destination.framebuffer &&
+                        needsRefractSnapshot
+                    ? particleRefractSnapshot.colorTexture
+                    : source.colorTexture;
+            }
+            if (textureValue == 0) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Particle texture binding resolved to OpenGL texture zero"
+                );
+            }
+            glBindTexture(GL_TEXTURE_2D, textureValue);
+            if (binding.samplerLocation >= 0) {
+                glUniform1i(binding.samplerLocation, binding.slot);
+            }
+            bindVector4(binding.resolutionLocation, binding.resolution);
         }
-        bindVector4(
-            prepared.uniforms.texture0Resolution,
-            prepared.textureResolution
-        );
         for (const PreparedUniform& uniform : prepared.materialUniforms) {
             bindPreparedUniform(uniform);
+        }
+        bindVector2(
+            prepared.uniforms.texture0Translation,
+            prepared.texture0Animation.translation
+        );
+        bindVector4(
+            prepared.uniforms.texture0Rotation,
+            prepared.texture0Animation.rotation
+        );
+        if (prepared.uniforms.refractAmount >= 0) {
+            glUniform1f(prepared.uniforms.refractAmount, 0.05F);
         }
         bindCommonUniforms(
             prepared.commonUniforms,
@@ -3456,18 +4730,31 @@ struct FramePlanExecutor::Impl final {
         bindVector3(prepared.uniforms.viewRight, {1.0F, 0.0F, 0.0F});
         bindVector3(prepared.uniforms.eyePosition, prepared.eyePosition);
         bindVector4(
-            prepared.uniforms.renderVar0, {0.0F, 0.0F, 0.0F, 0.0F}
+            prepared.uniforms.renderVar0, prepared.renderVar0
         );
         bindVector4(prepared.uniforms.renderVar1, prepared.renderVar1);
         glBindVertexArray(particleVertexArray);
         glBindBuffer(GL_ARRAY_BUFFER, particleVertexBuffer);
         disableVertexAttributes();
-        glBufferData(
-            GL_ARRAY_BUFFER,
-            static_cast<GLsizeiptr>(batch.vertices.size() * sizeof(ParticleVertex)),
-            batch.vertices.data(),
-            GL_DYNAMIC_DRAW
-        );
+        if (batch.rope) {
+            glBufferData(
+                GL_ARRAY_BUFFER,
+                static_cast<GLsizeiptr>(
+                    batch.ropeVertices.size() * sizeof(RopeParticleVertex)
+                ),
+                batch.ropeVertices.data(),
+                GL_DYNAMIC_DRAW
+            );
+        } else {
+            glBufferData(
+                GL_ARRAY_BUFFER,
+                static_cast<GLsizeiptr>(
+                    batch.vertices.size() * sizeof(ParticleVertex)
+                ),
+                batch.vertices.data(),
+                GL_DYNAMIC_DRAW
+            );
+        }
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, particleElementBuffer);
         glBufferData(
             GL_ELEMENT_ARRAY_BUFFER,
@@ -3476,7 +4763,6 @@ struct FramePlanExecutor::Impl final {
             GL_DYNAMIC_DRAW
         );
 
-        const GLsizei stride = static_cast<GLsizei>(sizeof(ParticleVertex));
         const auto bindAttribute = [&](GLint location, GLint components,
                                        std::size_t offset) {
             if (location < 0) return;
@@ -3486,35 +4772,72 @@ struct FramePlanExecutor::Impl final {
                 components,
                 GL_FLOAT,
                 GL_FALSE,
-                stride,
+                static_cast<GLsizei>(sizeof(ParticleVertex)),
                 reinterpret_cast<const void*>(offset)
             );
         };
-        bindAttribute(
-            prepared.attributeLocations[0],
-            3,
-            offsetof(ParticleVertex, position)
-        );
-        bindAttribute(
-            prepared.attributeLocations[1],
-            4,
-            offsetof(ParticleVertex, texCoordRotationSize)
-        );
-        bindAttribute(
-            prepared.attributeLocations[2],
-            4,
-            offsetof(ParticleVertex, color)
-        );
-        bindAttribute(
-            prepared.attributeLocations[3],
-            4,
-            offsetof(ParticleVertex, velocityLifetime)
-        );
-        bindAttribute(
-            prepared.attributeLocations[4],
-            2,
-            offsetof(ParticleVertex, rotationXY)
-        );
+        if (batch.rope) {
+            const GLsizei stride = static_cast<GLsizei>(sizeof(RopeParticleVertex));
+            const auto bindRopeAttribute = [&](GLint location, GLint components,
+                                               std::size_t offset) {
+                if (location < 0) return;
+                glEnableVertexAttribArray(static_cast<GLuint>(location));
+                glVertexAttribPointer(
+                    static_cast<GLuint>(location), components, GL_FLOAT,
+                    GL_FALSE, stride, reinterpret_cast<const void*>(offset)
+                );
+            };
+            bindRopeAttribute(
+                prepared.attributeLocations[0], 4,
+                offsetof(RopeParticleVertex, positionVec4)
+            );
+            bindRopeAttribute(
+                prepared.attributeLocations[1], 4,
+                offsetof(RopeParticleVertex, texCoordVec4)
+            );
+            bindRopeAttribute(
+                prepared.attributeLocations[2], 4,
+                offsetof(RopeParticleVertex, texCoordVec4C1)
+            );
+            bindRopeAttribute(
+                prepared.attributeLocations[3], 4,
+                offsetof(RopeParticleVertex, texCoordVec4C2)
+            );
+            bindRopeAttribute(
+                prepared.attributeLocations[4], 4,
+                offsetof(RopeParticleVertex, texCoordVec4C3)
+            );
+            bindRopeAttribute(
+                prepared.attributeLocations[5], 2,
+                offsetof(RopeParticleVertex, texCoordC4)
+            );
+            bindRopeAttribute(
+                prepared.attributeLocations[6], 4,
+                offsetof(RopeParticleVertex, color)
+            );
+        } else {
+            const GLsizei stride = static_cast<GLsizei>(sizeof(ParticleVertex));
+            bindAttribute(
+                prepared.attributeLocations[0], 3,
+                offsetof(ParticleVertex, position)
+            );
+            bindAttribute(
+                prepared.attributeLocations[1], 4,
+                offsetof(ParticleVertex, texCoordRotationSize)
+            );
+            bindAttribute(
+                prepared.attributeLocations[2], 4,
+                offsetof(ParticleVertex, color)
+            );
+            bindAttribute(
+                prepared.attributeLocations[3], 4,
+                offsetof(ParticleVertex, velocityLifetime)
+            );
+            bindAttribute(
+                prepared.attributeLocations[4], 2,
+                offsetof(ParticleVertex, rotationXY)
+            );
+        }
         glDrawElements(
             GL_TRIANGLES,
             static_cast<GLsizei>(batch.indices.size()),
@@ -3705,6 +5028,17 @@ struct FramePlanExecutor::Impl final {
             } else if (const auto* command =
                            std::get_if<FrameParticleCommand>(&operation)) {
                 requireFramebuffer(command->destination, "Frame particle destination");
+                if (command->particleIndex >= plan.particles.size()) {
+                    throw Error(
+                        ErrorCode::resourceValidation,
+                        "Frame particle command references an invalid descriptor"
+                    );
+                }
+                for (const auto& [slot, resource] :
+                     plan.particles[command->particleIndex].textures) {
+                    static_cast<void>(slot);
+                    validateResource(resource, "Frame particle texture");
+                }
             }
         }
     }
@@ -3767,7 +5101,8 @@ struct FramePlanExecutor::Impl final {
             if (const auto* pass = std::get_if<FrameRenderPass>(&operation)) {
                 needsOrthographic = needsOrthographic ||
                     pass->geometry == FrameGeometryKind::imageScene ||
-                    pass->geometry == FrameGeometryKind::passthroughCapture;
+                    pass->geometry == FrameGeometryKind::passthroughCapture ||
+                    pass->geometry == FrameGeometryKind::puppetMesh;
             } else if (std::holds_alternative<FrameTextCommand>(operation)) {
                 needsOrthographic = true;
             } else if (const auto* command =
@@ -3830,15 +5165,22 @@ struct FramePlanExecutor::Impl final {
         static_cast<void>(framebuffer(plan.output));
 
         bool needsGeometry = false;
+        bool needsPuppetGeometry = false;
         bool needsParticleGeometry = false;
         for (const FrameOperation& operation : plan.operations) {
-            needsGeometry = needsGeometry ||
-                std::holds_alternative<FrameRenderPass>(operation) ||
-                std::holds_alternative<FrameCopyCommand>(operation);
+            if (const auto* render = std::get_if<FrameRenderPass>(&operation)) {
+                needsGeometry = true;
+                needsPuppetGeometry = needsPuppetGeometry ||
+                    render->geometry == FrameGeometryKind::puppetMesh;
+            } else {
+                needsGeometry = needsGeometry ||
+                    std::holds_alternative<FrameCopyCommand>(operation);
+            }
             needsParticleGeometry = needsParticleGeometry ||
                 std::holds_alternative<FrameParticleCommand>(operation);
         }
         if (needsGeometry) ensureGeometry(session);
+        if (needsPuppetGeometry) ensurePuppetGeometry(session);
         if (needsParticleGeometry) ensureParticleGeometry(session);
     }
 
@@ -4220,16 +5562,23 @@ struct FramePlanExecutor::Impl final {
 
     [[nodiscard]] ResolvedFrameInputs resolveInputs(
         const FrameInputs& inputs,
-        std::optional<FrameProjectionSize> drawableFallback,
+        const std::optional<PresentationViewport>& presentation,
         std::optional<PresentationScaling> scaling
     ) const {
+        const float daytime = localDaytime();
         ResolvedFrameInputs result{
             .timeSeconds = inputs.timeSeconds,
             .frameTimeSeconds = inputs.frameTimeSeconds,
-            .daytime = localDaytime(),
+            .isScreensaver = inputs.isScreensaver,
+            .daytime = daytime,
+            .timeOfDay = daytime,
+            .audioSpectrum = inputs.audioSpectrum,
+            .mediaSnapshot = inputs.mediaSnapshot,
         };
         const FrameVector2 drawablePointer = inputs.pointerPosition;
-        if (!drawableFallback) {
+        result.pointerActive = inputs.pointerActive;
+        result.pointerLeftDown = inputs.pointerLeftDown;
+        if (!presentation) {
             result.pointerPosition = {
                 std::clamp(drawablePointer.x, 0.0, 1.0),
                 std::clamp(drawablePointer.y, 0.0, 1.0),
@@ -4243,11 +5592,11 @@ struct FramePlanExecutor::Impl final {
             }
             const std::uint32_t sourceWidth =
                 frameGraph->requiresDrawableProjectionFallback()
-                    ? drawableFallback->width
+                    ? presentation->canvasWidth
                     : width;
             const std::uint32_t sourceHeight =
                 frameGraph->requiresDrawableProjectionFallback()
-                    ? drawableFallback->height
+                    ? presentation->canvasHeight
                     : height;
             if (sourceWidth == 0 || sourceHeight == 0) {
                 throw Error(
@@ -4255,11 +5604,10 @@ struct FramePlanExecutor::Impl final {
                     "Scene projection dimensions are unavailable for pointer mapping"
                 );
             }
-            const auto transform = presentationTransform(
-                static_cast<GLsizei>(sourceWidth),
-                static_cast<GLsizei>(sourceHeight),
-                static_cast<GLsizei>(drawableFallback->width),
-                static_cast<GLsizei>(drawableFallback->height),
+            const auto transform = makePresentationTransform(
+                sourceWidth,
+                sourceHeight,
+                *presentation,
                 *scaling
             );
             // Host, script, shader, and parallax inputs share one canonical
@@ -4275,8 +5623,135 @@ struct FramePlanExecutor::Impl final {
         return result;
     }
 
+    [[nodiscard]] std::vector<script::ScriptCursorEvent> updateCursorEvents(
+        const FramePlan* previousPlan,
+        const ResolvedFrameInputs& inputs
+    ) {
+        // Cursor callbacks must be supplied before the next plan evaluates
+        // scripts, so hit testing uses the last committed plan. Do not consume
+        // button or position edges until that first plan exists; otherwise a
+        // button held during the first frame loses its cursorDown permanently.
+        if (previousPlan == nullptr) return {};
+
+        const std::optional<CursorHit> hit = inputs.pointerActive
+            ? hitTestSolidLayer(*previousPlan, inputs.pointerPosition)
+            : std::nullopt;
+        const std::optional<CursorHit> previousTarget = cursorTarget;
+        std::vector<script::ScriptCursorEvent> events;
+        const auto makeEvent = [](
+            script::ScriptCursorEventType type,
+            const CursorHit& value
+        ) {
+            return script::ScriptCursorEvent{
+                .type = type,
+                .layerId = value.layerId,
+                .worldX = value.worldX,
+                .worldY = value.worldY,
+                .worldZ = value.worldZ,
+                .localX = value.localX,
+                .localY = value.localY,
+                .localZ = value.localZ,
+                .hitBox = std::nullopt,
+            };
+        };
+        const auto currentProjectionFor = [&](int layerId)
+            -> std::optional<CursorHit> {
+            return projectCursorLayer(
+                *previousPlan, layerId, inputs.pointerPosition
+            );
+        };
+        const auto eventTarget = [&](const CursorHit& fallback) {
+            return currentProjectionFor(fallback.layerId).value_or(fallback);
+        };
+        const bool targetChanged =
+            (previousTarget ? std::optional<int>(previousTarget->layerId) : std::nullopt) !=
+            (hit ? std::optional<int>(hit->layerId) : std::nullopt);
+        if (targetChanged) {
+            if (previousTarget) {
+                events.push_back(makeEvent(
+                    script::ScriptCursorEventType::leave,
+                    eventTarget(*previousTarget)
+                ));
+            }
+            if (hit) {
+                events.push_back(makeEvent(
+                    script::ScriptCursorEventType::enter, *hit
+                ));
+            }
+        }
+
+        const bool moved = hasCursorPosition &&
+            inputs.pointerPosition != lastCursorPosition;
+        const bool dragging = inputs.pointerLeftDown &&
+            previousPointerLeftDown && pressedCursorTarget.has_value();
+        if (dragging) {
+            const CursorHit dragTarget = currentProjectionFor(
+                pressedCursorTarget->layerId
+            ).value_or(*pressedCursorTarget);
+            // Keep captured event coordinates current instead of freezing
+            // world/local position at the original button-down point.
+            pressedCursorTarget = dragTarget;
+            if (moved) {
+                events.push_back(makeEvent(
+                    script::ScriptCursorEventType::move, dragTarget
+                ));
+            }
+        } else if (hit && moved) {
+            // Crossing layers is still a move over the new target. The order
+            // is deterministic: leave, enter, then move.
+            events.push_back(makeEvent(script::ScriptCursorEventType::move, *hit));
+        }
+
+        if (inputs.pointerLeftDown && !previousPointerLeftDown) {
+            if (hit) {
+                events.push_back(makeEvent(
+                    script::ScriptCursorEventType::down, *hit
+                ));
+                pressedCursorTarget = hit;
+            } else {
+                pressedCursorTarget.reset();
+            }
+        }
+
+        if (!inputs.pointerLeftDown && previousPointerLeftDown) {
+            if (pressedCursorTarget) {
+                // Button capture belongs to the pressed layer through release,
+                // even outside its bounds. Click still requires releasing over
+                // that same layer.
+                const CursorHit releaseTarget = currentProjectionFor(
+                    pressedCursorTarget->layerId
+                ).value_or(*pressedCursorTarget);
+                events.push_back(makeEvent(
+                    script::ScriptCursorEventType::up, releaseTarget
+                ));
+                if (hit && hit->layerId == pressedCursorTarget->layerId) {
+                    events.push_back(makeEvent(
+                        script::ScriptCursorEventType::click, *hit
+                    ));
+                }
+            } else if (hit) {
+                // A press that began outside any solid layer can still be
+                // released over one, matching the public cursorUp contract.
+                events.push_back(makeEvent(
+                    script::ScriptCursorEventType::up, *hit
+                ));
+            }
+            pressedCursorTarget.reset();
+        }
+
+        cursorTarget = hit;
+        previousPointerLeftDown = inputs.pointerLeftDown;
+        hasCursorPosition = inputs.pointerActive;
+        lastCursorPosition = inputs.pointerPosition;
+        return events;
+    }
+
     void invalidateFrame() noexcept {
         lastFrame.reset();
+        cursorTarget.reset();
+        pressedCursorTarget.reset();
+        previousPointerLeftDown = false;
+        hasCursorPosition = false;
         if (device) {
             try {
                 auto session = device->activate();
@@ -4317,30 +5792,77 @@ struct FramePlanExecutor::Impl final {
 
     void render(
         const FrameInputs& inputs,
-        std::optional<FrameProjectionSize> drawableFallback = std::nullopt,
+        std::optional<PresentationViewport> presentation = std::nullopt,
         std::optional<PresentationScaling> scaling = std::nullopt
     ) {
         try {
-            if (!std::isfinite(inputs.pointerPosition.x) ||
-                !std::isfinite(inputs.pointerPosition.y) ||
-                !std::isfinite(inputs.timeSeconds) || inputs.timeSeconds < 0.0 ||
-                !std::isfinite(inputs.frameTimeSeconds) || inputs.frameTimeSeconds < 0.0) {
+            FrameInputs effectiveInputs = inputs;
+            effectiveInputs.pointerActive = pointerActive;
+            effectiveInputs.pointerLeftDown = pointerLeftDown;
+            effectiveInputs.mediaSnapshot = mediaSnapshot;
+            if (isScreensaver) {
+                effectiveInputs.isScreensaver = isScreensaver;
+            }
+            if (!std::isfinite(effectiveInputs.pointerPosition.x) ||
+                !std::isfinite(effectiveInputs.pointerPosition.y) ||
+                !std::isfinite(effectiveInputs.timeSeconds) || effectiveInputs.timeSeconds < 0.0 ||
+                !std::isfinite(effectiveInputs.frameTimeSeconds) || effectiveInputs.frameTimeSeconds < 0.0) {
                 throw Error(
                     ErrorCode::invalidArgument,
                     "Frame inputs must be finite and time values must be non-negative"
                 );
             }
+            if (inputs.audioSpectrum) {
+                const auto requireFinite = [](const auto& values) {
+                    return std::all_of(
+                        values.begin(), values.end(),
+                        [](float value) { return std::isfinite(value); }
+                    );
+                };
+                const AudioSpectrumFrame& audio = *inputs.audioSpectrum;
+                if (!requireFinite(audio.spectrum16Left) ||
+                    !requireFinite(audio.spectrum16Right) ||
+                    !requireFinite(audio.spectrum32Left) ||
+                    !requireFinite(audio.spectrum32Right) ||
+                    !requireFinite(audio.spectrum64Left) ||
+                    !requireFinite(audio.spectrum64Right)) {
+                    throw Error(
+                        ErrorCode::invalidArgument,
+                        "Audio spectrum frame must contain only finite values"
+                    );
+                }
+            }
+            const std::optional<FrameProjectionSize> projectionFallback =
+                presentation
+                    ? std::optional<FrameProjectionSize>(FrameProjectionSize{
+                          .width = presentation->canvasWidth,
+                          .height = presentation->canvasHeight,
+                      })
+                    : std::nullopt;
             const ResolvedFrameInputs resolvedInputs = resolveInputs(
-                inputs, drawableFallback, scaling
+                effectiveInputs, presentation, scaling
             );
+            std::vector<script::ScriptCursorEvent> cursorEvents =
+                updateCursorEvents(
+                    lastFrame ? &lastFrame->sourcePlan : nullptr,
+                    resolvedInputs
+                );
             EvaluatedFramePlan evaluated = frameGraph->evaluate(
                 {
                     .runtimeSeconds = resolvedInputs.timeSeconds,
                     .frameTimeSeconds = resolvedInputs.frameTimeSeconds,
+                    .isScreensaver = resolvedInputs.isScreensaver,
+                    .timeOfDay = resolvedInputs.timeOfDay,
+                    .audioSpectrum = resolvedInputs.audioSpectrum,
                     .pointerX = resolvedInputs.pointerPosition.x,
                     .pointerY = resolvedInputs.pointerPosition.y,
+                    .pointerActive = resolvedInputs.pointerActive,
+                    .pointerLeftDown = resolvedInputs.pointerLeftDown,
+                    .cursorEvents = std::move(cursorEvents),
+                    .mediaSnapshot = resolvedInputs.mediaSnapshot,
+                    .soundRuntimeStates = soundRuntimeStates,
                 },
-                drawableFallback
+                projectionFallback
             );
             const FramePlan& plan = evaluated.plan;
             const std::vector<ObjectOperationGroup> groups =
@@ -4380,8 +5902,9 @@ struct FramePlanExecutor::Impl final {
         }
     }
 
-    void replay(std::uint32_t drawableWidth, std::uint32_t drawableHeight) {
+    void replay(const PresentationViewport& presentation) {
         try {
+            validatePresentationViewport(presentation);
             if (!lastFrame) {
                 throw Error(
                     ErrorCode::invalidArgument,
@@ -4389,14 +5912,15 @@ struct FramePlanExecutor::Impl final {
                 );
             }
             if (!frameGraph->requiresDrawableProjectionFallback() ||
-                (width == drawableWidth && height == drawableHeight)) {
+                (width == presentation.canvasWidth &&
+                 height == presentation.canvasHeight)) {
                 return;
             }
             const FramePlan replayPlan = frameGraph->reproject(
                 lastFrame->evaluation,
                 FrameProjectionSize{
-                    .width = drawableWidth,
-                    .height = drawableHeight,
+                    .width = presentation.canvasWidth,
+                    .height = presentation.canvasHeight,
                 }
             );
             const std::vector<ObjectOperationGroup> groups =
@@ -4424,8 +5948,7 @@ struct FramePlanExecutor::Impl final {
     }
 
     void present(
-        std::uint32_t drawableWidth,
-        std::uint32_t drawableHeight,
+        const PresentationViewport& presentation,
         PresentationScaling scaling
     ) {
         if (borrowedContext == nullptr) {
@@ -4434,26 +5957,20 @@ struct FramePlanExecutor::Impl final {
                 "Presenting requires an executor created with a borrowed CGL context"
             );
         }
-        if (drawableWidth == 0 || drawableHeight == 0) {
-            throw Error(ErrorCode::invalidArgument, "Drawable dimensions must be greater than zero");
-        }
+        validatePresentationViewport(presentation);
         if (outputId.empty() || !lastFrame.has_value()) {
             throw Error(ErrorCode::resourceValidation, "No successful scene frame is available to present");
-        }
-        if (drawableWidth > static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max()) ||
-            drawableHeight > static_cast<std::uint32_t>(std::numeric_limits<GLsizei>::max())) {
-            throw Error(ErrorCode::invalidArgument, "Drawable dimensions exceed OpenGL's signed range");
         }
 
         auto session = ensureDevice().activate();
         auto& output = framebuffer({.kind = FrameResourceKind::framebuffer, .id = outputId});
-        const auto transform = presentationTransform(
+        const auto transform = makePresentationTransform(
             output.width,
             output.height,
-            static_cast<GLsizei>(drawableWidth),
-            static_cast<GLsizei>(drawableHeight),
+            presentation,
             scaling
         );
+        const PresentationSlice slice = transform.slice();
 
         glDisable(GL_SCISSOR_TEST);
         glDisable(GL_STENCIL_TEST);
@@ -4469,22 +5986,34 @@ struct FramePlanExecutor::Impl final {
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
         glDrawBuffer(GL_BACK);
-        glViewport(0, 0, static_cast<GLsizei>(drawableWidth), static_cast<GLsizei>(drawableHeight));
+        glViewport(
+            0,
+            0,
+            static_cast<GLsizei>(presentation.drawableWidth),
+            static_cast<GLsizei>(presentation.drawableHeight)
+        );
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, output.framebuffer);
-        glReadBuffer(GL_COLOR_ATTACHMENT0);
-        glBlitFramebuffer(
-            transform.source.x,
-            transform.source.y,
-            transform.source.x + transform.source.width,
-            transform.source.y + transform.source.height,
-            transform.destination.x,
-            transform.destination.y,
-            transform.destination.x + transform.destination.width,
-            transform.destination.y + transform.destination.height,
-            GL_COLOR_BUFFER_BIT, GL_LINEAR
-        );
+        if (slice.hasContent) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, output.framebuffer);
+            glReadBuffer(GL_COLOR_ATTACHMENT0);
+            glBlitFramebuffer(
+                static_cast<GLint>(slice.source.x),
+                static_cast<GLint>(slice.source.y),
+                static_cast<GLint>(slice.source.x + slice.source.width),
+                static_cast<GLint>(slice.source.y + slice.source.height),
+                static_cast<GLint>(slice.destination.x),
+                static_cast<GLint>(slice.destination.y),
+                static_cast<GLint>(
+                    slice.destination.x + slice.destination.width
+                ),
+                static_cast<GLint>(
+                    slice.destination.y + slice.destination.height
+                ),
+                GL_COLOR_BUFFER_BIT,
+                GL_LINEAR
+            );
+        }
         session.checkError(ErrorCode::draw, "presenting the scene frame to the drawable");
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
@@ -4494,6 +6023,7 @@ struct FramePlanExecutor::Impl final {
     CGLContextObj borrowedContext = nullptr;
     std::unique_ptr<Device> device;
     std::map<std::string, CachedFramebuffer> framebuffers;
+    FramebufferResource particleRefractSnapshot;
     std::map<std::string, std::string> framebufferAliases;
     std::map<std::string, AssetTextureResource> assets;
     std::map<std::string, ProgramResource> programs;
@@ -4503,6 +6033,9 @@ struct FramePlanExecutor::Impl final {
     GLuint particleVertexArray = 0;
     GLuint particleVertexBuffer = 0;
     GLuint particleElementBuffer = 0;
+    GLuint puppetVertexArray = 0;
+    GLuint puppetVertexBuffer = 0;
+    GLuint puppetElementBuffer = 0;
     std::map<std::size_t, ParticleState> particles;
     std::string outputId;
     std::uint32_t width = 0;
@@ -4512,6 +6045,16 @@ struct FramePlanExecutor::Impl final {
     FrameVector2 parallaxDisplacement;
     FrameVector2 lastPublishedPointer;
     bool hasPublishedPointer = false;
+    std::optional<CursorHit> cursorTarget;
+    std::optional<CursorHit> pressedCursorTarget;
+    FrameVector2 lastCursorPosition;
+    bool hasCursorPosition = false;
+    bool previousPointerLeftDown = false;
+    bool pointerActive = false;
+    bool pointerLeftDown = false;
+    std::optional<bool> isScreensaver;
+    std::optional<script::ScriptMediaSnapshot> mediaSnapshot;
+    std::vector<script::ScriptSoundRuntimeSnapshot> soundRuntimeStates;
 };
 
 FramePlanExecutor::FramePlanExecutor(std::shared_ptr<SceneFrameGraph> frameGraph)
@@ -4530,49 +6073,59 @@ void FramePlanExecutor::render(
     std::uint32_t drawableHeight,
     PresentationScaling scaling
 ) {
-    if (drawableWidth == 0 || drawableHeight == 0 ||
-        drawableWidth > static_cast<std::uint32_t>(
-            std::numeric_limits<GLsizei>::max()
-        ) ||
-        drawableHeight > static_cast<std::uint32_t>(
-            std::numeric_limits<GLsizei>::max()
-        )) {
-        impl_->invalidateFrame();
-        throw Error(
-            ErrorCode::invalidArgument,
-            "Drawable dimensions must be non-zero and fit OpenGL's signed range"
-        );
-    }
-    impl_->render(inputs, FrameProjectionSize{
-        .width = drawableWidth,
-        .height = drawableHeight,
-    }, scaling);
+    render(
+        inputs,
+        drawablePresentationViewport(drawableWidth, drawableHeight),
+        scaling
+    );
+}
+void FramePlanExecutor::render(
+    const FrameInputs& inputs,
+    const PresentationViewport& viewport,
+    PresentationScaling scaling
+) {
+    impl_->render(inputs, viewport, scaling);
 }
 void FramePlanExecutor::replay(
     std::uint32_t drawableWidth,
     std::uint32_t drawableHeight
 ) {
-    if (drawableWidth == 0 || drawableHeight == 0 ||
-        drawableWidth > static_cast<std::uint32_t>(
-            std::numeric_limits<GLsizei>::max()
-        ) ||
-        drawableHeight > static_cast<std::uint32_t>(
-            std::numeric_limits<GLsizei>::max()
-        )) {
-        impl_->invalidateFrame();
-        throw Error(
-            ErrorCode::invalidArgument,
-            "Drawable dimensions must be non-zero and fit OpenGL's signed range"
-        );
-    }
-    impl_->replay(drawableWidth, drawableHeight);
+    replay(drawablePresentationViewport(drawableWidth, drawableHeight));
+}
+void FramePlanExecutor::replay(const PresentationViewport& viewport) {
+    impl_->replay(viewport);
 }
 void FramePlanExecutor::present(
     std::uint32_t drawableWidth,
     std::uint32_t drawableHeight,
     PresentationScaling scaling
 ) {
-    impl_->present(drawableWidth, drawableHeight, scaling);
+    present(
+        drawablePresentationViewport(drawableWidth, drawableHeight), scaling
+    );
+}
+void FramePlanExecutor::setPointerState(bool active, bool leftDown) noexcept {
+    impl_->pointerActive = active;
+    impl_->pointerLeftDown = leftDown;
+}
+void FramePlanExecutor::setScreensaverState(bool value) noexcept {
+    impl_->isScreensaver = value;
+}
+void FramePlanExecutor::setMediaSnapshot(
+    std::optional<script::ScriptMediaSnapshot> snapshot
+) {
+    impl_->mediaSnapshot = std::move(snapshot);
+}
+void FramePlanExecutor::setSoundRuntimeStates(
+    std::vector<script::ScriptSoundRuntimeSnapshot> states
+) {
+    impl_->soundRuntimeStates = std::move(states);
+}
+void FramePlanExecutor::present(
+    const PresentationViewport& viewport,
+    PresentationScaling scaling
+) {
+    impl_->present(viewport, scaling);
 }
 void FramePlanExecutor::invalidateFrame() noexcept { impl_->invalidateFrame(); }
 std::uint32_t FramePlanExecutor::width() const noexcept { return impl_->width; }

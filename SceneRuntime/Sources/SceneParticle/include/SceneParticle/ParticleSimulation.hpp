@@ -101,6 +101,17 @@ struct TurbulentVelocityRandomInitializer {
     Vector3 right{0.0, 0.0, 1.0};
 };
 
+// The pinned Linux runtime keeps this initializer as a per-emitter sequence:
+// every spawned particle receives the next angular slot and the counter wraps
+// at `count`.  The concrete simulation stores the counter separately so a
+// copied/replayed simulation remains deterministic.
+struct MapSequenceAroundControlPointInitializer {
+    int controlPoint = 0;
+    int count = 1;
+    Vector3 speedMinimum{};
+    Vector3 speedMaximum{100.0, 100.0, 100.0};
+};
+
 using Initializer = std::variant<
     LifetimeRandomInitializer,
     SizeRandomInitializer,
@@ -109,7 +120,8 @@ using Initializer = std::variant<
     VelocityRandomInitializer,
     RotationRandomInitializer,
     AngularVelocityRandomInitializer,
-    TurbulentVelocityRandomInitializer
+    TurbulentVelocityRandomInitializer,
+    MapSequenceAroundControlPointInitializer
 >;
 
 struct MovementOperator {
@@ -146,11 +158,71 @@ struct OscillateAlphaOperator {
     double phaseMaximum = 6.283185307179586;
 };
 
+struct OscillateSizeOperator {
+    double frequencyMinimum = 0.0;
+    double frequencyMaximum = 10.0;
+    double scaleMinimum = 0.8;
+    double scaleMaximum = 1.2;
+    double phaseMinimum = 0.0;
+    double phaseMaximum = 6.283185307179586;
+};
+
 struct ControlPointAttractOperator {
     int controlPoint = 0;
     Vector3 origin{};
     double scale = 100.0;
     double threshold = 1000.0;
+};
+
+struct SizeChangeOperator {
+    double startTime = 0.0;
+    double endTime = 1.0;
+    double startValue = 1.0;
+    double endValue = 0.0;
+};
+
+struct AlphaChangeOperator {
+    double startTime = 0.0;
+    double endTime = 1.0;
+    double startValue = 1.0;
+    double endValue = 0.0;
+};
+
+struct ColorChangeOperator {
+    double startTime = 0.0;
+    double endTime = 1.0;
+    Vector3 startValue{1.0, 1.0, 1.0};
+    Vector3 endValue{1.0, 1.0, 1.0};
+};
+
+struct TurbulenceOperator {
+    double scale = 0.005;
+    double speedMinimum = 500.0;
+    double speedMaximum = 1000.0;
+    double timeScale = 0.01;
+    Vector3 mask{1.0, 1.0, 0.0};
+    double phaseMinimum = 0.0;
+    double phaseMaximum = 0.0;
+    // Retained for model parity; the pinned Linux implementation currently
+    // leaves turbulence audio modulation as a TODO and ignores this value.
+    int audioProcessingMode = 0;
+};
+
+struct VortexOperator {
+    int controlPoint = 0;
+    std::uint32_t flags = 0;
+    Vector3 axis{0.0, 0.0, 1.0};
+    Vector3 offset{};
+    double distanceInner = 500.0;
+    double distanceOuter = 650.0;
+    double speedInner = 2500.0;
+    double speedOuter = 0.0;
+    double centerForce = 1.0;
+    double ringRadius = 300.0;
+    double ringWidth = 50.0;
+    double ringPullDistance = 50.0;
+    double ringPullForce = 10.0;
+    int audioProcessingMode = 0;
 };
 
 using Operator = std::variant<
@@ -159,7 +231,13 @@ using Operator = std::variant<
     AngularMovementOperator,
     OscillatePositionOperator,
     OscillateAlphaOperator,
-    ControlPointAttractOperator
+    OscillateSizeOperator,
+    ControlPointAttractOperator,
+    SizeChangeOperator,
+    AlphaChangeOperator,
+    ColorChangeOperator,
+    TurbulenceOperator,
+    VortexOperator
 >;
 
 struct ControlPoint {
@@ -286,6 +364,16 @@ private:
 
     Configuration configuration_;
     std::vector<EmitterState> emitterStates_;
+    struct InitializerState {
+        std::uint64_t mapSequenceIndex = 0;
+    };
+    struct OperatorState {
+        double turbulencePhase = 0.0;
+        double turbulenceSpeed = 0.0;
+        bool turbulenceInitialized = false;
+    };
+    std::vector<InitializerState> initializerStates_;
+    std::vector<OperatorState> operatorStates_;
     std::vector<ParticleInstance> particles_;
     double accumulatorSeconds_ = 0.0;
     double simulationTimeSeconds_ = 0.0;
@@ -297,6 +385,7 @@ private:
     void validateConfiguration(const Configuration& configuration) const;
     void requireMatchingTopology(const Configuration& configuration) const;
     void prewarm();
+    void initializeOperatorStates();
     void applyConcreteConfiguration(const Configuration& configuration);
     void simulateStep(double stepSeconds);
     void emit(std::size_t emitterIndex, double stepSeconds);

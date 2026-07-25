@@ -1,9 +1,11 @@
 #ifndef WE_SCENE_GRAPH_SCENE_GRAPH_HPP
 #define WE_SCENE_GRAPH_SCENE_GRAPH_HPP
 
+#include <SceneCore/AudioSpectrum.hpp>
 #include <SceneModel/SceneModel.hpp>
 #include <SceneScript/SceneScript.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -25,8 +27,28 @@ enum class DynamicValueSource {
 struct SceneFrameInputs final {
     double runtimeSeconds = 0;
     double frameTimeSeconds = 0;
+    std::optional<double> timeOfDay;
+    std::optional<bool> isScreensaver;
+    std::optional<AudioSpectrumFrame> audioSpectrum;
+    // Optional host override. When absent, EvaluationFrame derives the
+    // snapshot from the model's coherent DynamicValue state before invoking
+    // scripts. Keeping this on the graph input also lets an embedding host
+    // provide a newer scene snapshot without creating a second state store.
+    std::optional<script::ScriptSceneSnapshot> sceneSnapshot;
     double pointerX = 0;
     double pointerY = 0;
+    // Host-sampled desktop pointer state is separate from normalized scene
+    // coordinates. It lets the script runtime distinguish a cursor outside
+    // this wallpaper window from a cursor at the edge of the drawable.
+    bool pointerActive = false;
+    bool pointerLeftDown = false;
+    // Filled by SceneFrameGraph once the authoritative projection size is
+    // known. SceneGraph itself deliberately does not guess automatic canvas
+    // dimensions.
+    std::optional<std::array<double, 3>> cursorWorldPosition;
+    std::vector<script::ScriptCursorEvent> cursorEvents;
+    std::optional<script::ScriptMediaSnapshot> mediaSnapshot;
+    std::vector<script::ScriptSoundRuntimeSnapshot> soundRuntimeStates;
 };
 
 struct EvaluatedValue {
@@ -73,6 +95,11 @@ struct SceneGraphSnapshot {
     // material evaluation from producing a torn frame.
     std::map<std::string, Value> propertyValues;
     std::vector<SceneGraphNodeSnapshot> nodes;
+    // Behavior state is copied only after all scripts participating in the
+    // frame have run. Downstream planning consumes this immutable snapshot;
+    // it never reaches back into QuickJS or a mutable registry.
+    std::vector<script::ScriptTextureAnimationSnapshot> textureAnimations;
+    std::vector<script::ScriptSoundSnapshot> sounds;
     // Both orders contain indices into nodes/source scene objects. Keeping
     // indices rather than copied objects gives FrameGraph one authoritative
     // path back to SceneModel.
@@ -139,13 +166,24 @@ public:
 
     [[nodiscard]] EvaluatedValue evaluate(
         const DynamicValue& dynamic,
-        std::string pointer
+        std::string pointer,
+        script::ScriptPropertyOwner owner = {}
+    );
+    void registerScriptPropertyObject(
+        script::ScriptPropertyObjectDescriptor descriptor
     );
     [[nodiscard]] std::uint64_t modelRevision() const noexcept;
     [[nodiscard]] const std::map<std::string, Value>& propertyValues() const noexcept;
     [[nodiscard]] const std::map<std::string, EvaluatedValue>&
     evaluatedScriptValues() const noexcept;
     [[nodiscard]] std::vector<ScriptEvaluationStats> scriptEvaluationStats() const;
+    [[nodiscard]] std::vector<script::ScriptTextureAnimationSnapshot>
+    textureAnimationSnapshots() const;
+    [[nodiscard]] std::vector<script::ScriptSoundSnapshot> soundSnapshots() const;
+    [[nodiscard]] std::optional<RuntimeValue> layerProperty(
+        int layerId,
+        std::string_view property
+    ) const;
 
 private:
     friend class SceneGraph;

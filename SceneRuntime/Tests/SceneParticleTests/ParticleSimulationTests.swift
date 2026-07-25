@@ -488,6 +488,9 @@ final class ParticleSimulationTests: XCTestCase {
         XCTAssertTrue((0.0..<1.0).contains(second.randomFrameUnit))
         XCTAssertNotEqual(first.randomFrameUnit, second.randomFrameUnit)
         XCTAssertNotEqual(first.positionX, second.positionX)
+        XCTAssertTrue((10.0...30.0).contains(first.size))
+        XCTAssertTrue((10.0...30.0).contains(second.size))
+        XCTAssertNotEqual(first.size, second.size)
 
         let chunks = try Handle(copying: whole)
         try whole.advance(0.4)
@@ -511,6 +514,69 @@ final class ParticleSimulationTests: XCTestCase {
             XCTAssertEqual(speed, 10.0, accuracy: 1e-9)
             XCTAssertEqual(particle.velocityZ, 0.0, accuracy: 1e-12)
         }
+    }
+
+    func testMapSequenceInitializerAssignsDeterministicControlPointSlots() throws {
+        let handle = try Handle(scenario: "mapSequence", explicitSeed: 11)
+        try handle.advance(0.1)
+        XCTAssertEqual(handle.count, 4)
+        for index in 0..<handle.count {
+            let particle = try handle.particle(index)
+            XCTAssertEqual(particle.positionX, 10.0, accuracy: 1e-12)
+            XCTAssertEqual(particle.positionY, 20.0, accuracy: 1e-12)
+            XCTAssertEqual(particle.positionZ, 0.0, accuracy: 1e-12)
+        }
+        XCTAssertEqual(try handle.particle(0).velocityX, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(try handle.particle(0).velocityY, 0.0, accuracy: 1e-12)
+        XCTAssertEqual(try handle.particle(1).velocityX, 0.0, accuracy: 1e-12)
+        XCTAssertEqual(try handle.particle(1).velocityY, -1.0, accuracy: 1e-12)
+        XCTAssertEqual(try handle.particle(2).velocityX, -1.0, accuracy: 1e-12)
+        XCTAssertEqual(try handle.particle(2).velocityY, 0.0, accuracy: 1e-12)
+        XCTAssertEqual(try handle.particle(3).velocityX, 0.0, accuracy: 1e-12)
+        XCTAssertEqual(try handle.particle(3).velocityY, 1.0, accuracy: 1e-12)
+    }
+
+    func testChangeOperatorsUseLifetimeInterpolationForSizeAlphaAndColor() throws {
+        let handle = try Handle(scenario: "changes", explicitSeed: 11)
+        try handle.advance(0.25)
+        var particle = try handle.particle(0)
+        XCTAssertEqual(particle.size, 7.5, accuracy: 1e-12)
+        XCTAssertEqual(particle.alpha, 0.75, accuracy: 1e-12)
+        XCTAssertEqual(particle.colorR, 0.75, accuracy: 1e-12)
+        XCTAssertEqual(particle.colorG, 0.25, accuracy: 1e-12)
+        XCTAssertEqual(particle.colorB, 0.25, accuracy: 1e-12)
+
+        try handle.advance(0.25)
+        particle = try handle.particle(0)
+        XCTAssertEqual(particle.size, 10.0, accuracy: 1e-12)
+        XCTAssertEqual(particle.alpha, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(particle.colorR, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(particle.colorG, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(particle.colorB, 0.5, accuracy: 1e-12)
+    }
+
+    func testTurbulenceOperatorIsDeterministicAndSamplesItsRangeOnce() throws {
+        let whole = try Handle(scenario: "turbulenceOperator", explicitSeed: 23)
+        let chunks = try Handle(scenario: "turbulenceOperator", explicitSeed: 23)
+        try whole.advance(0.3)
+        for _ in 0..<3 {
+            try chunks.advance(0.1)
+        }
+        XCTAssertEqual(whole.snapshot(), chunks.snapshot())
+        let particle = try whole.particle(0)
+        XCTAssertTrue(particle.velocityX.isFinite)
+        XCTAssertTrue(particle.velocityY.isFinite)
+        XCTAssertNotEqual(abs(particle.velocityX) + abs(particle.velocityY), 0.0)
+    }
+
+    func testVortexAudioModeIsAnExplicitNoOpWithoutSpectrum() throws {
+        let active = try Handle(scenario: "vortex", explicitSeed: 31)
+        let audio = try Handle(scenario: "vortexAudio", explicitSeed: 31)
+        try active.advance(0.1)
+        try audio.advance(0.1)
+        XCTAssertEqual(try active.particle(0).velocityY, 0.2, accuracy: 1e-12)
+        XCTAssertEqual(try audio.particle(0).velocityX, 0.0, accuracy: 1e-12)
+        XCTAssertEqual(try audio.particle(0).velocityY, 0.0, accuracy: 1e-12)
     }
 
     func testAuthoredReverseVectorRangesRemainValid() throws {

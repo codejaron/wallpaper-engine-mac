@@ -41,6 +41,44 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         data.append(UInt8(truncatingIfNeeded: value >> 24))
     }
 
+    private func appendUInt16(_ value: UInt16, to data: inout Data) {
+        data.append(UInt8(truncatingIfNeeded: value))
+        data.append(UInt8(truncatingIfNeeded: value >> 8))
+    }
+
+    private func appendFloat32(_ value: Float, to data: inout Data) {
+        appendUInt32(value.bitPattern, to: &data)
+    }
+
+    private func makePuppetMesh(version: String = "MDLV0021") -> Data {
+        precondition(version == "MDLV0021" || version == "MDLV0023")
+        let vertices: [(Float, Float, Float, Float, Float)] = [
+            (-200, 100, 0, 0, 0),
+            (200, 100, 0, 1, 0),
+            (-200, -100, 0, 0, 1),
+        ]
+        var result = Data(version.utf8)
+        result.append(0)
+        appendUInt32(0, to: &result)
+        appendUInt32(UInt32(vertices.count * 80), to: &result)
+        for (x, y, z, u, v) in vertices {
+            let start = result.count
+            appendFloat32(x, to: &result)
+            appendFloat32(y, to: &result)
+            appendFloat32(z, to: &result)
+            result.append(Data(repeating: 0, count: 60))
+            appendFloat32(u, to: &result)
+            appendFloat32(v, to: &result)
+            precondition(result.count - start == 80)
+        }
+        appendUInt32(6, to: &result)
+        appendUInt16(0, to: &result)
+        appendUInt16(1, to: &result)
+        appendUInt16(2, to: &result)
+        result.append(contentsOf: Array("MDLS".utf8))
+        return result
+    }
+
     private func makePackage(_ entries: [(String, Data)]) -> Data {
         var table = Data()
         var payload = Data()
@@ -59,7 +97,10 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         return table
     }
 
-    private func makeFixture(_ documents: [String: Any]) throws -> Fixture {
+    private func makeFixture(
+        _ documents: [String: Any],
+        binaryEntries: [(String, Data)] = []
+    ) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let assets = root.appendingPathComponent("assets", isDirectory: true)
@@ -69,7 +110,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
             at: shaders,
             withIntermediateDirectories: true
         )
-        let entries = try documents.keys.sorted().map { path in
+        var entries = try documents.keys.sorted().map { path in
             (
                 path,
                 try JSONSerialization.data(
@@ -78,6 +119,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
                 )
             )
         }
+        entries.append(contentsOf: binaryEntries)
         try makePackage(entries).write(to: package)
         return Fixture(root: root, assets: assets, package: package)
     }
@@ -220,6 +262,167 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
             "materials/effect-b.json": simpleEffect("effect-b"),
             "materials/effect-c.json": simpleEffect("effect-c"),
             "models/main.json": model,
+            "project.json": project,
+            "scene.json": scene,
+        ]
+    }
+
+    private func linuxCompatibilityDocuments(
+        bloomEnabled: Bool = false,
+        dynamicBloom: Bool = false,
+        colorBlendMode: Double = 0,
+        dynamicColorBlend: Bool = false,
+        compositeMode: Int = 2,
+        compositeColor: String? = nil,
+        compositeEffectVisible: Bool = true,
+        dynamicCompositeColor: Bool = false,
+        dynamicCompositeEffectVisible: Bool = false,
+        width: Int = 16,
+        height: Int = 8
+    ) -> [String: Any] {
+        var properties: [String: Any] = [:]
+        let bloom: Any
+        if dynamicBloom {
+            properties["bloom_enabled"] = [
+                "text": "Bloom", "type": "bool", "value": bloomEnabled,
+            ]
+            bloom = ["user": "bloom_enabled", "value": bloomEnabled]
+        } else {
+            bloom = bloomEnabled
+        }
+        let blendMode: Any
+        if dynamicColorBlend {
+            properties["blend_mode"] = [
+                "max": 32.0, "min": 0.0, "step": 1.0,
+                "text": "Blend mode", "type": "slider",
+                "value": colorBlendMode,
+            ]
+            blendMode = ["user": "blend_mode", "value": colorBlendMode]
+        } else {
+            blendMode = colorBlendMode
+        }
+
+        var image: [String: Any] = [
+            "colorBlendMode": blendMode,
+            "id": 1,
+            "image": "models/base.json",
+            "name": "Base image",
+            "origin": "\(Double(width) * 0.5) \(Double(height) * 0.5) 0",
+            "size": "\(width) \(height)",
+            "visible": true,
+        ]
+        if let compositeColor {
+            let effectColor: Any
+            if dynamicCompositeColor {
+                properties["composite_color"] = [
+                    "text": "Composite color", "type": "color",
+                    "value": compositeColor,
+                ]
+                effectColor = [
+                    "user": "composite_color", "value": compositeColor,
+                ]
+            } else {
+                effectColor = compositeColor
+            }
+            let effectVisible: Any
+            if dynamicCompositeEffectVisible {
+                properties["composite_visible"] = [
+                    "text": "Composite visible", "type": "bool",
+                    "value": compositeEffectVisible,
+                ]
+                effectVisible = [
+                    "user": "composite_visible", "value": compositeEffectVisible,
+                ]
+            } else {
+                effectVisible = compositeEffectVisible
+            }
+            image["effects"] = [[
+                "file": "effects/composite/effect.json",
+                "id": 20,
+                "passes": [[
+                    "combos": ["COMPOSITE": compositeMode],
+                    "constantshadervalues": [
+                        "compositecolor": effectColor,
+                    ],
+                ]],
+                "visible": effectVisible,
+            ]]
+        }
+        let project: [String: Any] = [
+            "file": "scene.json",
+            "general": ["properties": properties],
+            "title": "Linux compatibility fixture",
+            "type": "scene",
+            "version": 2,
+        ]
+        let scene: [String: Any] = [
+            "camera": [
+                "center": "0 0 -1", "eye": "0 0 0", "up": "0 1 0",
+            ],
+            "general": [
+                "bloom": bloom,
+                "bloomstrength": 1.25,
+                "bloomthreshold": 0.75,
+                "clearcolor": "0 0 0 0",
+                "orthogonalprojection": ["height": height, "width": width],
+            ],
+            "objects": [image],
+            "version": 1,
+        ]
+        let material: (String, String, [String: Any]) -> [String: Any] = {
+            shader, blending, constants in
+            var pass: [String: Any] = [
+                "blending": blending,
+                "cullmode": "nocull",
+                "depthtest": "disabled",
+                "depthwrite": "disabled",
+                "shader": shader,
+            ]
+            if !constants.isEmpty {
+                pass["constantshadervalues"] = constants
+            }
+            return ["passes": [pass]]
+        }
+        return [
+            "effects/composite/effect.json": [
+                "passes": [["material": "materials/composite-effect.json"]],
+                "version": 1,
+            ],
+            "materials/base.json": [
+                "passes": [[
+                    "blending": "translucent",
+                    "cullmode": "nocull",
+                    "depthtest": "disabled",
+                    "depthwrite": "disabled",
+                    "shader": "base",
+                    "textures": ["base"],
+                ]],
+            ],
+            "materials/composite-effect.json": material(
+                "composite-effect", "normal", [:]
+            ),
+            "materials/effects/tint.json": material(
+                "magenta-tint", "normal", [:]
+            ),
+            "materials/util/blur_h_bloom.json": material(
+                "bloom-horizontal", "normal",
+                ["bloomstrength": -1.0, "bloomthreshold": -1.0]
+            ),
+            "materials/util/combine.json": material(
+                "bloom-combine", "normal", ["combineonly": 9.0]
+            ),
+            "materials/util/downsample_eighth_blur_v.json": material(
+                "bloom-eighth", "normal",
+                ["bloomstrength": -1.0, "bloomthreshold": -1.0]
+            ),
+            "materials/util/downsample_quarter_bloom.json": material(
+                "bloom-quarter", "normal",
+                ["bloomstrength": -1.0, "bloomthreshold": -1.0]
+            ),
+            "materials/util/effectpassthrough.json": material(
+                "blend-passthrough", "normal", [:]
+            ),
+            "models/base.json": ["material": "materials/base.json"],
             "project.json": project,
             "scene.json": scene,
         ]
@@ -447,6 +650,44 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
             firstFramebufferUVs: firstFramebufferUVs,
             solidLayer: solidLayer,
             imageSize: imageSize
+        ))
+        do {
+            return try load(
+                assets: fixture.assets,
+                package: fixture.package,
+                root: fixture.root
+            )
+        } catch {
+            try? FileManager.default.removeItem(at: fixture.root)
+            throw error
+        }
+    }
+
+    private func loadLinuxCompatibility(
+        bloomEnabled: Bool = false,
+        dynamicBloom: Bool = false,
+        colorBlendMode: Double = 0,
+        dynamicColorBlend: Bool = false,
+        compositeMode: Int = 2,
+        compositeColor: String? = nil,
+        compositeEffectVisible: Bool = true,
+        dynamicCompositeColor: Bool = false,
+        dynamicCompositeEffectVisible: Bool = false,
+        width: Int = 16,
+        height: Int = 8
+    ) throws -> LoadedFrameGraph {
+        let fixture = try makeFixture(linuxCompatibilityDocuments(
+            bloomEnabled: bloomEnabled,
+            dynamicBloom: dynamicBloom,
+            colorBlendMode: colorBlendMode,
+            dynamicColorBlend: dynamicColorBlend,
+            compositeMode: compositeMode,
+            compositeColor: compositeColor,
+            compositeEffectVisible: compositeEffectVisible,
+            dynamicCompositeColor: dynamicCompositeColor,
+            dynamicCompositeEffectVisible: dynamicCompositeEffectVisible,
+            width: width,
+            height: height
         ))
         do {
             return try load(
@@ -1125,6 +1366,225 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(firstScriptAmount.value.number_value, 3.75, accuracy: 0.000_001)
     }
 
+    func testSceneLayerRegistryWritesFlowIntoSameFrameGraphSnapshot() throws {
+        var documents = syntheticDocuments()
+        var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
+        let objects = try XCTUnwrap(scene["objects"] as? [[String: Any]])
+        var owner = objects[0]
+        owner["effects"] = []
+        owner["name"] = "Owner"
+        owner["origin"] = [
+            "value": "200 100 0",
+            "script": """
+            export function update(value) {
+                const target = thisScene.getLayer("Target");
+                if (target !== thisScene.enumerateLayers()[1] ||
+                    thisScene.getLayer(7) !== thisLayer) {
+                    throw new Error('layer registry view mismatch');
+                }
+                thisLayer.origin = new Vec3(value.x + 10, value.y, value.z);
+                target.visible = false;
+                return undefined;
+            }
+            """,
+        ]
+        var target = owner
+        target["id"] = 8
+        target["name"] = "Target"
+        target["origin"] = "300 100 0"
+        target["visible"] = true
+        scene["objects"] = [owner, target]
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        let plan = try createPlan(
+            loaded.frameGraph,
+            runtime: 1,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(plan) }
+        let descriptors = try images(plan)
+        XCTAssertEqual(descriptors.count, 2)
+        XCTAssertEqual(
+            descriptors[0].world_transform.origin.x,
+            210,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(descriptors[0].world_transform.origin.y, 100, accuracy: 0.000_001)
+        XCTAssertEqual(descriptors[1].visible, 0)
+    }
+
+    func testEffectVisibilityScriptReceivesTypedThisObjectAndOwningLayer() throws {
+        var documents = syntheticDocuments()
+        var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
+        var objects = try XCTUnwrap(scene["objects"] as? [[String: Any]])
+        var image = objects[0]
+        var effects = try XCTUnwrap(image["effects"] as? [[String: Any]])
+        var effect = effects[0]
+        effect["name"] = "Typed effect"
+        effect["visible"] = [
+            "value": true,
+            "script": """
+            export function init(value) {
+                if (thisLayer.name !== 'Image') {
+                    throw new Error('effect script lost its owning layer');
+                }
+                if (thisObject === thisLayer) {
+                    throw new Error('effect owner was aliased to the layer');
+                }
+                if (thisObject.name !== 'Typed effect' || thisObject.visible !== true) {
+                    throw new Error('effect owner properties are unavailable');
+                }
+                thisObject.visible = false;
+            }
+            """,
+        ]
+        effects[0] = effect
+        image["effects"] = effects
+        objects[0] = image
+        scene["objects"] = objects
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        let plan = try createPlan(
+            loaded.frameGraph,
+            runtime: 1,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        XCTAssertEqual(try operations(plan).map { string($0.shader) }, ["base"])
+        XCTAssertEqual(try planInfo(plan).issue_count, 0)
+    }
+
+    func testMaterialThisObjectWritesSiblingShaderPropertiesInTheSameFrame() throws {
+        var documents = syntheticDocuments()
+        var material = try XCTUnwrap(
+            documents["materials/effect-a.json"] as? [String: Any]
+        )
+        var passes = try XCTUnwrap(material["passes"] as? [[String: Any]])
+        var pass = passes[0]
+        var values = try XCTUnwrap(
+            pass["constantshadervalues"] as? [String: Any]
+        )
+        values["alpha"] = [
+            "value": 0.1,
+            "script": """
+            export function applyUserProperties() {
+                if (thisLayer.name !== 'Image') {
+                    throw new Error('material script lost its owning layer');
+                }
+                if (thisObject === thisLayer) {
+                    throw new Error('material owner was aliased to the layer');
+                }
+                if (thisObject.color.x !== 0 || thisObject.color.y !== 0 ||
+                    thisObject.color.z !== 0) {
+                    throw new Error('material sibling property was not readable');
+                }
+                thisObject.alpha = 0.75;
+                thisObject.color = new Vec3(0.2, 0.4, 0.6);
+            }
+            """,
+        ]
+        values["color"] = "0 0 0"
+        pass["constantshadervalues"] = values
+        passes[0] = pass
+        material["passes"] = passes
+        documents["materials/effect-a.json"] = material
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        let plan = try createPlan(
+            loaded.frameGraph,
+            runtime: 1,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(plan) }
+        let effectOperation = try XCTUnwrap(
+            try operations(plan).firstIndex { string($0.shader) == "effect-a" }
+        )
+        let shaderValues = try constants(plan, operation: effectOperation)
+        XCTAssertEqual(
+            try XCTUnwrap(shaderValues["alpha"]).value.number_value,
+            0.75,
+            accuracy: 0.000_001
+        )
+        let color = try XCTUnwrap(shaderValues["color"]).value
+        XCTAssertEqual(color.vector_value.x, 0.2, accuracy: 0.000_001)
+        XCTAssertEqual(color.vector_value.y, 0.4, accuracy: 0.000_001)
+        XCTAssertEqual(color.vector_value.z, 0.6, accuracy: 0.000_001)
+        XCTAssertEqual(try planInfo(plan).issue_count, 0)
+    }
+
+    func testMaterialScriptInstancesDoNotCollideAcrossRenderPasses() throws {
+        var documents = syntheticDocuments()
+        for (path, expected) in [
+            ("materials/effect-a.json", 11.0),
+            ("materials/effect-b.json", 22.0),
+        ] {
+            var material = try XCTUnwrap(documents[path] as? [String: Any])
+            var passes = try XCTUnwrap(material["passes"] as? [[String: Any]])
+            var pass = passes[0]
+            var values = (pass["constantshadervalues"] as? [String: Any]) ?? [:]
+            values["isolated"] = [
+                "value": 0,
+                "script": "export function update() { return \(expected); }",
+            ]
+            pass["constantshadervalues"] = values
+            passes[0] = pass
+            material["passes"] = passes
+            documents[path] = material
+        }
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        let plan = try createPlan(
+            loaded.frameGraph,
+            runtime: 1,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(plan) }
+        let scheduled = try operations(plan)
+        for (shader, expected) in [("effect-a", 11.0), ("effect-b", 22.0)] {
+            let operation = try XCTUnwrap(
+                scheduled.firstIndex { string($0.shader) == shader }
+            )
+            XCTAssertEqual(
+                try XCTUnwrap(try constants(plan, operation: operation)["isolated"])
+                    .value.number_value,
+                expected,
+                accuracy: 0.000_001
+            )
+        }
+        XCTAssertEqual(try scriptEvaluations(plan).count, 2)
+    }
+
     func testRuntimeValueTagsAndProjectionsFlowThroughUserScriptAndFramePlan() throws {
         var documents = syntheticDocuments()
 
@@ -1228,7 +1688,10 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(imageInfo.world_transform.origin.y, 2, accuracy: 0.000_001)
         XCTAssertEqual(imageInfo.world_transform.origin.z, 2, accuracy: 0.000_001)
 
-        let initialConstants = try constants(plan, operation: 1)
+        let initialOperation = try XCTUnwrap(
+            try operations(plan).firstIndex { string($0.shader) == "effect-a" }
+        )
+        let initialConstants = try constants(plan, operation: initialOperation)
         let scriptedConstant = try XCTUnwrap(initialConstants["base"])
         XCTAssertEqual(scriptedConstant.source, WE_SCENE_DYNAMIC_VALUE_SCRIPT)
         let scriptedVector = scriptedConstant.value
@@ -1283,7 +1746,18 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
             frameTime: 1.0 / 60.0
         )
         defer { we_scene_frame_plan_destroy(updatedPlan) }
-        let updatedConstants = try constants(updatedPlan, operation: 1)
+        let updatedOperations = try operations(updatedPlan)
+        let updatedIssues = try issues(updatedPlan).map {
+            "\(string($0.json_pointer)): \(string($0.message))"
+        }
+        let updatedOperation = try XCTUnwrap(
+            updatedOperations.firstIndex { string($0.shader) == "effect-a" },
+            "operations=\(updatedOperations.map { string($0.shader) }), issues=\(updatedIssues)"
+        )
+        let updatedConstants = try constants(
+            updatedPlan,
+            operation: updatedOperation
+        )
         let updatedConstant = try XCTUnwrap(updatedConstants["base"])
         XCTAssertEqual(updatedConstant.source, WE_SCENE_DYNAMIC_VALUE_SCRIPT)
         let updatedVector = updatedConstant.value
@@ -1499,7 +1973,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(info.clear_red, 0.1, accuracy: 1e-6)
         XCTAssertEqual(info.clear_alpha, 1, accuracy: 1e-6)
         XCTAssertEqual(info.is_executable, 1)
-        XCTAssertEqual(info.framebuffer_count, 5)
+        XCTAssertEqual(info.framebuffer_count, 9)
         XCTAssertEqual(info.operation_count, 5)
 
         let operations = try operations(plan)
@@ -1905,7 +2379,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
 
         let info = try planInfo(plan)
         XCTAssertEqual(info.is_executable, 1)
-        XCTAssertEqual(info.framebuffer_count, 6)
+        XCTAssertEqual(info.framebuffer_count, 10)
         XCTAssertEqual(info.image_count, 1)
         XCTAssertEqual(info.operation_count, 6)
         XCTAssertEqual(info.issue_count, 1)
@@ -2179,6 +2653,317 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(issue.severity, WE_SCENE_FRAME_ISSUE_SKIP_OBJECT)
         XCTAssertTrue(string(issue.message).contains("runtime resource 'previous'"))
         XCTAssertFalse(string(issue.message).contains("materials/previous.tex"))
+    }
+
+    func testLinuxBloomTogglePlansTheFourPassPostProcessWithExactBindings() throws {
+        let loaded = try loadLinuxCompatibility(
+            bloomEnabled: false,
+            dynamicBloom: true
+        )
+        defer { destroy(loaded) }
+
+        let disabled = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(disabled) }
+        let disabledInfo = try planInfo(disabled)
+        XCTAssertEqual(disabledInfo.is_executable, 1)
+        XCTAssertEqual(disabledInfo.image_count, 1)
+        XCTAssertFalse(try operations(disabled).contains { $0.object_id == -1 })
+
+        let disabledFramebuffers = Dictionary(
+            uniqueKeysWithValues: try framebuffers(disabled).map {
+                (string($0.resource.logical_name), $0)
+            }
+        )
+        XCTAssertEqual(disabledFramebuffers["_rt_4FrameBuffer"]?.width, 4)
+        XCTAssertEqual(disabledFramebuffers["_rt_4FrameBuffer"]?.height, 2)
+        XCTAssertEqual(disabledFramebuffers["_rt_8FrameBuffer"]?.width, 2)
+        XCTAssertEqual(disabledFramebuffers["_rt_8FrameBuffer"]?.height, 1)
+        XCTAssertEqual(disabledFramebuffers["_rt_Bloom"]?.width, 2)
+        XCTAssertEqual(disabledFramebuffers["_rt_Bloom"]?.height, 1)
+        XCTAssertEqual(disabledFramebuffers["_rt_shadowAtlas"]?.width, 16)
+        XCTAssertEqual(disabledFramebuffers["_rt_shadowAtlas"]?.height, 8)
+
+        try setBoolean(loaded.model, key: "bloom_enabled", value: true)
+        let enabled = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(enabled) }
+        let enabledInfo = try planInfo(enabled)
+        XCTAssertEqual(enabledInfo.is_executable, 1)
+        XCTAssertEqual(enabledInfo.image_count, 2)
+        XCTAssertEqual(enabledInfo.issue_count, 0)
+
+        let allOperations = try operations(enabled)
+        let bloomOperationIndices = allOperations.indices.filter {
+            allOperations[$0].object_id == -1
+        }
+        XCTAssertEqual(bloomOperationIndices.count, 5)
+        let bloomOperations = bloomOperationIndices.map { allOperations[$0] }
+        XCTAssertTrue(bloomOperations.allSatisfy {
+            $0.kind == WE_SCENE_FRAME_OPERATION_RENDER
+        })
+        XCTAssertEqual(
+            bloomOperations.map { string($0.destination.logical_name) },
+            [
+                "_rt_imageLayerComposite_-1_a",
+                "_rt_4FrameBuffer",
+                "_rt_8FrameBuffer",
+                "_rt_Bloom",
+                "_rt_FullFrameBuffer",
+            ]
+        )
+        XCTAssertEqual(
+            bloomOperations.map { string($0.fragment_shader_path) },
+            [
+                "shaders/genericimage2.frag",
+                "shaders/bloom-quarter.frag",
+                "shaders/bloom-eighth.frag",
+                "shaders/bloom-horizontal.frag",
+                "shaders/bloom-combine.frag",
+            ]
+        )
+
+        let quarterTextures = try textures(
+            enabled, operation: bloomOperationIndices[1]
+        )
+        let eighthTextures = try textures(
+            enabled, operation: bloomOperationIndices[2]
+        )
+        let horizontalTextures = try textures(
+            enabled, operation: bloomOperationIndices[3]
+        )
+        let combineTextures = try textures(
+            enabled, operation: bloomOperationIndices[4]
+        )
+        XCTAssertEqual(quarterTextures[0], "scene:_rt_FullFrameBuffer")
+        XCTAssertEqual(eighthTextures[0], "scene:_rt_4FrameBuffer")
+        XCTAssertEqual(horizontalTextures[0], "scene:_rt_8FrameBuffer")
+        XCTAssertEqual(
+            combineTextures[0],
+            "object:-1:_rt_imageLayerComposite_-1_a"
+        )
+        XCTAssertEqual(combineTextures[1], "scene:_rt_Bloom")
+
+        for operationIndex in bloomOperationIndices[1...3] {
+            let values = try constants(enabled, operation: operationIndex)
+            XCTAssertEqual(
+                try XCTUnwrap(values["bloomstrength"]).value.number_value,
+                1.25,
+                accuracy: 0.000_001
+            )
+            XCTAssertEqual(
+                try XCTUnwrap(values["bloomthreshold"]).value.number_value,
+                0.75,
+                accuracy: 0.000_001
+            )
+        }
+        let combineConstants = try constants(
+            enabled, operation: bloomOperationIndices[4]
+        )
+        XCTAssertNil(combineConstants["bloomstrength"])
+        XCTAssertNil(combineConstants["bloomthreshold"])
+        XCTAssertEqual(
+            try XCTUnwrap(combineConstants["combineonly"]).value.number_value,
+            9.0,
+            accuracy: 0.000_001
+        )
+
+        try setBoolean(loaded.model, key: "bloom_enabled", value: false)
+        let disabledAgain = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(disabledAgain) }
+        XCTAssertEqual(try planInfo(disabledAgain).image_count, 1)
+        XCTAssertFalse(try operations(disabledAgain).contains {
+            $0.object_id == -1
+        })
+    }
+
+    func testLinuxColorBlendModeAddsAndRemovesTheFinalCompatibilityPass() throws {
+        let loaded = try loadLinuxCompatibility(
+            colorBlendMode: 0,
+            dynamicColorBlend: true
+        )
+        defer { destroy(loaded) }
+
+        let initial = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(initial) }
+        let initialOperations = try operations(initial).filter {
+            $0.object_id == 1
+        }
+        XCTAssertEqual(initialOperations.count, 1)
+        XCTAssertEqual(
+            initialOperations[0].blending,
+            WE_SCENE_FRAME_BLENDING_TRANSLUCENT
+        )
+        XCTAssertTrue(try combos(initial, operation: 0)["BLENDMODE"] == nil)
+
+        try setNumber(loaded.model, key: "blend_mode", value: 7)
+        let blended = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(blended) }
+        let allOperations = try operations(blended)
+        let blendOperationIndices = allOperations.indices.filter {
+            allOperations[$0].object_id == 1
+        }
+        XCTAssertEqual(blendOperationIndices.count, 2)
+        let blendOperations = blendOperationIndices.map { allOperations[$0] }
+        XCTAssertEqual(blendOperations[0].blending, WE_SCENE_FRAME_BLENDING_NORMAL)
+        XCTAssertEqual(
+            blendOperations[1].blending,
+            WE_SCENE_FRAME_BLENDING_TRANSLUCENT
+        )
+        XCTAssertEqual(
+            string(blendOperations[1].fragment_shader_path),
+            "shaders/blend-passthrough.frag"
+        )
+        XCTAssertEqual(
+            try combos(blended, operation: blendOperationIndices[1])["BLENDMODE"],
+            7
+        )
+        XCTAssertEqual(
+            string(blendOperations[0].destination.logical_name),
+            "_rt_imageLayerComposite_1_a"
+        )
+        XCTAssertEqual(
+            string(blendOperations[1].destination.logical_name),
+            "_rt_FullFrameBuffer"
+        )
+
+        try setNumber(loaded.model, key: "blend_mode", value: 0)
+        let restored = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(restored) }
+        XCTAssertEqual(
+            try operations(restored).filter { $0.object_id == 1 }.count,
+            1
+        )
+    }
+
+    func testLinuxMagentaCompositeAddsTintBeforeColorBlendCompatibilityPass() throws {
+        let loaded = try loadLinuxCompatibility(
+            colorBlendMode: 7,
+            compositeColor: "0.8 0.1 0.7"
+        )
+        defer { destroy(loaded) }
+
+        let plan = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(plan) }
+        let allOperations = try operations(plan)
+        let operationIndices = allOperations.indices.filter {
+            allOperations[$0].object_id == 1
+        }
+        XCTAssertEqual(operationIndices.count, 4)
+        XCTAssertEqual(
+            operationIndices.map { string(allOperations[$0].fragment_shader_path) },
+            [
+                "shaders/base.frag",
+                "shaders/composite-effect.frag",
+                "shaders/magenta-tint.frag",
+                "shaders/blend-passthrough.frag",
+            ]
+        )
+
+        let tintIndex = operationIndices[2]
+        XCTAssertEqual(try combos(plan, operation: tintIndex)["BLENDMODE"], 30)
+        let tintConstants = try constants(plan, operation: tintIndex)
+        let color = try XCTUnwrap(tintConstants["color"])
+        XCTAssertEqual(color.value.type, WE_SCENE_VALUE_OBJECT)
+        XCTAssertEqual(color.value.component_count, 3)
+        XCTAssertEqual(color.value.vector_value.x, 0.8, accuracy: 0.000_001)
+        XCTAssertEqual(color.value.vector_value.y, 0.1, accuracy: 0.000_001)
+        XCTAssertEqual(color.value.vector_value.z, 0.7, accuracy: 0.000_001)
+        XCTAssertEqual(
+            try XCTUnwrap(tintConstants["alpha"]).value.number_value,
+            1,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testLinuxMagentaCompositeTintTracksDynamicColorAndVisibility() throws {
+        let loaded = try loadLinuxCompatibility(
+            compositeColor: "0.2 0.1 0.2",
+            compositeEffectVisible: false,
+            dynamicCompositeColor: true,
+            dynamicCompositeEffectVisible: true
+        )
+        defer { destroy(loaded) }
+
+        let hasTint = { () throws -> Bool in
+            let plan = try self.createPlan(loaded.frameGraph)
+            defer { we_scene_frame_plan_destroy(plan) }
+            return try self.operations(plan).contains {
+                self.string($0.fragment_shader_path) ==
+                    "shaders/magenta-tint.frag"
+            }
+        }
+
+        XCTAssertFalse(try hasTint())
+        try setBoolean(loaded.model, key: "composite_visible", value: true)
+        XCTAssertFalse(try hasTint())
+        try setString(
+            loaded.model,
+            key: "composite_color",
+            value: "0.8 0.1 0.7"
+        )
+        XCTAssertTrue(try hasTint())
+        try setBoolean(loaded.model, key: "composite_visible", value: false)
+        XCTAssertFalse(try hasTint())
+    }
+
+    func testLinuxCompositeTintRequiresVisibleCompositeTwoAndStrictMagentaThresholds() throws {
+        let cases: [(mode: Int, color: String, visible: Bool)] = [
+            (1, "0.8 0.1 0.7", true),
+            (2, "0.55 0.1 0.7", true),
+            (2, "0.8 0.25 0.7", true),
+            (2, "0.8 0.1 0.45", true),
+            (2, "0.8 0.1 0.7", false),
+        ]
+
+        for candidate in cases {
+            let loaded = try loadLinuxCompatibility(
+                compositeMode: candidate.mode,
+                compositeColor: candidate.color,
+                compositeEffectVisible: candidate.visible
+            )
+            defer { destroy(loaded) }
+            let plan = try createPlan(loaded.frameGraph)
+            defer { we_scene_frame_plan_destroy(plan) }
+
+            XCTAssertFalse(try operations(plan).contains {
+                string($0.fragment_shader_path) == "shaders/magenta-tint.frag"
+            }, "Unexpected tint for \(candidate)")
+        }
+    }
+
+    func testScaledEffectFramebufferDimensionsClampToOnePixel() throws {
+        let loaded = try loadSynthetic(imageSize: "1 1")
+        defer { destroy(loaded) }
+        let plan = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        XCTAssertEqual(try planInfo(plan).is_executable, 1)
+        XCTAssertFalse(try issues(plan).contains {
+            $0.code == WE_SCENE_FRAME_ISSUE_OBJECT_PLANNING_FAILED
+        })
+        let byName = Dictionary(uniqueKeysWithValues: try framebuffers(plan).map {
+            (string($0.resource.logical_name), $0)
+        })
+        XCTAssertEqual(byName["quarterA"]?.width, 1)
+        XCTAssertEqual(byName["quarterA"]?.height, 1)
+        XCTAssertEqual(byName["quarterB"]?.width, 1)
+        XCTAssertEqual(byName["quarterB"]?.height, 1)
+    }
+
+    func testLinuxRuntimeFramebuffersRemainValidForOnePixelScenes() throws {
+        let loaded = try loadLinuxCompatibility(
+            bloomEnabled: true,
+            width: 1,
+            height: 1
+        )
+        defer { destroy(loaded) }
+        let plan = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        XCTAssertEqual(try planInfo(plan).is_executable, 1)
+        for framebuffer in try framebuffers(plan) {
+            XCTAssertGreaterThanOrEqual(framebuffer.width, 1)
+            XCTAssertGreaterThanOrEqual(framebuffer.height, 1)
+        }
     }
 
     func testFramebufferWrapModesAreStrictAndExposedByTheBridge() throws {
@@ -2594,6 +3379,78 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertFalse(scheduled.contains { $0.object_id == 11 })
     }
 
+    func testParticleRendererDescriptorsCoverLinuxSpriteTrailAndRopePaths() throws {
+        let renderers: [(name: String, kind: Int, shader: String)] = [
+            ("sprite", 0, "genericparticle"),
+            ("spritetrail", 1, "genericparticle"),
+            ("rope", 2, "genericropeparticle"),
+            ("ropetrail", 3, "genericropeparticle"),
+        ]
+        for renderer in renderers {
+            var documents = particleRenderOrderDocuments()
+            var definition = documents["particles/test.json"] as! [String: Any]
+            definition["renderer"] = [[
+                "length": 0.25,
+                "maxlength": 8,
+                "minlength": 0.1,
+                "name": renderer.name,
+                "segments": 6,
+                "subdivision": 3,
+                "uvscale": 2,
+                "uvscrolling": true,
+                "uvsmoothing": false,
+            ]]
+            documents["particles/test.json"] = definition
+            let fixture = try makeFixture(documents)
+            let loaded = try load(
+                assets: fixture.assets,
+                package: fixture.package,
+                root: fixture.root
+            )
+            defer {
+                destroy(loaded)
+            }
+            let plan = try createPlan(
+                loaded.frameGraph, runtime: 1, frameTime: 0
+            )
+            defer { we_scene_frame_plan_destroy(plan) }
+            let descriptors = try particles(plan)
+            XCTAssertEqual(Int(descriptors[0].renderer_kind), renderer.kind)
+            XCTAssertEqual(string(descriptors[0].shader), renderer.shader)
+            XCTAssertEqual(descriptors[0].renderer_length, 0.25, accuracy: 1e-9)
+            XCTAssertEqual(descriptors[0].renderer_subdivision, 3, accuracy: 1e-9)
+            XCTAssertEqual(descriptors[0].renderer_uv_scale, 2, accuracy: 1e-9)
+            XCTAssertEqual(descriptors[0].renderer_uv_scrolling, 1)
+            XCTAssertEqual(descriptors[0].renderer_uv_smoothing, 0)
+        }
+    }
+
+    func testUnknownParticleRendererSkipsOnlyThatObjectDuringPlanning() throws {
+        var documents = particleRenderOrderDocuments()
+        var definition = documents["particles/test.json"] as! [String: Any]
+        definition["renderer"] = [["name": "future-renderer"]]
+        documents["particles/test.json"] = definition
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer {
+            destroy(loaded)
+        }
+        let plan = try createPlan(
+            loaded.frameGraph, runtime: 1, frameTime: 0
+        )
+        defer { we_scene_frame_plan_destroy(plan) }
+        let info = try planInfo(plan)
+        XCTAssertEqual(info.is_executable, 1)
+        XCTAssertEqual(info.particle_count, 0)
+        XCTAssertTrue(try issues(plan).contains {
+            $0.object_id == 8 && string($0.message).contains("future-renderer")
+        })
+    }
+
     func testParticleVectorAndEmitterRangesAllowReverseEndpoints() throws {
         let fixture = try makeFixture(particleRenderOrderDocuments())
         let loaded = try load(
@@ -2818,11 +3675,14 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(try particles(plan).first?.combo_count, 4)
     }
 
-    func testParticlePlanningFailureSkipsOnlyTheParticleObject() throws {
+    func testParticleMaterialUsesOnlyFirstPassLikeLinux() throws {
         var documents = particleRenderOrderDocuments()
         var material = documents["materials/particle/test.json"] as! [String: Any]
         var passes = material["passes"] as! [[String: Any]]
-        passes[0]["shader"] = "unsupported-particle-shader"
+        passes.append([
+            "shader": "unsupported-second-particle-pass",
+            "textures": ["particle/unused"],
+        ])
         material["passes"] = passes
         documents["materials/particle/test.json"] = material
         let fixture = try makeFixture(documents)
@@ -2836,16 +3696,34 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         let plan = try createPlan(loaded.frameGraph)
         defer { we_scene_frame_plan_destroy(plan) }
         XCTAssertEqual(try planInfo(plan).is_executable, 1)
-        let scheduled = try operations(plan)
-        XCTAssertFalse(scheduled.contains { $0.object_id == 8 })
-        XCTAssertTrue(scheduled.contains { $0.object_id == 7 })
-        XCTAssertTrue(scheduled.contains { $0.object_id == 10 })
-        let issue = try XCTUnwrap(try issues(plan).first {
-            $0.code == WE_SCENE_FRAME_ISSUE_OBJECT_PLANNING_FAILED &&
-                $0.object_id == 8
-        })
-        XCTAssertEqual(issue.severity, WE_SCENE_FRAME_ISSUE_SKIP_OBJECT)
-        XCTAssertTrue(string(issue.message).contains("genericparticle"))
+        let descriptor = try XCTUnwrap(try particles(plan).first)
+        XCTAssertEqual(string(descriptor.shader), "genericparticle")
+        XCTAssertTrue(try operations(plan).contains { $0.object_id == 8 })
+    }
+
+    func testSpriteParticleKeepsAuthoredFirstPassShaderLikeLinux() throws {
+        var documents = particleRenderOrderDocuments()
+        var material = documents["materials/particle/test.json"] as! [String: Any]
+        var passes = material["passes"] as! [[String: Any]]
+        passes[0]["shader"] = "customparticle"
+        material["passes"] = passes
+        documents["materials/particle/test.json"] = material
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        let plan = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(plan) }
+        XCTAssertEqual(try planInfo(plan).is_executable, 1)
+        let descriptor = try XCTUnwrap(try particles(plan).first)
+        XCTAssertEqual(string(descriptor.shader), "customparticle")
+        XCTAssertEqual(string(descriptor.vertex_shader_path), "shaders/customparticle.vert")
+        XCTAssertEqual(string(descriptor.fragment_shader_path), "shaders/customparticle.frag")
+        XCTAssertTrue(try operations(plan).contains { $0.object_id == 8 })
     }
 
     func testUnsupportedTextSpacingWarnsAndUsesTheLinuxDefaultLayout() throws {
@@ -2924,4 +3802,90 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
             $0.code == WE_SCENE_FRAME_ISSUE_FRAMEBUFFER_READ_BEFORE_WRITE
         })
     }
+
+    func testPuppetImageUsesIndexedGeometryOnItsFirstPass() throws {
+        var documents = syntheticDocuments()
+        var puppetModel = documents["models/main.json"] as! [String: Any]
+        puppetModel["puppet"] = "models/main.mdl"
+        documents["models/main.json"] = puppetModel
+
+        var scene = documents["scene.json"] as! [String: Any]
+        var objects = scene["objects"] as! [[String: Any]]
+        objects.append([
+            "id": 8,
+            "image": "models/healthy.json",
+            "name": "Healthy sibling",
+            "origin": "200 100 0",
+            "size": "400 200",
+            "visible": true,
+        ])
+        scene["objects"] = objects
+        documents["scene.json"] = scene
+        documents["models/healthy.json"] = [
+            "material": "materials/healthy.json",
+        ]
+        documents["materials/healthy.json"] = [
+            "passes": [["shader": "base", "textures": ["healthy"]]],
+        ]
+
+        let fixture = try makeFixture(
+            documents,
+            binaryEntries: [("models/main.mdl", makePuppetMesh())]
+        )
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+        let plan = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        let info = try planInfo(plan)
+        XCTAssertEqual(info.is_executable, 1)
+        XCTAssertEqual(info.image_count, 2)
+        let allOperations = try operations(plan)
+        let puppetOperations = allOperations.filter { $0.object_id == 7 }
+        XCTAssertFalse(puppetOperations.isEmpty)
+        XCTAssertEqual(
+            puppetOperations.first(where: {
+                $0.kind == WE_SCENE_FRAME_OPERATION_RENDER
+            })?.geometry,
+            WE_SCENE_FRAME_GEOMETRY_PUPPET_MESH
+        )
+        let puppetRenders = puppetOperations.filter {
+            $0.kind == WE_SCENE_FRAME_OPERATION_RENDER
+        }
+        let puppetClearIndex = puppetOperations.firstIndex {
+            $0.kind == WE_SCENE_FRAME_OPERATION_CLEAR
+        }
+        let puppetRenderIndex = puppetOperations.firstIndex {
+            $0.kind == WE_SCENE_FRAME_OPERATION_RENDER
+        }
+        XCTAssertNotNil(puppetClearIndex)
+        XCTAssertNotNil(puppetRenderIndex)
+        if let puppetClearIndex, let puppetRenderIndex {
+            XCTAssertLessThan(puppetClearIndex, puppetRenderIndex)
+            XCTAssertEqual(puppetOperations[puppetClearIndex].clear_red, 0)
+            XCTAssertEqual(puppetOperations[puppetClearIndex].clear_green, 0)
+            XCTAssertEqual(puppetOperations[puppetClearIndex].clear_blue, 0)
+            XCTAssertEqual(puppetOperations[puppetClearIndex].clear_alpha, 0)
+        }
+        XCTAssertEqual(
+            puppetRenders.first?.blending,
+            WE_SCENE_FRAME_BLENDING_TRANSLUCENT,
+            "The first Puppet draw must use Linux's forced translucent blend"
+        )
+        XCTAssertTrue(
+            puppetRenders.dropFirst().allSatisfy {
+                $0.geometry != WE_SCENE_FRAME_GEOMETRY_PUPPET_MESH
+            },
+            "Only the first Puppet image pass may use indexed geometry"
+        )
+        XCTAssertTrue(allOperations.contains { $0.object_id == 8 })
+        XCTAssertFalse(try issues(plan).contains {
+            $0.code == WE_SCENE_FRAME_ISSUE_PUPPET_UNAVAILABLE
+        })
+    }
+
 }

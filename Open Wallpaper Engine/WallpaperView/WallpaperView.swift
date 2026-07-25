@@ -14,15 +14,23 @@ struct WallpaperView: View {
 
     var body: some View {
         let wallpaper = viewModel.wallpaper(for: screenId)
-        switch wallpaper.project.type.lowercased() {
-        case "video":
-            VideoWallpaperView(wallpaperViewModel: viewModel, screenId: screenId)
-        case "scene":
-            SceneWallpaperView(wallpaperViewModel: viewModel, screenId: screenId)
-        case "web":
-            WebWallpaperView(wallpaperViewModel: viewModel, screenId: screenId)
-        default:
-            EmptyView()
+        Group {
+            switch wallpaper.project.type.lowercased() {
+            case "video":
+                VideoWallpaperView(wallpaperViewModel: viewModel, screenId: screenId)
+            case "scene":
+                SceneWallpaperView(wallpaperViewModel: viewModel, screenId: screenId)
+            case "web":
+                WebWallpaperView(wallpaperViewModel: viewModel, screenId: screenId)
+            default:
+                EmptyView()
+            }
+        }
+        .onAppear {
+            AppDelegate.shared.sceneAudioOwnerCoordinator.register(screenId: screenId)
+        }
+        .onDisappear {
+            AppDelegate.shared.sceneAudioOwnerCoordinator.unregister(screenId: screenId)
         }
     }
 }

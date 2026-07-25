@@ -61,6 +61,13 @@ struct PerformancePage: SettingsPage {
                     .buttonStyle(.borderedProminent)
                     .disabled(true)
                 }
+
+                if let issue = viewModel.playbackPolicyIssue {
+                    Label(issue, systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } header: {
                 Label("Playback", systemImage: "play.fill")
             }
@@ -192,6 +199,19 @@ struct PerformancePage: SettingsPage {
                         .toggleStyle(.checkbox)
                         .labelsHidden()
                 }
+                Picker("Scene scaling", selection: $viewModel.settings.scenePresentationScaling) {
+                    Text("Stretch").tag(GSScenePresentationScaling.stretch)
+                    Text("Aspect fit").tag(GSScenePresentationScaling.aspectFit)
+                    Text("Aspect fill").tag(GSScenePresentationScaling.aspectFill)
+                }
+                Toggle(
+                    "Span scene wallpapers across displays",
+                    isOn: $viewModel.settings.sceneSpanAcrossScreens
+                )
+                Text("Span mode uses one virtual canvas and presents the current display's slice. It is intended for the same Scene wallpaper on each enabled display.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } header: {
                 Label("Quality", systemImage: "memorychip.fill")
                 Text("Currently, these settings below are designed for scene wallpapers \nand may not work as expect ")

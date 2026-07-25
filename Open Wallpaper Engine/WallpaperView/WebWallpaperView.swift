@@ -17,17 +17,28 @@ struct WebWallpaperView: NSViewRepresentable {
     init(wallpaperViewModel: WallpaperViewModel, screenId: String) {
         self.wallpaperViewModel = wallpaperViewModel
         self.screenId = screenId
-        self._viewModel = StateObject(wrappedValue: WebWallpaperViewModel(wallpaper: wallpaperViewModel.wallpaper(for: screenId)))
+        self._viewModel = StateObject(
+            wrappedValue: WebWallpaperViewModel(
+                wallpaper: wallpaperViewModel.wallpaper(for: screenId),
+                screenId: screenId
+            )
+        )
     }
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        Self.enableFileAccess(on: configuration)
         configuration.allowsAirPlayForMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = []
+        configuration.userContentController.addUserScript(
+            WebWallpaperViewModel.makeMediaPolicyUserScript()
+        )
+        configuration.userContentController.addUserScript(
+            WebWallpaperViewModel.makePropertyListenerUserScript()
+        )
 
         let nsView = WKWebView(frame: .zero, configuration: configuration)
         nsView.navigationDelegate = viewModel
+        viewModel.attach(nsView)
         Self.loadWallpaper(nsView, viewModel: viewModel)
         return nsView
     }
@@ -46,31 +57,23 @@ struct WebWallpaperView: NSViewRepresentable {
         }
     }
 
-    /// Enable file:// cross-origin access for WebGL wallpapers.
-    /// Tries multiple private WebKit key variants, catching ObjC exceptions for each.
-    private static func enableFileAccess(on configuration: WKWebViewConfiguration) {
-        let prefs = configuration.preferences
-
-        // Key variants across macOS versions
-        let fileAccessKeys = ["allowFileAccessFromFileURLs", "_allowFileAccessFromFileURLs"]
-        let universalAccessKeys = ["allowUniversalAccessFromFileURLs", "_allowUniversalAccessFromFileURLs"]
-
-        for key in fileAccessKeys {
-            if ObjCExceptionCatcher.performSafe({ prefs.setValue(true, forKey: key) }) { break }
-        }
-
-        for key in universalAccessKeys {
-            if ObjCExceptionCatcher.performSafe({ prefs.setValue(true, forKey: key) }) { break }
-        }
-    }
-
     func updateNSView(_ nsView: WKWebView, context: Context) {
         let selectedWallpaper = wallpaperViewModel.wallpaper(for: screenId)
         let currentWallpaper = viewModel.currentWallpaper
+        let needsReload = selectedWallpaper.wallpaperDirectory
+            .appending(path: selectedWallpaper.project.file) != currentWallpaper.wallpaperDirectory
+            .appending(path: currentWallpaper.project.file)
 
-        if selectedWallpaper.wallpaperDirectory.appending(path: selectedWallpaper.project.file) != currentWallpaper.wallpaperDirectory.appending(path: currentWallpaper.project.file) {
-            viewModel.currentWallpaper = selectedWallpaper
+        viewModel.updateWallpaper(selectedWallpaper)
+        if needsReload {
             Self.loadWallpaper(nsView, viewModel: viewModel)
         }
+        viewModel.attach(nsView)
+    }
+
+    static func dismantleNSView(_ nsView: WKWebView, coordinator: ()) {
+        (nsView.navigationDelegate as? WebWallpaperViewModel)?.detach(nsView)
+        nsView.stopLoading()
+        nsView.navigationDelegate = nil
     }
 }

@@ -1,3 +1,4 @@
+import AudioToolbox
 import Foundation
 @testable import SceneAudio
 import SceneRuntimeBridge
@@ -86,6 +87,100 @@ final class SceneAudioTests: XCTestCase {
         XCTAssertEqual(changes[1].1, "screen-b")
         XCTAssertEqual(changes[2].0, "screen-b")
         XCTAssertEqual(changes[2].1, "screen-a")
+    }
+
+    func testLinuxSpectrumUsesLatestWindowAndKeepsStereoArraysBound() {
+        let analyzer = LinuxAudioSpectrumAnalyzer()
+        let dc = [Float](repeating: 1, count: LinuxAudioSpectrumAnalyzer.sampleCount)
+
+        let first = analyzer.push(samples: dc)
+        XCTAssertEqual(first, .zero)
+
+        let second = analyzer.push(samples: dc)
+        XCTAssertEqual(second.spectrum64Left, second.spectrum64Right)
+        XCTAssertEqual(second.spectrum32Left, second.spectrum32Right)
+        XCTAssertEqual(second.spectrum16Left, second.spectrum16Right)
+        XCTAssertEqual(second.spectrum64Left[0], 0.3, accuracy: 0.0001)
+        XCTAssertTrue(second.spectrum64Left.allSatisfy(\.isFinite))
+    }
+
+    func testPlanarFloatCaptureDownmixesEveryBuffer() throws {
+        var left: [Float] = [1, -1, 0.5]
+        var right: [Float] = [0, 0.5, -0.5]
+        let format = AudioStreamBasicDescription(
+            mSampleRate: 44_100,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagsNativeFloatPacked |
+                kAudioFormatFlagIsNonInterleaved,
+            mBytesPerPacket: 4,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 4,
+            mChannelsPerFrame: 2,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+
+        let frameCount = left.count
+        let decoded = left.withUnsafeMutableBytes { leftBytes in
+            right.withUnsafeMutableBytes { rightBytes in
+                withAudioBufferList(maximumBuffers: 2) { buffers in
+                    buffers[0] = AudioBuffer(
+                        mNumberChannels: 1,
+                        mDataByteSize: UInt32(leftBytes.count),
+                        mData: leftBytes.baseAddress
+                    )
+                    buffers[1] = AudioBuffer(
+                        mNumberChannels: 1,
+                        mDataByteSize: UInt32(rightBytes.count),
+                        mData: rightBytes.baseAddress
+                    )
+                    return decodePCMBufferList(
+                        buffers,
+                        frameCount: frameCount,
+                        format: format
+                    )
+                }
+            }
+        }
+
+        let values = try XCTUnwrap(decoded)
+        XCTAssertEqual(values[0], 0.5, accuracy: 0.0001)
+        XCTAssertEqual(values[1], -0.25, accuracy: 0.0001)
+        XCTAssertEqual(values[2], 0, accuracy: 0.0001)
+    }
+
+    func testInterleavedSignedIntegerCaptureDownmixesChannels() throws {
+        var interleaved: [Int16] = [Int16.max, 0, Int16.min + 1, Int16.max]
+        let format = AudioStreamBasicDescription(
+            mSampleRate: 44_100,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 4,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 4,
+            mChannelsPerFrame: 2,
+            mBitsPerChannel: 16,
+            mReserved: 0
+        )
+
+        let decoded = interleaved.withUnsafeMutableBytes { bytes in
+            withAudioBufferList(maximumBuffers: 1) { buffers in
+                buffers[0] = AudioBuffer(
+                    mNumberChannels: 2,
+                    mDataByteSize: UInt32(bytes.count),
+                    mData: bytes.baseAddress
+                )
+                return decodePCMBufferList(
+                    buffers,
+                    frameCount: 2,
+                    format: format
+                )
+            }
+        }
+
+        let values = try XCTUnwrap(decoded)
+        XCTAssertEqual(values[0], 0.5, accuracy: 0.0001)
+        XCTAssertEqual(values[1], 0, accuracy: 0.0001)
     }
 
     func testPlayerDecodesWaveAndPreservesLoopAndVolume() throws {
@@ -368,6 +463,355 @@ final class SceneAudioTests: XCTestCase {
         try controller.resumeAll()
     }
 
+    func testFreshPlayCommandIsNoOpWhilePlayerIsAlreadyPlaying() throws {
+        let (controller, created) = controlledController()
+        let loader: (String) throws -> Data = { _ in self.waveData() }
+        let baseSource = source(
+            index: 0,
+            resource: "script.wav",
+            loop: false,
+            volume: 1,
+            startSilent: true
+        )
+        try controller.reconcile([
+            sound(
+                objectId: 20,
+                visible: true,
+                sources: [baseSource],
+                playbackCommand: command(.play, generation: 1)
+            ),
+        ], masterVolume: 1, audioOutput: 1, loadAsset: loader)
+        let player = try XCTUnwrap(created().first)
+        XCTAssertTrue(player.isPlaying)
+        XCTAssertEqual(player.playCount, 1)
+
+        try controller.reconcile([
+            sound(
+                objectId: 20,
+                visible: true,
+                sources: [baseSource],
+                playbackCommand: command(.play, generation: 2)
+            ),
+        ], masterVolume: 1, audioOutput: 1, loadAsset: loader)
+        XCTAssertTrue(player.isPlaying)
+        XCTAssertEqual(player.playCount, 1, "play() while playing must be a no-op")
+    }
+
+    func testPauseThenPlayResumesWithoutResettingPosition() throws {
+        let (controller, created) = controlledController()
+        let loader: (String) throws -> Data = { _ in self.waveData() }
+        let baseSource = source(
+            index: 0,
+            resource: "script.wav",
+            loop: false,
+            volume: 1,
+            startSilent: true
+        )
+        try controller.reconcile([
+            sound(
+                objectId: 21,
+                visible: true,
+                sources: [baseSource],
+                playbackCommand: command(.play, generation: 1)
+            ),
+        ], masterVolume: 1, audioOutput: 1, loadAsset: loader)
+        let player = try XCTUnwrap(created().first)
+        player.advance(to: 3.5)
+
+        try controller.reconcile([
+            sound(
+                objectId: 21,
+                visible: true,
+                sources: [baseSource],
+                playbackCommand: command(.pause, generation: 2)
+            ),
+        ], masterVolume: 1, audioOutput: 1, loadAsset: loader)
+        XCTAssertEqual(player.playbackState, .paused)
+        XCTAssertEqual(player.position, 3.5)
+
+        try controller.reconcile([
+            sound(
+                objectId: 21,
+                visible: true,
+                sources: [baseSource],
+                playbackCommand: command(.play, generation: 3)
+            ),
+        ], masterVolume: 1, audioOutput: 1, loadAsset: loader)
+        XCTAssertTrue(player.isPlaying)
+        XCTAssertEqual(player.playCount, 2)
+        XCTAssertEqual(player.position, 3.5, "pause -> play must resume instead of rewinding")
+        XCTAssertEqual(player.stopCount, 0)
+    }
+
+    func testStoppedAndEndedPlaybackRestartOnlyForFreshPlayCommand() throws {
+        let (controller, created) = controlledController()
+        let loader: (String) throws -> Data = { _ in self.waveData() }
+        let baseSource = source(
+            index: 0,
+            resource: "script.wav",
+            loop: false,
+            volume: 1,
+            startSilent: true
+        )
+        func snapshot(_ action: SceneSoundPlaybackCommand.Action, _ generation: UInt64) -> [SceneSoundSnapshot] {
+            [sound(
+                objectId: 22,
+                visible: true,
+                sources: [baseSource],
+                playbackCommand: command(action, generation: generation)
+            )]
+        }
+
+        try controller.reconcile(
+            snapshot(.play, 1), masterVolume: 1, audioOutput: 1, loadAsset: loader
+        )
+        let player = try XCTUnwrap(created().first)
+        player.advance(to: 4)
+        try controller.reconcile(
+            snapshot(.stop, 2), masterVolume: 1, audioOutput: 1, loadAsset: loader
+        )
+        XCTAssertEqual(player.playbackState, .stopped)
+        XCTAssertEqual(player.position, 0)
+
+        try controller.reconcile(
+            snapshot(.play, 3), masterVolume: 1, audioOutput: 1, loadAsset: loader
+        )
+        XCTAssertEqual(player.playCount, 2)
+        XCTAssertEqual(player.position, 0)
+
+        player.finishNaturally()
+        XCTAssertEqual(player.playbackState, .ended)
+        try controller.reconcile(
+            snapshot(.play, 3), masterVolume: 1, audioOutput: 1, loadAsset: loader
+        )
+        XCTAssertEqual(player.playCount, 2, "A persistent command value is not a new play request")
+
+        try controller.reconcile([
+            sound(
+                objectId: 22,
+                visible: true,
+                sources: [baseSource],
+                playbackCommand: command(.play, generation: 4)
+            ),
+        ], masterVolume: 1, audioOutput: 1, loadAsset: loader)
+        XCTAssertEqual(player.playCount, 3)
+        XCTAssertEqual(player.position, 0, "ended -> fresh play must restart from the beginning")
+        XCTAssertEqual(player.stopCount, 2, "Ended playback must be rewound before restarting")
+    }
+
+    func testRuntimeSnapshotReportsPlayerTruthInsteadOfPersistentPlayRequest() throws {
+        let (controller, created) = controlledController()
+        let source = source(
+            index: 0,
+            resource: "truth.wav",
+            loop: false,
+            volume: 1,
+            startSilent: true
+        )
+        let sounds = [sound(
+            objectId: 23,
+            visible: true,
+            sources: [source],
+            playbackCommand: command(.play, generation: 1)
+        )]
+        try controller.reconcile(
+            sounds,
+            masterVolume: 1,
+            audioOutput: 1,
+            loadAsset: { _ in self.waveData() }
+        )
+        let player = try XCTUnwrap(created().first)
+        player.finishNaturally()
+
+        let playerState = try controller.playerState(identifier: "sound:23:0")
+        XCTAssertEqual(playerState.state, .ended)
+        XCTAssertFalse(playerState.isPlaying)
+        XCTAssertTrue(try controller.playbackIntent(identifier: "sound:23:0"))
+        XCTAssertEqual(
+            controller.soundRuntimeSnapshots(),
+            [SceneSoundRuntimeSnapshot(objectId: 23, state: .ended, position: player.duration)]
+        )
+    }
+
+    func testPlaybackCommandGenerationCannotMoveBackwardOrChangeMeaning() throws {
+        let (controller, created) = controlledController()
+        let source = source(
+            index: 0,
+            resource: "ordered.wav",
+            loop: false,
+            volume: 1,
+            startSilent: true
+        )
+        let loader: (String) throws -> Data = { _ in self.waveData() }
+        try controller.reconcile([
+            sound(
+                objectId: 26,
+                visible: true,
+                sources: [source],
+                playbackCommand: command(.play, generation: 5)
+            ),
+        ], masterVolume: 1, audioOutput: 1, loadAsset: loader)
+        let player = try XCTUnwrap(created().first)
+
+        XCTAssertThrowsError(try controller.reconcile([
+            sound(
+                objectId: 26,
+                visible: true,
+                sources: [source],
+                playbackCommand: command(.pause, generation: 4)
+            ),
+        ], masterVolume: 1, audioOutput: 1, loadAsset: loader)) {
+            XCTAssertEqual(
+                $0 as? SceneAudioError,
+                .stalePlaybackCommand(identifier: "sound:26:0", current: 5, received: 4)
+            )
+        }
+        XCTAssertTrue(player.isPlaying)
+        XCTAssertEqual(player.pauseCount, 0)
+
+        XCTAssertThrowsError(try controller.reconcile([
+            sound(
+                objectId: 26,
+                visible: true,
+                sources: [source],
+                playbackCommand: command(.pause, generation: 5)
+            ),
+        ], masterVolume: 1, audioOutput: 1, loadAsset: loader)) {
+            XCTAssertEqual(
+                $0 as? SceneAudioError,
+                .conflictingPlaybackCommand(identifier: "sound:26:0", generation: 5)
+            )
+        }
+        XCTAssertTrue(player.isPlaying)
+        XCTAssertEqual(player.pauseCount, 0)
+    }
+
+    func testPlaybackFailureRestoresRuntimeStateAndPositionTransactionally() throws {
+        let (controller, created) = controlledController()
+        let first = source(
+            index: 0,
+            resource: "first.wav",
+            loop: false,
+            volume: 1,
+            startSilent: true
+        )
+        let second = source(
+            index: 0,
+            resource: "second.wav",
+            loop: false,
+            volume: 1,
+            startSilent: true
+        )
+        let loader: (String) throws -> Data = { _ in self.waveData() }
+        try controller.reconcile([
+            sound(
+                objectId: 27,
+                visible: true,
+                sources: [first],
+                playbackCommand: command(.play, generation: 1)
+            ),
+            sound(objectId: 28, visible: true, sources: [second]),
+        ], masterVolume: 1, audioOutput: 1, loadAsset: loader)
+        XCTAssertEqual(created().count, 2)
+        created()[0].advance(to: 4.25)
+        created()[1].failsToPlay = true
+
+        XCTAssertThrowsError(try controller.reconcile([
+            sound(
+                objectId: 27,
+                visible: true,
+                sources: [first],
+                playbackCommand: command(.stop, generation: 2)
+            ),
+            sound(
+                objectId: 28,
+                visible: true,
+                sources: [second],
+                playbackCommand: command(.play, generation: 1)
+            ),
+        ], masterVolume: 1, audioOutput: 1, loadAsset: loader)) {
+            XCTAssertEqual($0 as? SceneAudioError, .playbackFailed("sound:28:0"))
+        }
+
+        let restored = try controller.playerState(identifier: "sound:27:0")
+        XCTAssertEqual(restored.state, .playing)
+        XCTAssertEqual(restored.position, 4.25)
+        XCTAssertEqual(
+            try controller.playerState(identifier: "sound:28:0").state,
+            .stopped
+        )
+    }
+
+    func testTimedPlaybackBoundsAreAcceptedLikeLinuxForEveryPlaybackMode() throws {
+        for loop in [false, true] {
+            let (controller, created) = controlledController()
+            var loadCount = 0
+            try controller.reconcile([
+                sound(
+                    objectId: loop ? 25 : 24,
+                    visible: true,
+                    sources: [source(
+                        index: 0,
+                        resource: "timed.wav",
+                        loop: loop,
+                        volume: 1,
+                        startSilent: false
+                    )],
+                    minimumTime: 1,
+                    maximumTime: 2
+                ),
+            ], masterVolume: 1, audioOutput: 1) { _ in
+                loadCount += 1
+                return self.waveData()
+            }
+            XCTAssertEqual(loadCount, 1)
+            XCTAssertEqual(created().count, 1)
+            XCTAssertEqual(created()[0].playbackState, .playing)
+            XCTAssertEqual(created()[0].loops, loop)
+        }
+    }
+
+    func testSynchronizationFailureIsExplicitAndClearsAudioState() throws {
+        let (controller, created) = controlledController()
+        let original = sound(objectId: 31, visible: true, sources: [
+            source(
+                index: 0,
+                resource: "working.wav",
+                loop: true,
+                volume: 1,
+                startSilent: false
+            ),
+        ])
+        try controller.reconcile(
+            [original],
+            masterVolume: 1,
+            audioOutput: 1
+        ) { _ in self.waveData() }
+        XCTAssertEqual(controller.playerCount, 1)
+        XCTAssertEqual(created().first?.playbackState, .playing)
+
+        let replacement = sound(objectId: 31, visible: true, sources: [
+            source(
+                index: 0,
+                resource: "broken.wav",
+                loop: true,
+                volume: 1,
+                startSilent: false
+            ),
+        ])
+        let issue = controller.synchronize(
+            [replacement],
+            masterVolume: 1,
+            audioOutput: 1
+        ) { _ in
+            throw SyntheticAudioLoadFailure()
+        }
+
+        XCTAssertEqual(issue?.message, "synthetic audio asset failure")
+        XCTAssertEqual(controller.playerCount, 0)
+        XCTAssertEqual(created().first?.playbackState, .stopped)
+    }
+
     func testResumeAllRollsBackEveryPlayerWhenOneStartFails() throws {
         var created: [ControlledPlayback] = []
         let controller = SceneAudioController { _, loop, volume in
@@ -423,9 +867,26 @@ final class SceneAudioTests: XCTestCase {
     private func sound(
         objectId: Int,
         visible: Bool,
-        sources: [SceneSoundSourceSnapshot]
+        sources: [SceneSoundSourceSnapshot],
+        playbackCommand: SceneSoundPlaybackCommand? = nil,
+        minimumTime: Double = 0,
+        maximumTime: Double = 0
     ) -> SceneSoundSnapshot {
-        SceneSoundSnapshot(objectId: objectId, visible: visible, sources: sources)
+        SceneSoundSnapshot(
+            objectId: objectId,
+            visible: visible,
+            sources: sources,
+            playbackCommand: playbackCommand,
+            minimumTime: minimumTime,
+            maximumTime: maximumTime
+        )
+    }
+
+    private func command(
+        _ action: SceneSoundPlaybackCommand.Action,
+        generation: UInt64
+    ) -> SceneSoundPlaybackCommand {
+        SceneSoundPlaybackCommand(action: action, generation: generation)
     }
 
     private func source(
@@ -461,35 +922,68 @@ final class SceneAudioTests: XCTestCase {
         var littleEndian = value.littleEndian
         withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
     }
+
+    private func withAudioBufferList<Result>(
+        maximumBuffers: Int,
+        _ body: (UnsafeMutableAudioBufferListPointer) throws -> Result
+    ) rethrows -> Result {
+        precondition(maximumBuffers > 0)
+        let byteCount = MemoryLayout<AudioBufferList>.size +
+            (maximumBuffers - 1) * MemoryLayout<AudioBuffer>.stride
+        let raw = UnsafeMutableRawPointer.allocate(
+            byteCount: byteCount,
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { raw.deallocate() }
+        let list = raw.bindMemory(to: AudioBufferList.self, capacity: 1)
+        list.pointee.mNumberBuffers = UInt32(maximumBuffers)
+        return try body(UnsafeMutableAudioBufferListPointer(list))
+    }
 }
 
 @MainActor
 private final class ControlledPlayback: SceneAudioPlayback {
-    private(set) var isPlaying = false
+    private(set) var playbackState = SceneAudioPlaybackState.stopped
+    private(set) var position: TimeInterval = 0
+    let duration: TimeInterval = 10
     let loops: Bool
     private(set) var volume: Float
     var failsToPlay = false
     private(set) var playCount = 0
     private(set) var pauseCount = 0
+    private(set) var stopCount = 0
 
     init(loop: Bool, volume: Float) {
         loops = loop
         self.volume = volume
     }
 
+    var isPlaying: Bool { playbackState == .playing }
+
     func play() throws {
         guard !failsToPlay else { throw SceneAudioError.playbackFailed(nil) }
         playCount += 1
-        isPlaying = true
+        playbackState = .playing
     }
 
     func pause() {
         pauseCount += 1
-        isPlaying = false
+        playbackState = .paused
     }
-    func stop() { isPlaying = false }
+    func stop() {
+        stopCount += 1
+        playbackState = .stopped
+        position = 0
+    }
 
-    func finishNaturally() { isPlaying = false }
+    func advance(to position: TimeInterval) {
+        self.position = position
+    }
+
+    func finishNaturally() {
+        playbackState = .ended
+        position = duration
+    }
 
     func setVolume(_ volume: Float) throws {
         guard volume.isFinite, (0...1).contains(volume) else {
@@ -497,4 +991,14 @@ private final class ControlledPlayback: SceneAudioPlayback {
         }
         self.volume = volume
     }
+
+    func restore(_ snapshot: SceneAudioPlayerState) throws {
+        volume = snapshot.volume
+        playbackState = snapshot.state
+        position = snapshot.position
+    }
+}
+
+private struct SyntheticAudioLoadFailure: LocalizedError {
+    var errorDescription: String? { "synthetic audio asset failure" }
 }

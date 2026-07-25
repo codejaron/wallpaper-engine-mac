@@ -60,6 +60,9 @@
 		DAEE29C62A9CB52100633898 /* WebWallpaperViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */; };
 		D10000000000000000000001 /* SceneRuntimeBridge in Frameworks */ = {isa = PBXBuildFile; productRef = D10000000000000000000003 /* SceneRuntimeBridge */; };
 		D30000000000000000000001 /* SceneAudio in Frameworks */ = {isa = PBXBuildFile; productRef = D30000000000000000000002 /* SceneAudio */; };
+		E40000000000000000000001 /* PlaybackPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E40000000000000000000002 /* PlaybackPolicy.swift */; };
+		F50000000000000000000001 /* PlaybackConditionMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50000000000000000000002 /* PlaybackConditionMonitor.swift */; };
+		A60000000000000000000001 /* SceneMediaSnapshotProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A60000000000000000000002 /* SceneMediaSnapshotProvider.swift */; };
 		D10000000000000000000007 /* SceneRuntime NOTICE in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000004 /* SceneRuntime NOTICE */; };
 		D10000000000000000000008 /* LZ4.txt in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000005 /* LZ4.txt */; };
 		D10000000000000000000009 /* nlohmann-json.txt in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000006 /* nlohmann-json.txt */; };
@@ -144,6 +147,9 @@
 		D10000000000000000000010 /* QuickJS-NG-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SceneRuntime/ThirdPartyLicenses/QuickJS-NG-LICENSE.txt; sourceTree = "<group>"; };
 		D20000000000000000000001 /* SceneProperty.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneProperty.swift; sourceTree = "<group>"; };
 		D20000000000000000000003 /* ScenePropertyControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScenePropertyControls.swift; sourceTree = "<group>"; };
+		E40000000000000000000002 /* PlaybackPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackPolicy.swift; sourceTree = "<group>"; };
+		F50000000000000000000002 /* PlaybackConditionMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackConditionMonitor.swift; sourceTree = "<group>"; };
+		A60000000000000000000002 /* SceneMediaSnapshotProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneMediaSnapshotProvider.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -227,6 +233,9 @@
 				DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */,
 				AA1B2C3D4E5F600100ABCD04 /* SceneWallpaperViewModel.swift */,
 				D20000000000000000000001 /* SceneProperty.swift */,
+				E40000000000000000000002 /* PlaybackPolicy.swift */,
+				F50000000000000000000002 /* PlaybackConditionMonitor.swift */,
+				A60000000000000000000002 /* SceneMediaSnapshotProvider.swift */,
 				5E51A43B2AA33F5500E46E99 /* GlobalSettingsService.swift */,
 				BB0000000000000000000001 /* ObjCExceptionCatcher.h */,
 				BB0000000000000000000002 /* ObjCExceptionCatcher.m */,
@@ -456,6 +465,9 @@
 				5E8C82032A9E15D0009E291B /* ExplorerItemMenu.swift in Sources */,
 				5E66A0EA2A8BAA5400EE79D6 /* ExplorerGlobalMenu.swift in Sources */,
 				5E51A43C2AA33F5500E46E99 /* GlobalSettingsService.swift in Sources */,
+				E40000000000000000000001 /* PlaybackPolicy.swift in Sources */,
+				F50000000000000000000001 /* PlaybackConditionMonitor.swift in Sources */,
+				A60000000000000000000001 /* SceneMediaSnapshotProvider.swift in Sources */,
 				5E9D40442A2EC68600AB8A0C /* AppDelegate.swift in Sources */,
 				5EDF1E142A93B06B006617EA /* WorkingInProgress.swift in Sources */,
 				5EB152A12A82ADEB007EA845 /* Open_Wallpaper_Engine.docc in Sources */,

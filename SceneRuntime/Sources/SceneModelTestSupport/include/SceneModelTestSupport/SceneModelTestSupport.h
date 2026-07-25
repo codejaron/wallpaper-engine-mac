@@ -80,8 +80,19 @@ typedef struct WESceneModelTestParticleInfo {
     uint64_t emitter_count;
     uint64_t initializer_count;
     uint64_t operator_count;
+    uint64_t child_count;
     const char* renderer_name;
     const char* renderer_orientation;
+    double renderer_length;
+    double renderer_max_length;
+    double renderer_min_length;
+    double renderer_subdivision;
+    double renderer_segments;
+    double renderer_uv_scale;
+    int renderer_uv_scrolling;
+    int renderer_uv_smoothing;
+    int renderer_fade_alpha;
+    int renderer_fade_size;
 } WESceneModelTestParticleInfo;
 
 typedef enum WESceneModelTestParticleInitializerKind {
@@ -93,6 +104,7 @@ typedef enum WESceneModelTestParticleInitializerKind {
     WE_SCENE_MODEL_TEST_PARTICLE_ROTATION_RANDOM = 5,
     WE_SCENE_MODEL_TEST_PARTICLE_ANGULAR_VELOCITY_RANDOM = 6,
     WE_SCENE_MODEL_TEST_PARTICLE_TURBULENT_VELOCITY_RANDOM = 7,
+    WE_SCENE_MODEL_TEST_PARTICLE_MAP_SEQUENCE_AROUND_CONTROL_POINT = 8,
 } WESceneModelTestParticleInitializerKind;
 
 typedef struct WESceneModelTestParticleInitializerInfo {

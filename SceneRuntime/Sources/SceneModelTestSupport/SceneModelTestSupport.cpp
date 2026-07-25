@@ -46,14 +46,21 @@ using we::scene::ParticleAlphaRandomInitializer;
 using we::scene::ParticleAngularMovementOperator;
 using we::scene::ParticleAngularVelocityRandomInitializer;
 using we::scene::ParticleColorRandomInitializer;
+using we::scene::ParticleColorChangeOperator;
 using we::scene::ParticleControlPointAttractOperator;
 using we::scene::ParticleLifetimeRandomInitializer;
+using we::scene::ParticleMapSequenceAroundControlPointInitializer;
 using we::scene::ParticleMovementOperator;
 using we::scene::ParticleObject;
 using we::scene::ParticleOscillateAlphaOperator;
 using we::scene::ParticleOscillatePositionOperator;
+using we::scene::ParticleOscillateSizeOperator;
 using we::scene::ParticleRotationRandomInitializer;
 using we::scene::ParticleSizeRandomInitializer;
+using we::scene::ParticleSizeChangeOperator;
+using we::scene::ParticleAlphaChangeOperator;
+using we::scene::ParticleTurbulenceOperator;
+using we::scene::ParticleVortexOperator;
 using we::scene::ParticleTurbulentVelocityRandomInitializer;
 using we::scene::ParticleVelocityRandomInitializer;
 using we::scene::TextureSlot;
@@ -281,6 +288,14 @@ void countProject(const SceneProject& project, Counter& counter) {
                             counter.dynamic(value.phaseMinimum);
                             counter.dynamic(value.phaseMaximum);
                             counter.dynamic(value.right);
+                        } else if constexpr (std::is_same_v<
+                                                 T,
+                                                 ParticleMapSequenceAroundControlPointInitializer
+                                             >) {
+                            counter.dynamic(value.controlPoint);
+                            counter.dynamic(value.count);
+                            counter.dynamic(value.speedMinimum);
+                            counter.dynamic(value.speedMaximum);
                         } else {
                             counter.dynamic(value.minimum);
                             counter.dynamic(value.maximum);
@@ -332,11 +347,70 @@ void countProject(const SceneProject& project, Counter& counter) {
                             counter.dynamic(value.phaseMaximum);
                         } else if constexpr (std::is_same_v<
                                                  T,
+                                                 ParticleOscillateSizeOperator
+                                             >) {
+                            counter.dynamic(value.frequencyMinimum);
+                            counter.dynamic(value.frequencyMaximum);
+                            counter.dynamic(value.scaleMinimum);
+                            counter.dynamic(value.scaleMaximum);
+                            counter.dynamic(value.phaseMinimum);
+                            counter.dynamic(value.phaseMaximum);
+                        } else if constexpr (std::is_same_v<
+                                                 T,
                                                  ParticleControlPointAttractOperator
                                              >) {
                             counter.dynamic(value.origin);
                             counter.dynamic(value.scale);
                             counter.dynamic(value.threshold);
+                        } else if constexpr (
+                            std::is_same_v<T, ParticleSizeChangeOperator> ||
+                            std::is_same_v<T, ParticleAlphaChangeOperator>
+                        ) {
+                            counter.dynamic(value.startTime);
+                            counter.dynamic(value.endTime);
+                            counter.dynamic(value.startValue);
+                            counter.dynamic(value.endValue);
+                        } else if constexpr (std::is_same_v<
+                                                 T,
+                                                 ParticleColorChangeOperator
+                                             >) {
+                            counter.dynamic(value.startTime);
+                            counter.dynamic(value.endTime);
+                            counter.dynamic(value.startValue);
+                            counter.dynamic(value.endValue);
+                        } else if constexpr (std::is_same_v<
+                                                 T,
+                                                 ParticleTurbulenceOperator
+                                             >) {
+                            counter.dynamic(value.scale);
+                            counter.dynamic(value.speedMinimum);
+                            counter.dynamic(value.speedMaximum);
+                            counter.dynamic(value.timeScale);
+                            counter.dynamic(value.mask);
+                            counter.dynamic(value.phaseMinimum);
+                            counter.dynamic(value.phaseMaximum);
+                            counter.dynamic(value.audioProcessingMode);
+                            counter.dynamic(value.audioProcessingBounds);
+                            counter.dynamic(value.audioProcessingExponent);
+                            counter.dynamic(value.audioProcessingFrequencyStart);
+                            counter.dynamic(value.audioProcessingFrequencyEnd);
+                        } else if constexpr (std::is_same_v<
+                                                 T,
+                                                 ParticleVortexOperator
+                                             >) {
+                            counter.dynamic(value.axis);
+                            counter.dynamic(value.offset);
+                            counter.dynamic(value.distanceInner);
+                            counter.dynamic(value.distanceOuter);
+                            counter.dynamic(value.speedInner);
+                            counter.dynamic(value.speedOuter);
+                            counter.dynamic(value.centerForce);
+                            counter.dynamic(value.ringRadius);
+                            counter.dynamic(value.ringWidth);
+                            counter.dynamic(value.ringPullDistance);
+                            counter.dynamic(value.ringPullForce);
+                            counter.dynamic(value.audioProcessingMode);
+                            counter.dynamic(value.audioProcessingBounds);
                         }
                     }, particleOperator);
                 }
@@ -880,8 +954,19 @@ extern "C" int we_scene_model_test_particle_info(
         outInfo->emitter_count = definition.emitters.size();
         outInfo->initializer_count = definition.initializers.size();
         outInfo->operator_count = definition.operators.size();
-        outInfo->renderer_name = "sprite";
+        outInfo->child_count = definition.children.size();
+        outInfo->renderer_name = definition.renderer.name.c_str();
         outInfo->renderer_orientation = definition.renderer.orientation.c_str();
+        outInfo->renderer_length = definition.renderer.length;
+        outInfo->renderer_max_length = definition.renderer.maxLength;
+        outInfo->renderer_min_length = definition.renderer.minLength;
+        outInfo->renderer_subdivision = definition.renderer.subdivision;
+        outInfo->renderer_segments = definition.renderer.segments;
+        outInfo->renderer_uv_scale = definition.renderer.uvScale;
+        outInfo->renderer_uv_scrolling = definition.renderer.uvScrolling ? 1 : 0;
+        outInfo->renderer_uv_smoothing = definition.renderer.uvSmoothing ? 1 : 0;
+        outInfo->renderer_fade_alpha = definition.renderer.fadeAlpha ? 1 : 0;
+        outInfo->renderer_fade_size = definition.renderer.fadeSize ? 1 : 0;
         return 1;
     });
 }
@@ -937,6 +1022,12 @@ extern "C" int we_scene_model_test_particle_initializer_info(
                                  >) {
                 outInfo->kind =
                     WE_SCENE_MODEL_TEST_PARTICLE_ANGULAR_VELOCITY_RANDOM;
+            } else if constexpr (std::is_same_v<
+                                     Initializer,
+                                     ParticleMapSequenceAroundControlPointInitializer
+                                 >) {
+                outInfo->kind =
+                    WE_SCENE_MODEL_TEST_PARTICLE_MAP_SEQUENCE_AROUND_CONTROL_POINT;
             } else {
                 outInfo->kind =
                     WE_SCENE_MODEL_TEST_PARTICLE_TURBULENT_VELOCITY_RANDOM;
@@ -951,6 +1042,11 @@ extern "C" int we_scene_model_test_particle_initializer_info(
                                   ParticleTurbulentVelocityRandomInitializer
                               >) {
                     return initializer.speedMinimum;
+                } else if constexpr (std::is_same_v<
+                                         Initializer,
+                                         ParticleMapSequenceAroundControlPointInitializer
+                                     >) {
+                    return initializer.speedMinimum;
                 } else {
                     return initializer.minimum;
                 }
@@ -960,6 +1056,11 @@ extern "C" int we_scene_model_test_particle_initializer_info(
                                   Initializer,
                                   ParticleTurbulentVelocityRandomInitializer
                               >) {
+                    return initializer.speedMaximum;
+                } else if constexpr (std::is_same_v<
+                                         Initializer,
+                                         ParticleMapSequenceAroundControlPointInitializer
+                                     >) {
                     return initializer.speedMaximum;
                 } else {
                     return initializer.maximum;

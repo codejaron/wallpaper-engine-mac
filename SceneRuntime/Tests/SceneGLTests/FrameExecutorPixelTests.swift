@@ -184,6 +184,86 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
     }
 
+    func testPrimaryRawTextureFormatOverridesAuthoredTextureZeroCombo() throws {
+        let cases: [(format: UInt32, authored: Int, expected: Int, bytes: [UInt8])] = [
+            (format: 9, authored: 8, expected: 9, bytes: [255, 255, 255, 255]),
+            (format: 8, authored: 9, expected: 8, bytes: [255, 0, 255, 0, 255, 0, 255, 0]),
+        ]
+        for value in cases {
+            let loaded = try loadFixture(
+                fragmentSource: """
+                varying vec2 v_TexCoord;
+                void main() {
+                #if TEX0FORMAT == \(value.expected)
+                    gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);
+                #else
+                    gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+                #endif
+                }
+                """,
+                textureData: makeRawTexture2x2(
+                    format: value.format,
+                    bytes: value.bytes
+                ),
+                baseCombos: ["TEX0FORMAT": value.authored]
+            )
+            defer { destroy(loaded) }
+
+            try render(loaded.executor)
+            XCTAssertEqual(
+                try readPixels(loaded.executor),
+                repeatedPixel([0, 255, 0, 255]),
+                "The primary raw texture format must replace an authored TEX0FORMAT value"
+            )
+        }
+    }
+
+    func testEffectPassTextureZeroFormatUsesRenderablePrimaryTexture() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            varying vec2 v_TexCoord;
+            void main() {
+            #if TEX0FORMAT == 9
+                gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);
+            #else
+                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+            #endif
+            }
+            """,
+            commandMode: .copy,
+            textureData: makeRawTexture2x2(
+                format: 9,
+                bytes: [255, 255, 255, 255]
+            ),
+            baseCombos: ["TEX0FORMAT": 8]
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255]),
+            "Effect passes must inherit TEX0FORMAT from the renderable primary texture, not their framebuffer input"
+        )
+    }
+
+    func testMagentaCompositeTintRunsBeforeColorBlendCompatibilityPass() throws {
+        let loaded = try loadFixture(
+            fragmentSource: constantGreenFragmentShader,
+            compositeTintColor: "1 0 1",
+            colorBlendMode: 7
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 255, 255]),
+            "The magenta COMPOSITE=2 tint must feed the later colorBlendMode compatibility pass"
+        )
+    }
+
     func testImageScenePlaneSurvivesPositiveNearClip() throws {
         let loaded = try loadFixture(
             fragmentSource: constantRedFragmentShader,
@@ -193,6 +273,75 @@ final class FrameExecutorPixelTests: XCTestCase {
 
         try render(loaded.executor)
         XCTAssertEqual(try readPixels(loaded.executor), repeatedPixel([255, 0, 0, 255]))
+    }
+
+    func testPuppetMeshVersionsRenderAnIndexedPartialImage() throws {
+        for version in ["MDLV0021", "MDLV0023"] {
+            let loaded = try loadFixture(
+                fragmentSource: constantRedFragmentShader,
+                puppetData: makePuppetMesh(version: version)
+            )
+            defer { destroy(loaded) }
+
+            try render(loaded.executor)
+            let pixels = try readPixels(loaded.executor)
+            let redPixels = stride(from: 0, to: pixels.count, by: 4).filter {
+                pixels[$0] == 255 && pixels[$0 + 1] == 0 &&
+                    pixels[$0 + 2] == 0 && pixels[$0 + 3] == 255
+            }
+            XCTAssertGreaterThan(redPixels.count, 0, "\(version) must draw its mesh")
+            XCTAssertLessThan(redPixels.count, 4, "\(version) must not fall back to a full quad")
+        }
+    }
+
+    func testPuppetMeshUsesTheFirstValidBlockWhenPayloadContainsAnotherBlock() throws {
+        // Linux stops at the first structurally valid MDLV block. Keep a
+        // second valid block in the payload to guard against accidentally
+        // rejecting multi-block assets as ambiguous.
+        var payload = makePuppetMesh(version: "MDLV0021")
+        payload.removeLast(4) // Remove the first block's MDLS terminator.
+        payload.append(makePuppetMesh(version: "MDLV0023"))
+
+        let loaded = try loadFixture(
+            fragmentSource: constantRedFragmentShader,
+            puppetData: payload
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        let pixels = try readPixels(loaded.executor)
+        let redPixels = stride(from: 0, to: pixels.count, by: 4).filter {
+            pixels[$0] == 255 && pixels[$0 + 1] == 0 &&
+                pixels[$0 + 2] == 0 && pixels[$0 + 3] == 255
+        }
+        XCTAssertGreaterThan(redPixels.count, 0)
+        XCTAssertLessThan(redPixels.count, 4)
+    }
+
+    func testMalformedPuppetMeshesFailDuringModelLoading() throws {
+        var truncated = makePuppetMesh()
+        truncated.removeLast(7)
+        try assertPuppetModelLoadFails(truncated, containing: "mesh block")
+
+        var badStride = makePuppetMesh()
+        replaceUInt32(79, at: 13, in: &badStride)
+        try assertPuppetModelLoadFails(badStride, containing: "mesh block")
+
+        var badIndices = makePuppetMesh()
+        replaceUInt16(9, at: badIndices.count - 6, in: &badIndices)
+        try assertPuppetModelLoadFails(badIndices, containing: "outside the mesh")
+
+        var badIndexLength = makePuppetMesh()
+        replaceUInt32(4, at: 257, in: &badIndexLength)
+        try assertPuppetModelLoadFails(badIndexLength, containing: "mesh block")
+
+        var nonFinite = makePuppetMesh()
+        replaceUInt32(0x7fc00000, at: 17, in: &nonFinite)
+        try assertPuppetModelLoadFails(nonFinite, containing: "non-finite")
+
+        var unsupported = makePuppetMesh()
+        unsupported.replaceSubrange(0..<8, with: Array("MDLV0099".utf8))
+        try assertPuppetModelLoadFails(unsupported, containing: "Unsupported puppet model header")
     }
 
     private enum CommandMode {
@@ -359,6 +508,120 @@ final class FrameExecutorPixelTests: XCTestCase {
             objectId: 1,
             operationIndex: 0,
             messageContains: ["audio", "unavailable"]
+        )
+    }
+
+    func testProvidedLinuxAudioSpectrumBindsBuiltinArray() throws {
+        let loaded = try loadFixture(fragmentSource: audioBuiltinFragmentShader)
+        defer { destroy(loaded) }
+
+        try renderWithAudioSpectrum(
+            loaded.executor,
+            spectrum16Left: [Float](repeating: 0.5, count: 16)
+        )
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([128, 0, 0, 255]),
+            "A real host-provided spectrum frame must bind the Linux audio builtin instead of using a silent fallback"
+        )
+    }
+
+    func testProvidedAudioSpectrumFlowsThroughSceneScriptIntoMaterialValue() throws {
+        let loaded = try loadFixture(
+            fragmentSource: validFragmentShader,
+            scriptedAudioAmount: true
+        )
+        defer { destroy(loaded) }
+
+        var left = [Float](repeating: 0, count: 16)
+        left[0] = 1
+        try renderWithAudioSpectrum(loaded.executor, spectrum16Left: left)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([128, 128, 0, 255]),
+            "The GL host spectrum must reach SceneGraph scripts before the material plan is built"
+        )
+    }
+
+    func testMediaSnapshotCopiesBorrowedStateAndDeduplicatesRevision() throws {
+        let loaded = try loadFixture(
+            fragmentSource: validFragmentShader,
+            scriptedMediaAmount: true
+        )
+        defer { destroy(loaded) }
+
+        try setMediaSnapshot(
+            loaded.executor,
+            revision: 1,
+            playbackState: WE_SCENE_MEDIA_PLAYING,
+            title: "Borrowed Song",
+            artist: "Borrowed Artist",
+            position: 1.25,
+            duration: 4.5,
+            hasThumbnail: true,
+            overwriteBorrowedStringsAfterSet: true
+        )
+        try render(loaded.executor, timeSeconds: 1)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255]),
+            "The bridge must copy borrowed strings and deliver all media fields to SceneScript"
+        )
+
+        try setMediaSnapshot(
+            loaded.executor,
+            revision: 1,
+            playbackState: WE_SCENE_MEDIA_STOPPED,
+            title: "Same revision must be ignored",
+            artist: "Changed",
+            position: 0,
+            duration: 0,
+            hasThumbnail: false
+        )
+        try render(loaded.executor, timeSeconds: 2)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255]),
+            "A repeated media revision must not dispatch duplicate callbacks"
+        )
+
+        try setMediaSnapshot(
+            loaded.executor,
+            revision: 2,
+            playbackState: WE_SCENE_MEDIA_PAUSED,
+            title: "Borrowed Song",
+            artist: "Borrowed Artist",
+            position: 1.25,
+            duration: 4.5,
+            hasThumbnail: true
+        )
+        try render(loaded.executor, timeSeconds: 3)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([128, 128, 0, 255]),
+            "A new paused revision must run one real script evaluation"
+        )
+    }
+
+    func testProvidedLinuxAudioSpectrumBindsHighestActiveElement() throws {
+        let loaded = try loadFixture(
+            fragmentSource: audioBuiltinLastElementFragmentShader
+        )
+        defer { destroy(loaded) }
+
+        var spectrum = [Float](repeating: 0, count: 16)
+        spectrum[15] = 0.75
+        try renderWithAudioSpectrum(
+            loaded.executor,
+            spectrum16Left: spectrum
+        )
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([191, 0, 0, 255]),
+            "The complete host spectrum must be available when a shader activates the final array element"
         )
     }
 
@@ -1456,27 +1719,21 @@ final class FrameExecutorPixelTests: XCTestCase {
 
         try render(loaded.executor)
         let pixels = try readPixels(loaded.executor)
-        XCTAssertTrue(pixels.enumerated().contains { index, value in
-            index % 4 == 3 && value > 0
+        XCTAssertTrue(stride(from: 0, to: pixels.count, by: 4).contains { offset in
+            pixels[offset] > 0
         })
     }
 
-    func testUnsupportedSystemFontSkipsTextObjectAndLeavesOpaqueSceneClear() throws {
+    func testUnknownSystemFontIdentifierFallsBackToRenderableSystemFont() throws {
         let loaded = try loadTextFixture(font: "systemfont_not_real")
         defer { destroy(loaded) }
 
         try render(loaded.executor)
-        XCTAssertEqual(
-            try readPixels(loaded.executor),
-            repeatedPixel([0, 0, 0, 255], count: 64 * 64)
-        )
-        try assertSingleSkippedObjectIssue(
-            loaded.executor,
-            objectIndex: 0,
-            objectId: 1,
-            operationIndex: 0,
-            messageContains: ["Unsupported system font identifier"]
-        )
+        try assertNoExecutorIssues(loaded.executor)
+        let pixels = try readPixels(loaded.executor)
+        XCTAssertTrue(stride(from: 0, to: pixels.count, by: 4).contains { offset in
+            pixels[offset] > 0
+        })
     }
 
     func testAnimatedTextureUsesImageFramesAndFixedSHARightClosedBoundaries() throws {
@@ -1528,6 +1785,42 @@ final class FrameExecutorPixelTests: XCTestCase {
 
         try render(loaded.executor, timeSeconds: 0.5)
         XCTAssertEqual(try readPixels(loaded.executor), repeatedPixel([0, 255, 0, 255]))
+    }
+
+    func testSceneScriptTextureAnimationFrameControlsImageSource() throws {
+        let texture = makeAnimatedRGBA8Texture2x2(
+            images: [
+                Array(repeating: [UInt8](arrayLiteral: 255, 0, 0, 255), count: 4).flatMap { $0 },
+                Array(repeating: [UInt8](arrayLiteral: 0, 0, 255, 255), count: 4).flatMap { $0 },
+            ],
+            frames: [
+                (image: 0, duration: 0.5, x: 0, y: 0, width: 2, widthAux: 0, heightAux: 0, height: 2),
+                (image: 1, duration: 0.5, x: 0, y: 0, width: 2, widthAux: 0, heightAux: 0, height: 2),
+            ]
+        )
+        let loaded = try loadFixture(
+            fragmentSource: textureOnlyFragmentShader,
+            textureData: texture,
+            vertexSource: animatedVertexShader,
+            textureAnimationScript: """
+            const animation = thisLayer.getTextureAnimation();
+            export function init() {
+                animation.stop();
+                animation.setFrame(1);
+            }
+            export function update(value) {
+                if (thisScene.runtime >= 1) animation.join();
+                return value;
+            }
+            """
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, timeSeconds: 0)
+        XCTAssertEqual(try readPixels(loaded.executor), repeatedPixel([0, 0, 255, 255]))
+        try render(loaded.executor, timeSeconds: 1.1)
+        XCTAssertEqual(try readPixels(loaded.executor), repeatedPixel([255, 0, 0, 255]))
+        try assertNoExecutorIssues(loaded.executor)
     }
 
     func testStaticTextureClearsAnimationUniformsFromEarlierDraw() throws {
@@ -1693,6 +1986,13 @@ final class FrameExecutorPixelTests: XCTestCase {
         """
     }
 
+    private var constantGreenFragmentShader: String {
+        """
+        varying vec2 v_TexCoord;
+        void main() { gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0); }
+        """
+    }
+
     private var pointerContractFragmentShader: String {
         """
         uniform vec2 g_PointerPosition;
@@ -1822,6 +2122,16 @@ final class FrameExecutorPixelTests: XCTestCase {
         """
     }
 
+    private var audioBuiltinLastElementFragmentShader: String {
+        """
+        uniform float g_AudioSpectrum16Left[16];
+        varying vec2 v_TexCoord;
+        void main() {
+            gl_FragColor = vec4(g_AudioSpectrum16Left[15], 0.0, 0.0, 1.0);
+        }
+        """
+    }
+
     private var imageAngleContractFragmentShader: String {
         """
         uniform mat4 g_ModelViewProjectionMatrix;
@@ -1873,6 +2183,9 @@ final class FrameExecutorPixelTests: XCTestCase {
         fragmentSource: String,
         commandMode: CommandMode? = nil,
         textureData: Data? = nil,
+        baseCombos: [String: Int] = [:],
+        compositeTintColor: String? = nil,
+        colorBlendMode: Int = 0,
         vertexSource: String? = nil,
         parallax: Bool = false,
         cameraCenter: String = "0 0 -1",
@@ -1895,12 +2208,19 @@ final class FrameExecutorPixelTests: XCTestCase {
         includeUnboundGreenTexture: Bool = false,
         includeHealthySecondImage: Bool = false,
         includeStaticSecondImageSameShader: Bool = false,
-        nearPlane: Double = 0
+        nearPlane: Double = 0,
+        puppetData: Data? = nil,
+        scriptedAudioAmount: Bool = false,
+        scriptedMediaAmount: Bool = false,
+        textureAnimationScript: String? = nil
     ) throws -> RuntimePipeline {
         let fixture = try makeFixture(
             fragmentSource: fragmentSource,
             commandMode: commandMode,
             textureData: textureData,
+            baseCombos: baseCombos,
+            compositeTintColor: compositeTintColor,
+            colorBlendMode: colorBlendMode,
             vertexSource: vertexSource,
             parallax: parallax,
             cameraCenter: cameraCenter,
@@ -1923,7 +2243,11 @@ final class FrameExecutorPixelTests: XCTestCase {
             includeUnboundGreenTexture: includeUnboundGreenTexture,
             includeHealthySecondImage: includeHealthySecondImage,
             includeStaticSecondImageSameShader: includeStaticSecondImageSameShader,
-            nearPlane: nearPlane
+            nearPlane: nearPlane,
+            puppetData: puppetData,
+            scriptedAudioAmount: scriptedAudioAmount,
+            scriptedMediaAmount: scriptedMediaAmount,
+            textureAnimationScript: textureAnimationScript
         )
         do {
             var error: WESceneRuntimeErrorRef?
@@ -2082,6 +2406,161 @@ final class FrameExecutorPixelTests: XCTestCase {
             throw failure("render", error)
         }
         XCTAssertNil(error)
+    }
+
+    private func setMediaSnapshot(
+        _ executor: WESceneFrameExecutorRef,
+        revision: UInt64,
+        playbackState: WESceneMediaPlaybackState,
+        title: String,
+        artist: String,
+        position: Double,
+        duration: Double,
+        hasThumbnail: Bool,
+        overwriteBorrowedStringsAfterSet: Bool = false
+    ) throws {
+        let values = [
+            title,
+            artist,
+            "music",
+            "Borrowed Album",
+            "Borrowed Subtitle",
+            "Borrowed Album Artist",
+            "test",
+        ]
+        var strings: [UnsafeMutablePointer<CChar>] = []
+        defer {
+            for pointer in strings { free(pointer) }
+        }
+        for value in values {
+            guard let pointer = strdup(value) else {
+                throw NSError(
+                    domain: "FrameExecutorPixelTests",
+                    code: 1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Allocating media snapshot test input failed",
+                    ]
+                )
+            }
+            strings.append(pointer)
+        }
+
+        var snapshot = WESceneMediaSnapshot(
+            revision: revision,
+            available: 1,
+            playback_state: playbackState,
+            title: UnsafePointer(strings[0]),
+            artist: UnsafePointer(strings[1]),
+            content_type: UnsafePointer(strings[2]),
+            album_title: UnsafePointer(strings[3]),
+            sub_title: UnsafePointer(strings[4]),
+            album_artist: UnsafePointer(strings[5]),
+            genres: UnsafePointer(strings[6]),
+            position: position,
+            duration: duration,
+            has_thumbnail: hasThumbnail ? 1 : 0,
+            primary_color: (0.1, 0.2, 0.3),
+            secondary_color: (0.2, 0.4, 0.6),
+            tertiary_color: (0.3, 0.5, 0.7),
+            text_color: (0.4, 0.5, 0.6),
+            high_contrast_color: (1, 1, 1)
+        )
+        var error: WESceneRuntimeErrorRef?
+        guard we_scene_frame_executor_set_media_snapshot(
+            executor, &snapshot, &error
+        ) == 1 else {
+            throw failure("media snapshot", error)
+        }
+        XCTAssertNil(error)
+
+        if overwriteBorrowedStringsAfterSet {
+            for pointer in strings {
+                for index in 0..<strlen(pointer) {
+                    pointer[index] = 88
+                }
+            }
+        }
+    }
+
+    private func renderWithAudioSpectrum(
+        _ executor: WESceneFrameExecutorRef,
+        spectrum16Left: [Float]
+    ) throws {
+        XCTAssertEqual(spectrum16Left.count, 16)
+        let spectrum16Right = [Float](repeating: 0, count: 16)
+        let spectrum32Left = [Float](repeating: 0, count: 32)
+        let spectrum32Right = [Float](repeating: 0, count: 32)
+        let spectrum64Left = [Float](repeating: 0, count: 64)
+        let spectrum64Right = [Float](repeating: 0, count: 64)
+        var error: WESceneRuntimeErrorRef?
+        var inputs = WESceneFrameInputs(
+            pointer_x: 0.5,
+            pointer_y: 0.5,
+            time_seconds: 1.25,
+            frame_time_seconds: 1.0 / 60.0
+        )
+        let result = spectrum16Left.withUnsafeBufferPointer { left16 in
+            spectrum16Right.withUnsafeBufferPointer { right16 in
+                spectrum32Left.withUnsafeBufferPointer { left32 in
+                    spectrum32Right.withUnsafeBufferPointer { right32 in
+                        spectrum64Left.withUnsafeBufferPointer { left64 in
+                            spectrum64Right.withUnsafeBufferPointer { right64 in
+                                var audio = WESceneAudioSpectrumInputs(
+                                    spectrum_16_left: left16.baseAddress,
+                                    spectrum_16_right: right16.baseAddress,
+                                    spectrum_32_left: left32.baseAddress,
+                                    spectrum_32_right: right32.baseAddress,
+                                    spectrum_64_left: left64.baseAddress,
+                                    spectrum_64_right: right64.baseAddress
+                                )
+                                return we_scene_frame_executor_render_with_audio_spectrum(
+                                    executor, &inputs, &audio, &error
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        guard result == 1 else { throw failure("audio spectrum render", error) }
+        XCTAssertNil(error)
+    }
+
+    private func assertPuppetModelLoadFails(
+        _ puppetData: Data,
+        containing expectedMessage: String
+    ) throws {
+        let fixture = try makeFixture(
+            fragmentSource: constantRedFragmentShader,
+            puppetData: puppetData
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        var error: WESceneRuntimeErrorRef?
+        guard let runtime = fixture.assets.path.withCString({ assetsPath in
+            fixture.package.path.withCString { packagePath in
+                var configuration = WESceneRuntimeConfiguration(
+                    assets_directory: assetsPath,
+                    scene_package_path: packagePath
+                )
+                return we_scene_runtime_create(&configuration, &error)
+            }
+        }) else {
+            throw failure("runtime", error)
+        }
+        defer { we_scene_runtime_destroy(runtime) }
+
+        let model = "project.json".withCString {
+            we_scene_runtime_model_create(runtime, $0, &error)
+        }
+        XCTAssertNil(model)
+        XCTAssertEqual(
+            we_scene_runtime_error_code(error),
+            WE_SCENE_RUNTIME_ERROR_SCENE_ASSET_FAILURE
+        )
+        XCTAssertTrue(errorMessage(error).contains(expectedMessage))
+        we_scene_runtime_error_destroy(error)
     }
 
     private func readPixels(_ executor: WESceneFrameExecutorRef) throws -> [UInt8] {
@@ -2285,6 +2764,9 @@ final class FrameExecutorPixelTests: XCTestCase {
         fragmentSource: String,
         commandMode: CommandMode? = nil,
         textureData: Data? = nil,
+        baseCombos: [String: Int] = [:],
+        compositeTintColor: String? = nil,
+        colorBlendMode: Int = 0,
         vertexSource: String? = nil,
         parallax: Bool = false,
         cameraCenter: String = "0 0 -1",
@@ -2307,7 +2789,11 @@ final class FrameExecutorPixelTests: XCTestCase {
         includeUnboundGreenTexture: Bool = false,
         includeHealthySecondImage: Bool = false,
         includeStaticSecondImageSameShader: Bool = false,
-        nearPlane: Double = 0
+        nearPlane: Double = 0,
+        puppetData: Data? = nil,
+        scriptedAudioAmount: Bool = false,
+        scriptedMediaAmount: Bool = false,
+        textureAnimationScript: String? = nil
     ) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -2379,6 +2865,54 @@ final class FrameExecutorPixelTests: XCTestCase {
         try Data(vertexShader.utf8).write(
             to: shaders.appendingPathComponent("broken.vert")
         )
+        if compositeTintColor != nil {
+            for name in ["composite-effect", "composite-tint", "composite-blend"] {
+                try Data(vertexShader.utf8).write(
+                    to: shaders.appendingPathComponent("\(name).vert")
+                )
+            }
+            try Data(constantGreenFragmentShader.utf8).write(
+                to: shaders.appendingPathComponent("composite-effect.frag")
+            )
+            try Data("""
+            uniform sampler2D g_Texture0;
+            uniform vec3 g_TintColor; // {"material":"color"}
+            uniform float g_TintAlpha; // {"material":"alpha"}
+            varying vec2 v_TexCoord;
+            void main() {
+            #if BLENDMODE == 30
+                bool constantsAreLinuxValues = all(greaterThan(
+                    g_TintColor, vec3(0.99, -0.01, 0.99)
+                )) && g_TintColor.g < 0.01 && g_TintAlpha > 0.99;
+                gl_FragColor = constantsAreLinuxValues
+                    ? vec4(g_TintColor, 1.0)
+                    : vec4(1.0, 0.0, 0.0, 1.0);
+            #else
+                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+            #endif
+            }
+            """.utf8).write(
+                to: shaders.appendingPathComponent("composite-tint.frag")
+            )
+            try Data("""
+            uniform sampler2D g_Texture0;
+            varying vec2 v_TexCoord;
+            void main() {
+                vec4 inputColor = texture(g_Texture0, v_TexCoord);
+            #if BLENDMODE == 7
+                bool tintRanFirst = inputColor.r > 0.99
+                    && inputColor.g < 0.01 && inputColor.b > 0.99;
+                gl_FragColor = tintRanFirst
+                    ? vec4(0.0, 1.0, 1.0, 1.0)
+                    : vec4(1.0, 0.0, 0.0, 1.0);
+            #else
+                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+            #endif
+            }
+            """.utf8).write(
+                to: shaders.appendingPathComponent("composite-blend.frag")
+            )
+        }
 
         var properties: [String: Any] = [
             "amount": [
@@ -2426,6 +2960,28 @@ final class FrameExecutorPixelTests: XCTestCase {
             "size": imageSize ?? "2 2",
             "visible": true,
         ]
+        if let textureAnimationScript {
+            image["origin"] = [
+                "value": imageOrigin ?? defaultOrigin,
+                "script": textureAnimationScript,
+            ]
+        }
+        if colorBlendMode > 0 {
+            image["colorBlendMode"] = colorBlendMode
+        }
+        if let compositeTintColor {
+            image["effects"] = [[
+                "file": "effects/composite/effect.json",
+                "id": 70,
+                "passes": [[
+                    "combos": ["COMPOSITE": 2],
+                    "constantshadervalues": [
+                        "compositecolor": compositeTintColor,
+                    ],
+                ]],
+                "visible": true,
+            ]]
+        }
         if let imageAngles {
             image["angles"] = imageAngles
         }
@@ -2558,16 +3114,86 @@ final class FrameExecutorPixelTests: XCTestCase {
             "objects": objects,
             "version": 1,
         ]
+        let amountValue: Any
+        if scriptedAudioAmount {
+            amountValue = [
+                "value": 0.0,
+                "script": """
+                const audio = engine.registerAudioBuffers(16);
+                export function update(value) { return audio.average[0]; }
+                """,
+            ]
+        } else if scriptedMediaAmount {
+            amountValue = [
+                "value": 0.0,
+                "script": """
+                let enabled = false;
+                let propertiesValid = false;
+                let playbackState = MediaPlaybackEvent.PLAYBACK_STOPPED;
+                let timelineValid = false;
+                let thumbnailValid = false;
+
+                export function mediaStatusChanged(event) {
+                    enabled = event.enabled;
+                }
+                export function mediaPropertiesChanged(event) {
+                    propertiesValid = event.title === 'Borrowed Song'
+                        && event.artist === 'Borrowed Artist'
+                        && event.contentType === 'music'
+                        && event.albumTitle === 'Borrowed Album'
+                        && event.subTitle === 'Borrowed Subtitle'
+                        && event.albumArtist === 'Borrowed Album Artist'
+                        && event.genres === 'test';
+                }
+                export function mediaPlaybackChanged(event) {
+                    playbackState = event.state;
+                }
+                export function mediaTimelineChanged(event) {
+                    timelineValid = event.position === 1.25
+                        && event.duration === 4.5;
+                }
+                export function mediaThumbnailChanged(event) {
+                    thumbnailValid = event.hasThumbnail === true
+                        && event.primaryColor instanceof Vec3
+                        && event.secondaryColor instanceof Vec3
+                        && event.tertiaryColor instanceof Vec3
+                        && event.textColor instanceof Vec3
+                        && event.highContrastColor instanceof Vec3
+                        && event.primaryColor.x === 0.1
+                        && event.secondaryColor.y === 0.4
+                        && event.tertiaryColor.z === 0.7
+                        && event.textColor.x === 0.4
+                        && event.highContrastColor.z === 1.0;
+                }
+                export function update(value) {
+                    if (!enabled || !propertiesValid || !timelineValid
+                        || !thumbnailValid) return 0.0;
+                    if (playbackState === MediaPlaybackEvent.PLAYBACK_PLAYING) {
+                        return 1.0;
+                    }
+                    if (playbackState === MediaPlaybackEvent.PLAYBACK_PAUSED) {
+                        return 0.5;
+                    }
+                    return 0.0;
+                }
+                """,
+            ]
+        } else {
+            amountValue = ["user": "amount", "value": 0.0]
+        }
         var basePass: [String: Any] = [
                 "blending": "normal",
                 "constantshadervalues": [
-                    "amount": ["user": "amount", "value": 0.0],
+                    "amount": amountValue,
                 ],
                 "cullmode": "nocull",
                 "depthtest": "disabled",
                 "depthwrite": "disabled",
                 "shader": "pixel",
         ]
+        if !baseCombos.isEmpty {
+            basePass["combos"] = baseCombos
+        }
         if commandMode != .proceduralClear {
             basePass["textures"] = includeSecondTexture ? ["red", "green"] : ["red"]
         }
@@ -2575,6 +3201,9 @@ final class FrameExecutorPixelTests: XCTestCase {
             "passes": [basePass],
         ]
         var model: [String: Any] = ["material": "materials/pixel.json"]
+        if puppetData != nil {
+            model["puppet"] = "models/pixel.mdl"
+        }
         if commandMode == .proceduralClear {
             model["solidlayer"] = true
         }
@@ -2588,6 +3217,9 @@ final class FrameExecutorPixelTests: XCTestCase {
             ("project.json", try json(project)),
             ("scene.json", try json(scene)),
         ]
+        if let puppetData {
+            entries.append(("models/pixel.mdl", puppetData))
+        }
         if includeHealthySecondImage {
             entries.append(contentsOf: [
                 ("materials/healthy.json", try json([
@@ -2712,6 +3344,41 @@ final class FrameExecutorPixelTests: XCTestCase {
                 ])
             }
         }
+        if compositeTintColor != nil {
+            let compatibilityMaterial: (String) -> [String: Any] = { shader in
+                ["passes": [[
+                    "blending": "normal",
+                    "cullmode": "nocull",
+                    "depthtest": "disabled",
+                    "depthwrite": "disabled",
+                    "shader": shader,
+                ]]]
+            }
+            entries.append(contentsOf: [
+                (
+                    "effects/composite/effect.json",
+                    try json([
+                        "fbos": [],
+                        "passes": [[
+                            "material": "materials/composite-effect.json",
+                        ]],
+                        "version": 1,
+                    ])
+                ),
+                (
+                    "materials/composite-effect.json",
+                    try json(compatibilityMaterial("composite-effect"))
+                ),
+                (
+                    "materials/effects/tint.json",
+                    try json(compatibilityMaterial("composite-tint"))
+                ),
+                (
+                    "materials/util/effectpassthrough.json",
+                    try json(compatibilityMaterial("composite-blend"))
+                ),
+            ])
+        }
         try makePackage(entries).write(to: package)
         return Fixture(root: root, assets: assets, package: package)
     }
@@ -2728,6 +3395,33 @@ final class FrameExecutorPixelTests: XCTestCase {
         appendMagic("TEXI0001", to: &result)
         appendUInt32(0, to: &result) // ARGB8888, uploaded as WE's RGBA byte layout.
         appendUInt32(1, to: &result) // No interpolation, for exact pixel assertions.
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(0, to: &result)
+        appendMagic("TEXB0003", to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(UInt32.max, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(UInt32(bytes.count), to: &result)
+        appendUInt32(UInt32(bytes.count), to: &result)
+        result.append(contentsOf: bytes)
+        return result
+    }
+
+    private func makeRawTexture2x2(format: UInt32, bytes: [UInt8]) -> Data {
+        precondition(format == 8 || format == 9)
+        let expectedByteCount = format == 8 ? 8 : 4
+        precondition(bytes.count == expectedByteCount)
+        var result = Data()
+        appendMagic("TEXV0005", to: &result)
+        appendMagic("TEXI0001", to: &result)
+        appendUInt32(format, to: &result)
+        appendUInt32(1, to: &result)
         appendUInt32(2, to: &result)
         appendUInt32(2, to: &result)
         appendUInt32(2, to: &result)
@@ -2829,6 +3523,35 @@ final class FrameExecutorPixelTests: XCTestCase {
         return result
     }
 
+    private func makePuppetMesh(version: String = "MDLV0021") -> Data {
+        precondition(version == "MDLV0021" || version == "MDLV0023")
+        let vertices: [(Float, Float, Float, Float, Float)] = [
+            (-1, 1, 0, 0, 0),
+            (1, 1, 0, 1, 0),
+            (-1, -1, 0, 0, 1),
+        ]
+        var result = Data(version.utf8)
+        result.append(0)
+        appendUInt32(0, to: &result)
+        appendUInt32(UInt32(vertices.count * 80), to: &result)
+        for (x, y, z, u, v) in vertices {
+            let start = result.count
+            appendFloat32(x, to: &result)
+            appendFloat32(y, to: &result)
+            appendFloat32(z, to: &result)
+            result.append(Data(repeating: 0, count: 60))
+            appendFloat32(u, to: &result)
+            appendFloat32(v, to: &result)
+            precondition(result.count - start == 80)
+        }
+        appendUInt32(6, to: &result)
+        appendUInt16(0, to: &result)
+        appendUInt16(1, to: &result)
+        appendUInt16(2, to: &result)
+        result.append(contentsOf: Array("MDLS".utf8))
+        return result
+    }
+
     private func makePackage(_ entries: [(String, Data)]) -> Data {
         var table = Data()
         var payload = Data()
@@ -2854,6 +3577,11 @@ final class FrameExecutorPixelTests: XCTestCase {
         data.append(0)
     }
 
+    private func appendUInt16(_ value: UInt16, to data: inout Data) {
+        data.append(UInt8(truncatingIfNeeded: value))
+        data.append(UInt8(truncatingIfNeeded: value >> 8))
+    }
+
     private func appendUInt32(_ value: UInt32, to data: inout Data) {
         data.append(UInt8(truncatingIfNeeded: value))
         data.append(UInt8(truncatingIfNeeded: value >> 8))
@@ -2863,6 +3591,18 @@ final class FrameExecutorPixelTests: XCTestCase {
 
     private func appendFloat32(_ value: Float, to data: inout Data) {
         appendUInt32(value.bitPattern, to: &data)
+    }
+
+    private func replaceUInt32(_ value: UInt32, at offset: Int, in data: inout Data) {
+        var encoded = Data()
+        appendUInt32(value, to: &encoded)
+        data.replaceSubrange(offset..<(offset + 4), with: encoded)
+    }
+
+    private func replaceUInt16(_ value: UInt16, at offset: Int, in data: inout Data) {
+        var encoded = Data()
+        appendUInt16(value, to: &encoded)
+        data.replaceSubrange(offset..<(offset + 2), with: encoded)
     }
 
     private func pointerContractPixel(_ pointer: (x: Double, y: Double)) -> [UInt8] {

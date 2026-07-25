@@ -1,12 +1,268 @@
 import Cocoa
 import OpenGL.GL3
 import SceneAudio
+import SceneRuntimeBridge
 import SwiftUI
+
+enum ScenePresentationLayoutError: LocalizedError {
+    case invalid(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalid(let message): return message
+        }
+    }
+}
+
+/// Presentation geometry shared by all Scene windows participating in one
+/// virtual desktop. Coordinates are bottom-left-origin pixels at a common
+/// reference scale; each window supplies its actual drawable backing size.
+struct ScenePresentationLayout: Equatable {
+    let spanAcrossScreens: Bool
+    let scaling: GSScenePresentationScaling
+    let canvasWidth: UInt32
+    let canvasHeight: UInt32
+    let viewportX: UInt32
+    let viewportY: UInt32
+    let viewportWidth: UInt32
+    let viewportHeight: UInt32
+    let validationError: String?
+
+    init(
+        spanAcrossScreens: Bool,
+        scaling: GSScenePresentationScaling,
+        canvasWidth: UInt32,
+        canvasHeight: UInt32,
+        viewportX: UInt32,
+        viewportY: UInt32,
+        viewportWidth: UInt32,
+        viewportHeight: UInt32,
+        validationError: String? = nil
+    ) {
+        self.spanAcrossScreens = spanAcrossScreens
+        self.scaling = scaling
+        self.canvasWidth = canvasWidth
+        self.canvasHeight = canvasHeight
+        self.viewportX = viewportX
+        self.viewportY = viewportY
+        self.viewportWidth = viewportWidth
+        self.viewportHeight = viewportHeight
+        self.validationError = validationError
+    }
+
+    @MainActor
+    static func forScreen(
+        _ screenId: String,
+        wallpaper: WEWallpaper,
+        spanAcrossScreens: Bool,
+        scaling: GSScenePresentationScaling,
+        wallpaperViewModel: WallpaperViewModel
+    ) -> ScenePresentationLayout {
+        guard spanAcrossScreens else {
+            return ScenePresentationLayout(
+                spanAcrossScreens: false,
+                scaling: scaling,
+                canvasWidth: 0,
+                canvasHeight: 0,
+                viewportX: 0,
+                viewportY: 0,
+                viewportWidth: 0,
+                viewportHeight: 0
+            )
+        }
+        guard let screen = NSScreen.screens.first(where: {
+            WallpaperViewModel.screenId(for: $0) == screenId
+        }) else {
+            return invalidSpan(
+                scaling: scaling,
+                message: "Scene span layout cannot find display \(screenId)"
+            )
+        }
+
+        let identity = wallpaper.scenePropertyIdentity
+        let enabledIds = wallpaperViewModel.enabledScreens
+        let screens = NSScreen.screens.filter { candidate in
+            let candidateId = WallpaperViewModel.screenId(for: candidate)
+            guard enabledIds.contains(candidateId),
+                  wallpaperViewModel.wallpaper(for: candidateId)
+                      .scenePropertyIdentity == identity else { return false }
+            return true
+        }
+        guard !screens.isEmpty else {
+            return invalidSpan(
+                scaling: scaling,
+                message: "Scene span layout has no enabled display for the current Scene"
+            )
+        }
+        let referenceScale = screens
+            .map(\.backingScaleFactor)
+            .max() ?? screen.backingScaleFactor
+        guard referenceScale.isFinite, referenceScale > 0 else {
+            return invalidSpan(
+                scaling: scaling,
+                message: "Scene span layout has an invalid display scale"
+            )
+        }
+        let union = screens
+            .map(\.frame)
+            .reduce(screens[0].frame) { $0.union($1) }
+
+        let canvasMinX = floor(union.minX * referenceScale)
+        let canvasMinY = floor(union.minY * referenceScale)
+        let canvasMaxX = ceil(union.maxX * referenceScale)
+        let canvasMaxY = ceil(union.maxY * referenceScale)
+        let screenMinX = floor(screen.frame.minX * referenceScale)
+        let screenMinY = floor(screen.frame.minY * referenceScale)
+        let screenMaxX = ceil(screen.frame.maxX * referenceScale)
+        let screenMaxY = ceil(screen.frame.maxY * referenceScale)
+
+        do {
+            let canvasWidth = try checkedDimension(
+                canvasMaxX - canvasMinX,
+                field: "virtual canvas width"
+            )
+            let canvasHeight = try checkedDimension(
+                canvasMaxY - canvasMinY,
+                field: "virtual canvas height"
+            )
+            let viewportX = try checkedOffset(
+                screenMinX - canvasMinX,
+                field: "viewport x"
+            )
+            let viewportY = try checkedOffset(
+                screenMinY - canvasMinY,
+                field: "viewport y"
+            )
+            let viewportWidth = try checkedDimension(
+                screenMaxX - screenMinX,
+                field: "viewport width"
+            )
+            let viewportHeight = try checkedDimension(
+                screenMaxY - screenMinY,
+                field: "viewport height"
+            )
+            guard UInt64(viewportX) + UInt64(viewportWidth) <= UInt64(canvasWidth),
+                  UInt64(viewportY) + UInt64(viewportHeight) <= UInt64(canvasHeight) else {
+                throw ScenePresentationLayoutError.invalid(
+                    "Scene span viewport lies outside the virtual canvas"
+                )
+            }
+            return ScenePresentationLayout(
+                spanAcrossScreens: true,
+                scaling: scaling,
+                canvasWidth: canvasWidth,
+                canvasHeight: canvasHeight,
+                viewportX: viewportX,
+                viewportY: viewportY,
+                viewportWidth: viewportWidth,
+                viewportHeight: viewportHeight
+            )
+        } catch {
+            return invalidSpan(
+                scaling: scaling,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private static func checkedDimension(
+        _ value: CGFloat,
+        field: String
+    ) throws -> UInt32 {
+        try checkedInteger(value, field: field, minimum: 1)
+    }
+
+    private static func checkedOffset(
+        _ value: CGFloat,
+        field: String
+    ) throws -> UInt32 {
+        try checkedInteger(value, field: field, minimum: 0)
+    }
+
+    private static func checkedInteger(
+        _ value: CGFloat,
+        field: String,
+        minimum: CGFloat
+    ) throws -> UInt32 {
+        let integer = value.rounded(.towardZero)
+        guard value.isFinite,
+              integer >= minimum,
+              integer <= CGFloat(Int32.max) else {
+            throw ScenePresentationLayoutError.invalid(
+                "Scene span \(field) is outside the supported OpenGL range: \(value)"
+            )
+        }
+        return UInt32(integer)
+    }
+
+    private static func invalidSpan(
+        scaling: GSScenePresentationScaling,
+        message: String
+    ) -> ScenePresentationLayout {
+        ScenePresentationLayout(
+            spanAcrossScreens: true,
+            scaling: scaling,
+            canvasWidth: 0,
+            canvasHeight: 0,
+            viewportX: 0,
+            viewportY: 0,
+            viewportWidth: 0,
+            viewportHeight: 0,
+            validationError: message
+        )
+    }
+
+    var bridgeScaling: WEScenePresentationScaling {
+        switch scaling {
+        case .stretch: return WE_SCENE_PRESENTATION_STRETCH
+        case .aspectFit: return WE_SCENE_PRESENTATION_ASPECT_FIT
+        case .aspectFill: return WE_SCENE_PRESENTATION_ASPECT_FILL
+        }
+    }
+
+    func viewport(
+        drawableWidth: UInt32,
+        drawableHeight: UInt32
+    ) throws -> WEScenePresentationViewport? {
+        if let validationError {
+            throw ScenePresentationLayoutError.invalid(validationError)
+        }
+        guard spanAcrossScreens else { return nil }
+        return WEScenePresentationViewport(
+            virtual_canvas_width: canvasWidth,
+            virtual_canvas_height: canvasHeight,
+            viewport_x: viewportX,
+            viewport_y: viewportY,
+            viewport_width: viewportWidth,
+            viewport_height: viewportHeight,
+            drawable_width: drawableWidth,
+            drawable_height: drawableHeight
+        )
+    }
+}
+
+/// Span-mode Scene views use one monotonic origin and one FPS-aligned time grid.
+/// Per-screen presentation retains its independent accumulated runtime.
+final class ScenePresentationClock {
+    static let shared = ScenePresentationClock()
+    private let origin = ProcessInfo.processInfo.systemUptime
+
+    private init() {}
+
+    func seconds(
+        at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime,
+        framesPerSecond: Double
+    ) -> Double {
+        let elapsed = max(0, uptime - origin)
+        return floor(elapsed * framesPerSecond) / framesPerSecond
+    }
+}
 
 struct SceneWallpaperView: View {
     @ObservedObject var wallpaperViewModel: WallpaperViewModel
     @ObservedObject private var globalSettingsViewModel: GlobalSettingsViewModel
     @ObservedObject private var audioOwnerCoordinator: SceneAudioOwnerCoordinator
+    @ObservedObject private var mediaSnapshotProvider: SceneMediaSnapshotProvider
     let screenId: String
     @State private var errorMessage: String?
 
@@ -15,18 +271,28 @@ struct SceneWallpaperView: View {
         self.screenId = screenId
         globalSettingsViewModel = AppDelegate.shared.globalSettingsViewModel
         audioOwnerCoordinator = AppDelegate.shared.sceneAudioOwnerCoordinator
+        mediaSnapshotProvider = AppDelegate.shared.sceneMediaSnapshotProvider
     }
 
     var body: some View {
         let wallpaper = wallpaperViewModel.wallpaper(for: screenId)
+        let presentation = ScenePresentationLayout.forScreen(
+            screenId,
+            wallpaper: wallpaper,
+            spanAcrossScreens: globalSettingsViewModel.settings.sceneSpanAcrossScreens,
+            scaling: globalSettingsViewModel.settings.scenePresentationScaling,
+            wallpaperViewModel: wallpaperViewModel
+        )
         ZStack {
             SceneOpenGLRepresentable(
                 wallpaper: wallpaper,
-                paused: wallpaperViewModel.playRate == 0,
+                presentation: presentation,
+                paused: wallpaperViewModel.effectivePlayRate == 0,
                 framesPerSecond: globalSettingsViewModel.settings.fps,
-                masterVolume: wallpaperViewModel.playVolume,
+                masterVolume: wallpaperViewModel.effectivePlayVolume,
                 audioOutputEnabled: globalSettingsViewModel.settings.audioOutput,
                 isAudibleOwner: audioOwnerCoordinator.isAudible(screenId: screenId),
+                mediaSnapshot: mediaSnapshotProvider.snapshot,
                 assetsDirectory: resolvedAssetsDirectory,
                 propertyOverrides: wallpaperViewModel.scenePropertyOverrides(
                     for: screenId,
@@ -83,11 +349,13 @@ struct SceneWallpaperView: View {
 
 private struct SceneOpenGLRepresentable: NSViewRepresentable {
     let wallpaper: WEWallpaper
+    let presentation: ScenePresentationLayout
     let paused: Bool
     let framesPerSecond: Double
     let masterVolume: Float
     let audioOutputEnabled: Bool
     let isAudibleOwner: Bool
+    let mediaSnapshot: SceneMediaProviderSnapshot
     let assetsDirectory: String?
     let propertyOverrides: [String: ScenePropertyValue]
     let onPropertiesLoaded: ([ScenePropertyDefinition]?) -> Void
@@ -108,12 +376,14 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
             assetsDirectory: assetsDirectory,
             propertyOverrides: propertyOverrides
         )
+        view.setPresentation(presentation)
         view.setPaused(paused)
         view.setAudioConfiguration(
             masterVolume: masterVolume,
             audioOutputEnabled: audioOutputEnabled,
             isAudibleOwner: isAudibleOwner
         )
+        view.setMediaSnapshot(mediaSnapshot)
         view.setFramesPerSecond(framesPerSecond)
         return view
     }
@@ -131,12 +401,14 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
             assetsDirectory: assetsDirectory,
             propertyOverrides: propertyOverrides
         )
+        view.setPresentation(presentation)
         view.setPaused(paused)
         view.setAudioConfiguration(
             masterVolume: masterVolume,
             audioOutputEnabled: audioOutputEnabled,
             isAudibleOwner: isAudibleOwner
         )
+        view.setMediaSnapshot(mediaSnapshot)
         view.setFramesPerSecond(framesPerSecond)
     }
 
@@ -199,6 +471,10 @@ private final class SceneOpenGLContainerView: NSView {
 
     func setPaused(_ value: Bool) { openGLView?.setPaused(value) }
 
+    func setPresentation(_ value: ScenePresentationLayout) {
+        openGLView?.setPresentation(value)
+    }
+
     func setAudioConfiguration(
         masterVolume: Float,
         audioOutputEnabled: Bool,
@@ -209,6 +485,10 @@ private final class SceneOpenGLContainerView: NSView {
             audioOutputEnabled: audioOutputEnabled,
             isAudibleOwner: isAudibleOwner
         )
+    }
+
+    func setMediaSnapshot(_ value: SceneMediaProviderSnapshot) {
+        openGLView?.setMediaSnapshot(value)
     }
 
     func setFramesPerSecond(_ value: Double) { openGLView?.setFramesPerSecond(value) }
@@ -236,6 +516,16 @@ private final class SceneOpenGLView: NSOpenGLView {
     private var activeIdentity: SessionIdentity?
     private var attemptedIdentity: SessionIdentity?
     private var requestedPropertyOverrides: [String: ScenePropertyValue] = [:]
+    private var presentation = ScenePresentationLayout(
+        spanAcrossScreens: false,
+        scaling: .aspectFill,
+        canvasWidth: 0,
+        canvasHeight: 0,
+        viewportX: 0,
+        viewportY: 0,
+        viewportWidth: 0,
+        viewportHeight: 0
+    )
     private var propertyConfigurationValid = false
     private var timer: Timer?
     private var isOpenGLPrepared = false
@@ -245,8 +535,20 @@ private final class SceneOpenGLView: NSOpenGLView {
     private var masterVolume: Float = 1
     private var audioOutputEnabled = true
     private var isAudibleOwner = false
+    private var mediaSnapshot: SceneMediaProviderSnapshot =
+        .unavailable(revision: 0)
     private var runtimeSeconds = 0.0
     private var previousTimestamp: TimeInterval?
+    private var previousSpanRuntimeSeconds: Double?
+    private var audioCaptureLease: SceneAudioCaptureLease?
+    private var audioCaptureTask: Task<Void, Never>?
+    private var audioCaptureGeneration = 0
+    private var audioCaptureIssue: String?
+    private var sessionRetryTask: Task<Void, Never>?
+    private var sessionRetryAttempt = 0
+    private var hasReportedFatalIssue = false
+    private var lastReportedFatalIssue: String?
+    private var lastReportedAudioIssue: String?
 
     init?(frame frameRect: NSRect, pixelFormat: NSOpenGLPixelFormat) {
         super.init(frame: frameRect, pixelFormat: pixelFormat)
@@ -287,7 +589,11 @@ private final class SceneOpenGLView: NSOpenGLView {
         requestedWallpaper = wallpaper
         requestedIdentity = identity
         requestedPropertyOverrides = propertyOverrides
+        hasReportedFatalIssue = false
+        lastReportedFatalIssue = nil
+        lastReportedAudioIssue = nil
         onPropertiesLoaded?(nil)
+        sessionRetryAttempt = 0
         attemptedIdentity = nil
         activeIdentity = nil
         closeSession()
@@ -295,6 +601,8 @@ private final class SceneOpenGLView: NSOpenGLView {
         hasRenderedFrame = false
         runtimeSeconds = 0
         previousTimestamp = nil
+        previousSpanRuntimeSeconds = nil
+        audioCaptureIssue = nil
         clearDrawableIfAvailable()
         reconcileSession()
         updateTimer()
@@ -302,14 +610,22 @@ private final class SceneOpenGLView: NSOpenGLView {
 
     func setPaused(_ value: Bool) {
         guard paused != value else { return }
-        do {
-            try session?.setPaused(value)
-            paused = value
+        session?.setPaused(value)
+        paused = value
+        previousTimestamp = nil
+        previousSpanRuntimeSeconds = nil
+        reportAudioIssue()
+        updateTimer()
+    }
+
+    func setPresentation(_ value: ScenePresentationLayout) {
+        guard presentation != value else { return }
+        if presentation.spanAcrossScreens != value.spanAcrossScreens {
             previousTimestamp = nil
-            updateTimer()
-        } catch {
-            failSession(error.localizedDescription)
+            previousSpanRuntimeSeconds = nil
         }
+        presentation = value
+        needsDisplay = true
     }
 
     func setAudioConfiguration(
@@ -323,15 +639,22 @@ private final class SceneOpenGLView: NSOpenGLView {
         self.masterVolume = masterVolume
         self.audioOutputEnabled = audioOutputEnabled
         self.isAudibleOwner = isAudibleOwner
-        do {
-            try session?.updateAudioConfiguration(
-                masterVolume: masterVolume,
-                audioOutputEnabled: audioOutputEnabled,
-                isAudibleOwner: isAudibleOwner
-            )
-        } catch {
-            failSession(error.localizedDescription)
-        }
+        session?.updateAudioConfiguration(
+            masterVolume: masterVolume,
+            audioOutputEnabled: audioOutputEnabled,
+            isAudibleOwner: isAudibleOwner
+        )
+        reportAudioIssue()
+    }
+
+    func setMediaSnapshot(_ value: SceneMediaProviderSnapshot) {
+        guard mediaSnapshot != value else { return }
+        mediaSnapshot = value
+        // Media callbacks are part of script evaluation. Force one evaluated
+        // frame even while presentation is paused; replay alone cannot deliver
+        // a new revision.
+        hasRenderedFrame = false
+        needsDisplay = true
     }
 
     func setPropertyOverrides(_ values: [String: ScenePropertyValue]) {
@@ -356,7 +679,9 @@ private final class SceneOpenGLView: NSOpenGLView {
             propertyConfigurationValid = true
             hasRenderedFrame = false
             previousTimestamp = nil
-            report(nil)
+            previousSpanRuntimeSeconds = nil
+            reportFatalIssue(nil)
+            reportAudioIssue()
             needsDisplay = true
             updateTimer()
         } catch {
@@ -364,7 +689,7 @@ private final class SceneOpenGLView: NSOpenGLView {
             hasRenderedFrame = false
             updateTimer()
             clearDrawableIfAvailable()
-            report(error.localizedDescription)
+            reportFatalIssue(error.localizedDescription)
         }
     }
 
@@ -372,6 +697,7 @@ private final class SceneOpenGLView: NSOpenGLView {
         let clamped = min(max(value, 1), 240)
         guard framesPerSecond != clamped else { return }
         framesPerSecond = clamped
+        previousSpanRuntimeSeconds = nil
         updateTimer()
     }
 
@@ -385,27 +711,59 @@ private final class SceneOpenGLView: NSOpenGLView {
         context.makeCurrentContext()
         let backing = convertToBacking(bounds).size
         guard backing.width >= 1, backing.height >= 1 else { return }
+        if let validationError = presentation.validationError {
+            clearDrawableIfAvailable()
+            reportFatalIssue(validationError)
+            return
+        }
         do {
             let width = UInt32(backing.width.rounded())
             let height = UInt32(backing.height.rounded())
             if paused && hasRenderedFrame {
                 try session.replayLastEvaluatedFrame(
                     drawableWidth: width,
-                    drawableHeight: height
+                    drawableHeight: height,
+                    presentation: presentation
                 )
             } else {
                 let now = ProcessInfo.processInfo.systemUptime
-                let frameTime = paused ? 0 : min(max(previousTimestamp.map { now - $0 } ?? 0, 0), 0.25)
-                previousTimestamp = paused ? nil : now
-                runtimeSeconds += frameTime
+                let frameTime: Double
+                let presentedRuntimeSeconds: Double
+                if presentation.spanAcrossScreens {
+                    let sharedRuntimeSeconds = ScenePresentationClock.shared.seconds(
+                        at: now,
+                        framesPerSecond: framesPerSecond
+                    )
+                    frameTime = paused ? 0 : min(max(
+                        previousSpanRuntimeSeconds.map {
+                            sharedRuntimeSeconds - $0
+                        } ?? 0,
+                        0
+                    ), 0.25)
+                    previousSpanRuntimeSeconds = paused ? nil : sharedRuntimeSeconds
+                    presentedRuntimeSeconds = sharedRuntimeSeconds
+                } else {
+                    frameTime = paused ? 0 : min(max(
+                        previousTimestamp.map { now - $0 } ?? 0,
+                        0
+                    ), 0.25)
+                    previousTimestamp = paused ? nil : now
+                    runtimeSeconds += frameTime
+                    presentedRuntimeSeconds = runtimeSeconds
+                }
                 let pointer = normalizedDrawablePointer()
+                let pointerState = sampledDesktopPointerState()
                 try session.render(
-                    runtimeSeconds: runtimeSeconds,
+                    runtimeSeconds: presentedRuntimeSeconds,
                     frameTimeSeconds: frameTime,
                     pointerX: pointer.x,
                     pointerY: pointer.y,
+                    pointerActive: pointerState.active,
+                    pointerLeftDown: pointerState.leftDown,
+                    mediaSnapshot: mediaSnapshot,
                     drawableWidth: width,
                     drawableHeight: height,
+                    presentation: presentation,
                     masterVolume: masterVolume,
                     audioOutputEnabled: audioOutputEnabled,
                     isAudibleOwner: isAudibleOwner
@@ -413,7 +771,9 @@ private final class SceneOpenGLView: NSOpenGLView {
                 hasRenderedFrame = true
             }
             context.flushBuffer()
-            report(nil)
+            sessionRetryAttempt = 0
+            reportFatalIssue(nil)
+            reportAudioIssue()
         } catch {
             failSession(error.localizedDescription)
         }
@@ -435,6 +795,10 @@ private final class SceneOpenGLView: NSOpenGLView {
         requestedPropertyOverrides = [:]
         propertyConfigurationValid = false
         hasRenderedFrame = false
+        runtimeSeconds = 0
+        previousTimestamp = nil
+        previousSpanRuntimeSeconds = nil
+        audioCaptureIssue = nil
         clearDrawableIfAvailable()
         onPropertiesLoaded?(nil)
     }
@@ -449,6 +813,8 @@ private final class SceneOpenGLView: NSOpenGLView {
         hasRenderedFrame = false
         runtimeSeconds = 0
         previousTimestamp = nil
+        previousSpanRuntimeSeconds = nil
+        audioCaptureIssue = nil
         isOpenGLPrepared = false
         super.clearGLContext()
     }
@@ -484,6 +850,17 @@ private final class SceneOpenGLView: NSOpenGLView {
         )
     }
 
+    private func sampledDesktopPointerState() -> (active: Bool, leftDown: Bool) {
+        let leftDown = (NSEvent.pressedMouseButtons & 1) != 0
+        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder",
+              let window,
+              window.isVisible,
+              window.frame.contains(NSEvent.mouseLocation) else {
+            return (false, leftDown)
+        }
+        return (true, leftDown)
+    }
+
     private func reconcileSession() {
         guard isOpenGLPrepared,
               window != nil,
@@ -499,46 +876,46 @@ private final class SceneOpenGLView: NSOpenGLView {
             newSession = try SceneRuntimeSession(
                 wallpaper: wallpaper,
                 assetsDirectory: identity.assetsDirectory,
-                cglContext: context
+                cglContext: context,
+                // This view is the desktop-wallpaper host. A future native
+                // screensaver host passes true through the same session/API;
+                // the script runtime never guesses the mode.
+                isScreensaver: false
             )
         } catch {
             closeSession()
             activeIdentity = nil
+            attemptedIdentity = nil
             propertyConfigurationValid = false
             hasRenderedFrame = false
-            report(error.localizedDescription)
+            reportFatalIssue(error.localizedDescription)
             onPropertiesLoaded?(nil)
             clearDrawableIfAvailable()
+            scheduleSessionRetry()
             return
         }
 
-        do {
-            try newSession.setPaused(paused)
-        } catch {
-            newSession.close()
-            activeIdentity = nil
-            propertyConfigurationValid = false
-            hasRenderedFrame = false
-            report(error.localizedDescription)
-            onPropertiesLoaded?(nil)
-            clearDrawableIfAvailable()
-            return
-        }
+        newSession.setPaused(paused)
         session = newSession
         activeIdentity = identity
         hasRenderedFrame = false
         propertyConfigurationValid = false
+        audioCaptureIssue = nil
         onPropertiesLoaded?(newSession.properties)
+        if newSession.requiresAudioSpectrum {
+            beginAudioCapture(for: newSession)
+        }
         do {
             try newSession.applyPropertyOverrides(requestedPropertyOverrides)
             propertyConfigurationValid = true
             NSLog("[Scene] Runtime session ready: %@", identity.scene.path)
-            report(nil)
+            reportFatalIssue(nil)
+            reportAudioIssue()
             needsDisplay = true
         } catch {
             propertyConfigurationValid = false
             hasRenderedFrame = false
-            report(error.localizedDescription)
+            reportFatalIssue(error.localizedDescription)
             clearDrawableIfAvailable()
         }
     }
@@ -555,6 +932,9 @@ private final class SceneOpenGLView: NSOpenGLView {
     }
 
     private func closeSession() {
+        sessionRetryTask?.cancel()
+        sessionRetryTask = nil
+        cancelAudioCapture()
         guard let session else { return }
         openGLContext?.makeCurrentContext()
         session.close()
@@ -564,16 +944,112 @@ private final class SceneOpenGLView: NSOpenGLView {
     private func failSession(_ message: String) {
         closeSession()
         activeIdentity = nil
+        attemptedIdentity = nil
         propertyConfigurationValid = false
         hasRenderedFrame = false
+        audioCaptureIssue = nil
         onPropertiesLoaded?(nil)
         updateTimer()
         clearDrawableIfAvailable()
-        report(message)
+        reportFatalIssue(message)
+        scheduleSessionRetry()
     }
 
-    private func report(_ message: String?) {
+    private func beginAudioCapture(for targetSession: SceneRuntimeSession) {
+        cancelAudioCapture()
+        audioCaptureGeneration &+= 1
+        let generation = audioCaptureGeneration
+        audioCaptureTask = Task { @MainActor [weak self, targetSession] in
+            var retryDelayNanoseconds: UInt64 = 250_000_000
+            while !Task.isCancelled {
+                guard let self,
+                      self.session === targetSession,
+                      self.audioCaptureGeneration == generation else { return }
+                do {
+                    let lease = try await SceneSystemAudioSpectrumProvider.shared.acquire()
+                    guard self.session === targetSession,
+                          self.audioCaptureGeneration == generation,
+                          !Task.isCancelled else {
+                        lease.cancel()
+                        return
+                    }
+                    self.audioCaptureLease?.cancel()
+                    self.audioCaptureLease = lease
+                    self.audioCaptureTask = nil
+                    self.audioCaptureIssue = nil
+                    self.reportAudioIssue()
+                    self.needsDisplay = true
+                    return
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard self.session === targetSession,
+                          self.audioCaptureGeneration == generation else { return }
+                    self.audioCaptureIssue =
+                        "System audio capture unavailable: \(error.localizedDescription)"
+                    self.reportAudioIssue()
+                    self.needsDisplay = true
+                    do {
+                        try await Task.sleep(nanoseconds: retryDelayNanoseconds)
+                    } catch {
+                        return
+                    }
+                    retryDelayNanoseconds = min(
+                        retryDelayNanoseconds * 2,
+                        8_000_000_000
+                    )
+                }
+            }
+        }
+    }
+
+    private func cancelAudioCapture() {
+        audioCaptureGeneration &+= 1
+        audioCaptureTask?.cancel()
+        audioCaptureTask = nil
+        audioCaptureLease?.cancel()
+        audioCaptureLease = nil
+    }
+
+    private func scheduleSessionRetry() {
+        guard isOpenGLPrepared,
+              window != nil,
+              requestedIdentity != nil,
+              activeIdentity == nil else { return }
+        sessionRetryTask?.cancel()
+        sessionRetryAttempt &+= 1
+        let shift = min(max(sessionRetryAttempt - 1, 0), 5)
+        let delay = min(UInt64(250_000_000) << UInt64(shift), 8_000_000_000)
+        let identity = requestedIdentity
+        sessionRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                return
+            }
+            guard let self,
+                  self.requestedIdentity == identity,
+                  self.activeIdentity == nil else { return }
+            self.sessionRetryTask = nil
+            self.reconcileSession()
+        }
+    }
+
+    private func reportFatalIssue(_ message: String?) {
+        guard !hasReportedFatalIssue || lastReportedFatalIssue != message else { return }
+        hasReportedFatalIssue = true
+        lastReportedFatalIssue = message
         if let message { NSLog("[Scene] %@", message) }
         onError?(message)
+    }
+
+    private func reportAudioIssue() {
+        let message = [session?.audioPlaybackIssue, audioCaptureIssue]
+            .compactMap { $0 }
+            .joined(separator: "\n")
+        let effectiveMessage = message.isEmpty ? nil : message
+        guard lastReportedAudioIssue != effectiveMessage else { return }
+        lastReportedAudioIssue = effectiveMessage
+        if let effectiveMessage { NSLog("[Scene] %@", effectiveMessage) }
     }
 }

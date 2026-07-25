@@ -77,11 +77,68 @@ typedef struct WESceneFrameInputs {
     double frame_time_seconds;
 } WESceneFrameInputs;
 
+// Borrowed fixed-size arrays used only for the duration of one render call.
+// Every pointer is required when this structure is supplied. Callers that do
+// not have a real capture frame must use the legacy render entry points so an
+// authored audio dependency remains an explicit unavailable error.
+typedef struct WESceneAudioSpectrumInputs {
+    const float* spectrum_16_left;
+    const float* spectrum_16_right;
+    const float* spectrum_32_left;
+    const float* spectrum_32_right;
+    const float* spectrum_64_left;
+    const float* spectrum_64_right;
+} WESceneAudioSpectrumInputs;
+
+typedef enum WESceneMediaPlaybackState {
+    WE_SCENE_MEDIA_STOPPED = 0,
+    WE_SCENE_MEDIA_PLAYING = 1,
+    WE_SCENE_MEDIA_PAUSED = 2,
+} WESceneMediaPlaybackState;
+
+// Borrowed strings are copied by the setter before it returns. A caller that
+// cannot supply a real media source must clear the snapshot rather than
+// fabricating empty metadata or a stopped track.
+typedef struct WESceneMediaSnapshot {
+    uint64_t revision;
+    int available;
+    WESceneMediaPlaybackState playback_state;
+    const char* title;
+    const char* artist;
+    const char* content_type;
+    const char* album_title;
+    const char* sub_title;
+    const char* album_artist;
+    const char* genres;
+    double position;
+    double duration;
+    int has_thumbnail;
+    double primary_color[3];
+    double secondary_color[3];
+    double tertiary_color[3];
+    double text_color[3];
+    double high_contrast_color[3];
+} WESceneMediaSnapshot;
+
 typedef enum WEScenePresentationScaling {
     WE_SCENE_PRESENTATION_STRETCH = 0,
     WE_SCENE_PRESENTATION_ASPECT_FIT = 1,
     WE_SCENE_PRESENTATION_ASPECT_FILL = 2,
 } WEScenePresentationScaling;
+
+// One display's rectangle inside a bottom-left-origin virtual desktop canvas.
+// Drawable dimensions describe the backing surface for that same viewport and
+// may differ from its logical size on scaled displays.
+typedef struct WEScenePresentationViewport {
+    uint32_t virtual_canvas_width;
+    uint32_t virtual_canvas_height;
+    uint32_t viewport_x;
+    uint32_t viewport_y;
+    uint32_t viewport_width;
+    uint32_t viewport_height;
+    uint32_t drawable_width;
+    uint32_t drawable_height;
+} WEScenePresentationViewport;
 
 typedef enum WESceneAssetSource {
     WE_SCENE_ASSET_SOURCE_VIRTUAL = 0,
@@ -316,6 +373,7 @@ typedef enum WESceneFrameGeometryKind {
     WE_SCENE_FRAME_GEOMETRY_FULLSCREEN_LOCAL = 1,
     WE_SCENE_FRAME_GEOMETRY_IMAGE_SCENE = 2,
     WE_SCENE_FRAME_GEOMETRY_PASSTHROUGH_CAPTURE = 3,
+    WE_SCENE_FRAME_GEOMETRY_PUPPET_MESH = 4,
 } WESceneFrameGeometryKind;
 
 typedef enum WESceneFrameTexCoordKind {
@@ -496,6 +554,19 @@ typedef struct WESceneFrameParticleInfo {
     size_t operator_count;
     size_t control_point_count;
     size_t combo_count;
+    int renderer_kind;
+    double renderer_length;
+    double renderer_max_length;
+    double renderer_min_length;
+    double renderer_subdivision;
+    double renderer_segments;
+    double renderer_uv_scale;
+    int renderer_uv_scrolling;
+    int renderer_uv_smoothing;
+    int renderer_fade_alpha;
+    int renderer_fade_size;
+    size_t texture_count;
+    size_t constant_count;
 } WESceneFrameParticleInfo;
 
 typedef struct WESceneFrameParticleControlPointInfo {
@@ -521,6 +592,26 @@ typedef enum WESceneFrameSoundPlaybackMode {
     WE_SCENE_FRAME_SOUND_PLAYBACK_LOOP = 1,
 } WESceneFrameSoundPlaybackMode;
 
+typedef enum WESceneFrameSoundPlaybackCommandAction {
+    WE_SCENE_FRAME_SOUND_COMMAND_NONE = 0,
+    WE_SCENE_FRAME_SOUND_COMMAND_PLAY = 1,
+    WE_SCENE_FRAME_SOUND_COMMAND_PAUSE = 2,
+    WE_SCENE_FRAME_SOUND_COMMAND_STOP = 3,
+} WESceneFrameSoundPlaybackCommandAction;
+
+typedef enum WESceneSoundRuntimeState {
+    WE_SCENE_SOUND_RUNTIME_STOPPED = 0,
+    WE_SCENE_SOUND_RUNTIME_PLAYING = 1,
+    WE_SCENE_SOUND_RUNTIME_PAUSED = 2,
+    WE_SCENE_SOUND_RUNTIME_ENDED = 3,
+} WESceneSoundRuntimeState;
+
+typedef struct WESceneSoundRuntimeStateInput {
+    int32_t object_id;
+    WESceneSoundRuntimeState state;
+    double position;
+} WESceneSoundRuntimeStateInput;
+
 typedef struct WESceneFrameSoundInfo {
     size_t object_index;
     int32_t object_id;
@@ -532,6 +623,8 @@ typedef struct WESceneFrameSoundInfo {
     int mute_in_editor;
     double minimum_time;
     double maximum_time;
+    WESceneFrameSoundPlaybackCommandAction playback_command;
+    uint64_t playback_command_generation;
 } WESceneFrameSoundInfo;
 
 typedef struct WESceneFrameExecutorIssueInfo {
@@ -812,9 +905,51 @@ WESceneFrameExecutorRef we_scene_frame_executor_create_with_cgl_context(
     WESceneRuntimeErrorRef* out_error
 );
 void we_scene_frame_executor_destroy(WESceneFrameExecutorRef executor);
+// Updates desktop pointer/button state for SceneScript cursor events. The
+// state is sampled by the next evaluated frame; it does not synthesize an
+// event by itself and remains independent from drawable pointer coordinates.
+int we_scene_frame_executor_set_pointer_state(
+    WESceneFrameExecutorRef executor,
+    int active,
+    int left_down,
+    WESceneRuntimeErrorRef* out_error
+);
+
+// Supplies the actual host mode used by SceneScript's
+// engine.isScreensaver()/engine.isWallpaper() methods.  The value is kept on
+// the executor and applied to every subsequent evaluated frame.
+int we_scene_frame_executor_set_screensaver_state(
+    WESceneFrameExecutorRef executor,
+    int is_screensaver,
+    WESceneRuntimeErrorRef* out_error
+);
+// Replaces the host-observed playback truth used by SceneScript sound-layer
+// isPlaying(). An empty array explicitly reports that no sound layer is
+// currently playing; commands remain a separate output of frame evaluation.
+int we_scene_frame_executor_set_sound_runtime_states(
+    WESceneFrameExecutorRef executor,
+    const WESceneSoundRuntimeStateInput* states,
+    size_t state_count,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_set_media_snapshot(
+    WESceneFrameExecutorRef executor,
+    const WESceneMediaSnapshot* snapshot,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_clear_media_snapshot(
+    WESceneFrameExecutorRef executor,
+    WESceneRuntimeErrorRef* out_error
+);
 int we_scene_frame_executor_render(
     WESceneFrameExecutorRef executor,
     const WESceneFrameInputs* inputs,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_render_with_audio_spectrum(
+    WESceneFrameExecutorRef executor,
+    const WESceneFrameInputs* inputs,
+    const WESceneAudioSpectrumInputs* audio_spectrum,
     WESceneRuntimeErrorRef* out_error
 );
 int we_scene_frame_executor_render_for_drawable(
@@ -822,6 +957,30 @@ int we_scene_frame_executor_render_for_drawable(
     const WESceneFrameInputs* inputs,
     uint32_t drawable_width,
     uint32_t drawable_height,
+    WEScenePresentationScaling scaling,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_render_for_drawable_with_audio_spectrum(
+    WESceneFrameExecutorRef executor,
+    const WESceneFrameInputs* inputs,
+    const WESceneAudioSpectrumInputs* audio_spectrum,
+    uint32_t drawable_width,
+    uint32_t drawable_height,
+    WEScenePresentationScaling scaling,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_render_for_viewport(
+    WESceneFrameExecutorRef executor,
+    const WESceneFrameInputs* inputs,
+    const WEScenePresentationViewport* viewport,
+    WEScenePresentationScaling scaling,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_render_for_viewport_with_audio_spectrum(
+    WESceneFrameExecutorRef executor,
+    const WESceneFrameInputs* inputs,
+    const WESceneAudioSpectrumInputs* audio_spectrum,
+    const WEScenePresentationViewport* viewport,
     WEScenePresentationScaling scaling,
     WESceneRuntimeErrorRef* out_error
 );
@@ -834,10 +993,21 @@ int we_scene_frame_executor_replay_for_drawable(
     uint32_t drawable_height,
     WESceneRuntimeErrorRef* out_error
 );
+int we_scene_frame_executor_replay_for_viewport(
+    WESceneFrameExecutorRef executor,
+    const WEScenePresentationViewport* viewport,
+    WESceneRuntimeErrorRef* out_error
+);
 int we_scene_frame_executor_present(
     WESceneFrameExecutorRef executor,
     uint32_t drawable_width,
     uint32_t drawable_height,
+    WEScenePresentationScaling scaling,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_present_for_viewport(
+    WESceneFrameExecutorRef executor,
+    const WEScenePresentationViewport* viewport,
     WEScenePresentationScaling scaling,
     WESceneRuntimeErrorRef* out_error
 );

@@ -204,6 +204,45 @@ final class ParticleExecutorTests: XCTestCase {
         )
     }
 
+    func testParticleRawTextureFormatOverridesAuthoredTextureZeroCombo() throws {
+        let fixture = try makeFixture(
+            includeText: false,
+            particleTextureData: makeRawParticleTexture2x2(
+                format: 9,
+                bytes: [255, 255, 255, 255]
+            ),
+            particleMaterialCombos: ["TEX0FORMAT": 8],
+            particleVertexShaderSource: minimalParticleVertexShader,
+            particleFragmentShaderSource: """
+            varying vec2 v_TexCoord;
+            varying vec4 v_Color;
+            void main() {
+            #if TEX0FORMAT == 9
+                gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);
+            #else
+                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+            #endif
+            }
+            """
+        )
+        let loaded = try loadPipeline(fixture: fixture, context: nil)
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 1.0 / 120.0)
+        let pixels = try readPixels(loaded.executor)
+        XCTAssertTrue(
+            stride(from: 0, to: pixels.count, by: 4).contains {
+                pixels[$0] == 0 && pixels[$0 + 1] == 255
+            }
+        )
+        XCTAssertFalse(
+            stride(from: 0, to: pixels.count, by: 4).contains {
+                pixels[$0] == 255 && pixels[$0 + 1] == 0
+            },
+            "The particle primary texture format must replace an authored TEX0FORMAT value"
+        )
+    }
+
     func testParticleColorOverrideIsAppliedOnceThroughLinuxCommonUniform() throws {
         let fixture = try makeFixture(
             includeText: false,
@@ -499,6 +538,279 @@ final class ParticleExecutorTests: XCTestCase {
         XCTAssertTrue(stride(from: 0, to: pixels.count, by: 4).contains { offset in
             pixels[offset] != 0 || pixels[offset + 1] != 0 || pixels[offset + 2] != 0
         })
+    }
+
+    func testSpriteTrailRendererUsesTrailComboAndRenders() throws {
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleRendererName: "spritetrail",
+                particleRendererParameters: [
+                    "length": 0.2,
+                    "maxlength": 4.0,
+                    "minlength": 0.1,
+                ],
+                particleVelocity: "40 0 0"
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 1.0 / 120.0)
+        let pixels = try readPixels(loaded.executor)
+        XCTAssertFalse(greenColumns(pixels, width: 16).isEmpty)
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
+    func testSpriteRendererExecutesAuthoredCustomShader() throws {
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleShaderName: "customparticle",
+                particleVelocity: "0 0 0",
+                particleVertexShaderSource: minimalParticleVertexShader,
+                particleFragmentShaderSource: constantGreenParticleFragmentShader
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 1.0 / 120.0)
+        XCTAssertFalse(greenColumns(try readPixels(loaded.executor), width: 16).isEmpty)
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
+    func testRopeRendererBuildsThickGeometryAndUsesRopeShader() throws {
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                stochasticParticles: true,
+                particleRendererName: "rope",
+                particleRendererParameters: [
+                    "subdivision": 2,
+                    "uvscale": 1.5,
+                ],
+                particleMaxCount: 8
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 0.1)
+        let pixels = try readPixels(loaded.executor)
+        var hasVisiblePixel = false
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            if pixels[offset] != 0 || pixels[offset + 1] != 0 || pixels[offset + 2] != 0 {
+                hasVisiblePixel = true
+                break
+            }
+        }
+        XCTAssertTrue(hasVisiblePixel)
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
+    func testRopeTrailRendererUsesTrailComboAndRenders() throws {
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                stochasticParticles: true,
+                particleRendererName: "ropetrail",
+                particleRendererParameters: [
+                    "segments": 5,
+                    "subdivision": 2,
+                    "uvscale": 1.25,
+                    "uvscrolling": true,
+                ],
+                particleMaxCount: 8
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 0.1)
+        let pixels = try readPixels(loaded.executor)
+        XCTAssertTrue(
+            stride(from: 0, to: pixels.count, by: 4).contains {
+                pixels[$0] != 0 || pixels[$0 + 1] != 0 || pixels[$0 + 2] != 0
+            }
+        )
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
+    func testAnimatedParticleTextureSelectsImageAndAppliesFrameUVBasis() throws {
+        let red = Array(repeating: [UInt8](arrayLiteral: 255, 0, 0, 255), count: 4)
+            .flatMap { $0 }
+        let yellow: [UInt8] = [255, 255, 0, 255]
+        let blue: [UInt8] = [0, 0, 255, 255]
+        let transformedSecondImage = [yellow, blue, yellow, blue].flatMap { $0 }
+        let texture = makeAnimatedParticleTexture(
+            images: [red, transformedSecondImage],
+            frames: [
+                (0, 0.25, 0, 0, 2, 0, 0, 2),
+                (1, 0.75, 1, 0, 1, 0, 0, 2),
+            ]
+        )
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleVelocity: "0 0 0",
+                particleTextureData: texture,
+                particleVertexShaderSource: animatedParticleVertexShader,
+                particleFragmentShaderSource: particleFragmentShader
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 0.25, delta: 1.0 / 120.0)
+        XCTAssertTrue(hasPixel([255, 0, 0, 255], in: try readPixels(loaded.executor)))
+
+        try render(loaded.executor, time: 0.250_001, delta: 0)
+        XCTAssertTrue(hasPixel([0, 0, 255, 255], in: try readPixels(loaded.executor)))
+
+        try render(loaded.executor, time: 1, delta: 0)
+        XCTAssertTrue(hasPixel([255, 0, 0, 255], in: try readPixels(loaded.executor)))
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
+    func testAnimatedSecondaryParticleTextureAlwaysUsesImageZero() throws {
+        let red = Array(repeating: [UInt8](arrayLiteral: 255, 0, 0, 255), count: 4)
+            .flatMap { $0 }
+        let blue = Array(repeating: [UInt8](arrayLiteral: 0, 0, 255, 255), count: 4)
+            .flatMap { $0 }
+        let animatedSecondary = makeAnimatedParticleTexture(
+            images: [red, blue],
+            frames: [
+                (0, 0.25, 0, 0, 2, 0, 0, 2),
+                (1, 0.75, 0, 0, 2, 0, 0, 2),
+            ]
+        )
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleVelocity: "0 0 0",
+                particleSecondaryTextureData: animatedSecondary,
+                particleVertexShaderSource: minimalParticleVertexShader,
+                particleFragmentShaderSource: secondaryTextureParticleFragmentShader
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 0.5, delta: 1.0 / 120.0)
+        XCTAssertTrue(
+            hasPixel([255, 0, 0, 255], in: try readPixels(loaded.executor)),
+            "Secondary particle texture slots must remain on image zero even when their TEXS timeline selects image one"
+        )
+        try render(loaded.executor, time: 1.5, delta: 0)
+        XCTAssertTrue(
+            hasPixel([255, 0, 0, 255], in: try readPixels(loaded.executor)),
+            "Secondary particle texture slots must not inherit slot-zero animation state"
+        )
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
+    func testAnimatedParticleTextureClearsUVBasisForFollowingStaticParticle() throws {
+        let firstImage = Array(repeating: [UInt8](arrayLiteral: 255, 255, 255, 255), count: 4)
+            .flatMap { $0 }
+        let secondImage = Array(repeating: [UInt8](arrayLiteral: 0, 255, 255, 255), count: 4)
+            .flatMap { $0 }
+        let animatedTexture = makeAnimatedParticleTexture(
+            images: [firstImage, secondImage],
+            frames: [
+                (0, 0.25, 0, 0, 2, 0, 0, 2),
+                (1, 0.75, 1, 0, 1, 0, 0, 2),
+            ]
+        )
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleVelocity: "0 0 0",
+                particleTextureData: animatedTexture,
+                includeStaticAnimationResetParticle: true,
+                particleVertexShaderSource: minimalParticleVertexShader,
+                particleFragmentShaderSource: animationUniformResetParticleFragmentShader
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 0.5, delta: 1.0 / 120.0)
+        let pixels = try readPixels(loaded.executor)
+        XCTAssertTrue(
+            hasPixel([255, 0, 0, 255], in: pixels),
+            "The animated particle must receive a non-zero frame UV basis"
+        )
+        XCTAssertTrue(
+            hasPixel([0, 255, 0, 255], in: pixels),
+            "A following static particle must receive cleared frame UV uniforms"
+        )
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
+    func testAnimatedSingleImageParticleAtlasUsesPerParticleSequence() throws {
+        let atlasPixels: [[UInt8]] = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 0, 255],
+        ]
+        let animatedAtlas = makeAnimatedParticleTexture(
+            images: [atlasPixels.flatMap { $0 }],
+            frames: [
+                (0, 0.5, 0, 0, 1, 0, 0, 1),
+                (0, 0.5, 1, 0, 1, 0, 0, 1),
+                (0, 0.5, 0, 1, 1, 0, 0, 1),
+                (0, 0.5, 1, 1, 1, 0, 0, 1),
+            ]
+        )
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                animationMode: "sequence",
+                sequenceMultiplier: 2,
+                particleVelocity: "0 0 0",
+                particleTextureData: animatedAtlas
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 0.25)
+        let pixels = try readPixels(loaded.executor)
+        let visibleOffsets = stride(from: 0, to: pixels.count, by: 4).filter {
+            pixels[$0] != 0 || pixels[$0 + 1] != 0 || pixels[$0 + 2] != 0
+        }
+        XCTAssertFalse(visibleOffsets.isEmpty)
+        XCTAssertTrue(
+            visibleOffsets.allSatisfy {
+                Array(pixels[$0 ..< $0 + 4]) == [0, 255, 0, 255]
+            },
+            "Animated single-image atlas must retain SPRITESHEET per-particle sequencing"
+        )
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
+    func testRefractParticleSamplesSceneSnapshotWithoutFramebufferFeedback() throws {
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleVelocity: "0 0 0",
+                particleMaterialCombos: ["REFRACT": 1],
+                particleFragmentShaderSource: refractParticleFragmentShader,
+                clearColor: "1 0 0 1"
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 1.0 / 120.0)
+        let pixels = try readPixels(loaded.executor)
+        XCTAssertTrue(
+            hasPixel([0, 255, 0, 255], in: pixels),
+            "REFRACT must sample the red scene snapshot and draw green instead of reading the live destination"
+        )
+        try assertNoExecutionIssues(loaded.executor)
     }
 
     func testParticleSpritesheetOnceEncodesLifetimeIntoFirstVertex() throws {
@@ -875,6 +1187,24 @@ final class ParticleExecutorTests: XCTestCase {
         return pixels
     }
 
+    private func assertNoExecutionIssues(
+        _ executor: WESceneFrameExecutorRef,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        var count = 0
+        var error: WESceneRuntimeErrorRef?
+        XCTAssertEqual(
+            we_scene_frame_executor_issue_count(executor, &count, &error),
+            1,
+            errorMessage(error),
+            file: file,
+            line: line
+        )
+        defer { we_scene_runtime_error_destroy(error) }
+        XCTAssertEqual(count, 0, file: file, line: line)
+    }
+
     private func setText(_ model: WESceneModelRef, _ text: String) throws {
         var error: WESceneRuntimeErrorRef?
         let result = text.withCString { value in
@@ -900,6 +1230,13 @@ final class ParticleExecutorTests: XCTestCase {
             let green = Int(pixels[offset + 1])
             return green > red + 50 && green > 80 ? (offset / 4) % width : nil
         })
+    }
+
+    private func hasPixel(_ expected: [UInt8], in pixels: [UInt8]) -> Bool {
+        precondition(expected.count == 4)
+        return stride(from: 0, to: pixels.count, by: 4).contains { offset in
+            Array(pixels[offset ..< offset + 4]) == expected
+        }
     }
 
     private func makeContext() throws -> CGLContextObj {
@@ -931,6 +1268,10 @@ final class ParticleExecutorTests: XCTestCase {
         animationMode: String = "sequence",
         sequenceMultiplier: Double = 1,
         spritesheet: Bool = false,
+        particleRendererName: String = "sprite",
+        particleRendererParameters: [String: Any] = [:],
+        particleShaderName: String = "genericparticle",
+        particleMaxCount: Int = 1,
         perspective: Bool = false,
         particleOrigin: String = "4 4 0",
         particleScale: String = "1 1 1",
@@ -942,10 +1283,16 @@ final class ParticleExecutorTests: XCTestCase {
         particleInstanceOverride: [String: Any]? = nil,
         particleTextureName: String = "dot",
         particleTextureSize: (width: UInt32, height: UInt32) = (2, 2),
+        particleTextureData: Data? = nil,
+        particleSecondaryTextureName: String = "secondary",
+        particleSecondaryTextureData: Data? = nil,
+        includeStaticAnimationResetParticle: Bool = false,
+        particleMaterialCombos: [String: Int] = [:],
         particleVertexShaderSource: String? = nil,
         particleFragmentShaderSource: String? = nil,
         particleInstantaneousCount: Int = 1,
         includeDiscardImageBeforeParticle: Bool = false,
+        clearColor: String = "0 0 0 0",
         cameraNearPlane: Double? = nil,
         cameraFarPlane: Double? = nil
     ) throws -> Fixture {
@@ -961,12 +1308,18 @@ final class ParticleExecutorTests: XCTestCase {
         try Data(
             (particleVertexShaderSource ?? particleVertexShader).utf8
         ).write(
-            to: shaders.appendingPathComponent("genericparticle.vert")
+            to: shaders.appendingPathComponent("\(particleShaderName).vert")
         )
         try Data(
             (particleFragmentShaderSource ?? particleFragmentShader).utf8
         ).write(
-            to: shaders.appendingPathComponent("genericparticle.frag")
+            to: shaders.appendingPathComponent("\(particleShaderName).frag")
+        )
+        try Data(ropeParticleVertexShader.utf8).write(
+            to: shaders.appendingPathComponent("genericropeparticle.vert")
+        )
+        try Data(ropeParticleFragmentShader.utf8).write(
+            to: shaders.appendingPathComponent("genericropeparticle.frag")
         )
         if includeDiscardImageBeforeParticle {
             try Data(discardImageVertexShader.utf8).write(
@@ -1014,6 +1367,17 @@ final class ParticleExecutorTests: XCTestCase {
         if let particleInstanceOverride {
             objects[0]["instanceoverride"] = particleInstanceOverride
         }
+        if includeStaticAnimationResetParticle {
+            objects.append([
+                "id": 3,
+                "name": "Static animation reset particle",
+                "origin": "12 4 0",
+                "parallaxDepth": parallaxDepth,
+                "particle": "particles/static-test.json",
+                "scale": particleScale,
+                "visible": true,
+            ])
+        }
         if includeDiscardImageBeforeParticle {
             objects.insert([
                 "id": 99,
@@ -1042,12 +1406,12 @@ final class ParticleExecutorTests: XCTestCase {
                 "visible": true,
             ])
         }
-        var general: [String: Any] = [
+        let general: [String: Any] = [
             "cameraparallax": parallaxEnabled,
             "cameraparallaxamount": parallaxAmount,
             "cameraparallaxdelay": parallaxDelay,
             "cameraparallaxmouseinfluence": 1,
-            "clearcolor": "0 0 0 0",
+            "clearcolor": clearColor,
             "orthogonalprojection": projectionAuto
                 ? ["auto": true]
                 : ["height": 8, "width": 16],
@@ -1110,7 +1474,7 @@ final class ParticleExecutorTests: XCTestCase {
             "flags": perspective ? 4 : 0,
             "initializer": initializer,
             "material": "materials/particle.json",
-            "maxcount": stochasticParticles ? 16 : 1,
+            "maxcount": stochasticParticles ? 16 : particleMaxCount,
             "operator": [[
                 "drag": 0,
                 "gravity": "0 0 0",
@@ -1119,30 +1483,69 @@ final class ParticleExecutorTests: XCTestCase {
             "sequencemultiplier": sequenceMultiplier,
             "starttime": 0,
         ]
-        let material: [String: Any] = [
+        var particleDefinition = definition
+        if particleRendererName != "sprite" || !particleRendererParameters.isEmpty {
+            var renderer = particleRendererParameters
+            renderer["name"] = particleRendererName
+            particleDefinition["renderer"] = [renderer]
+        }
+        var textureNames = [particleTextureName]
+        if particleSecondaryTextureData != nil {
+            textureNames.append(particleSecondaryTextureName)
+        }
+        var materialPass: [String: Any] = [
+            "blending": "translucent",
+            "cullmode": "nocull",
+            "depthtest": "disabled",
+            "depthwrite": "disabled",
+            "shader": particleShaderName,
+            "textures": textureNames,
+        ]
+        if !particleMaterialCombos.isEmpty {
+            materialPass["combos"] = particleMaterialCombos
+        }
+        let material: [String: Any] = ["passes": [materialPass]]
+        let staticResetMaterial: [String: Any] = [
             "passes": [[
                 "blending": "translucent",
                 "cullmode": "nocull",
                 "depthtest": "disabled",
                 "depthwrite": "disabled",
-                "shader": "genericparticle",
-                "textures": [particleTextureName],
+                "shader": particleShaderName,
+                "textures": ["static-reset"],
             ]],
         ]
+        var staticResetDefinition = particleDefinition
+        staticResetDefinition["material"] = "materials/static-reset.json"
         var entries: [(String, Data)] = [
             (
                 "materials/dot.tex",
-                makeRGBA8Texture2x2(
+                particleTextureData ?? makeRGBA8Texture2x2(
                     atlas: spritesheet,
                     width: particleTextureSize.width,
                     height: particleTextureSize.height
                 )
             ),
             ("materials/particle.json", try json(material)),
-            ("particles/test.json", try json(definition)),
+            ("particles/test.json", try json(particleDefinition)),
             ("project.json", try json(project)),
             ("scene.json", try json(scene)),
         ]
+        if includeStaticAnimationResetParticle {
+            entries.append(contentsOf: [
+                ("materials/static-reset.json", try json(staticResetMaterial)),
+                ("materials/static-reset.tex", makeRGBA8Texture2x2()),
+                ("particles/static-test.json", try json(staticResetDefinition)),
+            ])
+        }
+        if let particleSecondaryTextureData {
+            entries.append(
+                (
+                    "materials/\(particleSecondaryTextureName).tex",
+                    particleSecondaryTextureData
+                )
+            )
+        }
         if spritesheet {
             entries.append(
                 (
@@ -1283,7 +1686,104 @@ final class ParticleExecutorTests: XCTestCase {
         """
     }
 
+    private var animatedParticleVertexShader: String {
+        """
+        attribute vec3 a_Position;
+        attribute vec4 a_TexCoordVec4;
+        uniform mat4 g_ModelViewProjectionMatrix;
+        uniform vec2 g_Texture0Translation;
+        uniform vec4 g_Texture0Rotation;
+        varying vec2 v_TexCoord;
+        varying vec4 v_Color;
+        void main() {
+            vec2 corner = a_TexCoordVec4.xy - vec2(0.5);
+            gl_Position = g_ModelViewProjectionMatrix
+                * vec4(a_Position.xy + corner * 2.0, a_Position.z, 1.0);
+            v_TexCoord = g_Texture0Translation
+                + a_TexCoordVec4.x * g_Texture0Rotation.xy
+                + a_TexCoordVec4.y * g_Texture0Rotation.zw;
+            v_Color = vec4(1.0);
+        }
+        """
+    }
+
+    private var secondaryTextureParticleFragmentShader: String {
+        """
+        uniform sampler2D g_Texture1;
+        varying vec2 v_TexCoord;
+        void main() { gl_FragColor = texture(g_Texture1, v_TexCoord); }
+        """
+    }
+
+    private var animationUniformResetParticleFragmentShader: String {
+        """
+        uniform vec2 g_Texture0Translation;
+        uniform vec4 g_Texture0Rotation;
+        void main() {
+            bool reset = all(lessThan(abs(g_Texture0Translation), vec2(0.0001)))
+                && all(lessThan(abs(g_Texture0Rotation), vec4(0.0001)));
+            gl_FragColor = reset
+                ? vec4(0.0, 1.0, 0.0, 1.0)
+                : vec4(1.0, 0.0, 0.0, 1.0);
+        }
+        """
+    }
+
     private var particleFragmentShader: String {
+        """
+        uniform sampler2D g_Texture0;
+        varying vec2 v_TexCoord;
+        varying vec4 v_Color;
+        void main() { gl_FragColor = texture(g_Texture0, v_TexCoord) * v_Color; }
+        """
+    }
+
+    private var refractParticleFragmentShader: String {
+        """
+        uniform sampler2D g_Texture3; // {"default":"_rt_FullFrameBuffer"}
+        uniform float g_RefractAmount;
+        varying vec2 v_TexCoord;
+        varying vec4 v_Color;
+        void main() {
+            vec4 behind = texture(g_Texture3, v_TexCoord);
+            bool snapshotIsRed = behind.r > 0.9 && behind.g < 0.1;
+            bool amountIsLinuxDefault = abs(g_RefractAmount - 0.05) < 0.001;
+            gl_FragColor = snapshotIsRed && amountIsLinuxDefault
+                ? vec4(0.0, 1.0, 0.0, 1.0)
+                : vec4(0.0, 0.0, 1.0, 1.0);
+        }
+        """
+    }
+
+    private var ropeParticleVertexShader: String {
+        """
+        attribute vec4 a_PositionVec4;
+        attribute vec4 a_TexCoordVec4;
+        attribute vec4 a_TexCoordVec4C1;
+        attribute vec4 a_TexCoordVec4C2;
+        attribute vec4 a_TexCoordVec4C3;
+        attribute vec2 a_TexCoordC4;
+        attribute vec4 a_Color;
+        uniform mat4 g_ModelViewProjectionMatrix;
+        varying vec2 v_TexCoord;
+        varying vec4 v_Color;
+        void main() {
+            vec3 position = mix(a_PositionVec4.xyz, a_TexCoordVec4.xyz, a_TexCoordC4.y);
+            vec2 direction = a_TexCoordVec4.xy - a_PositionVec4.xy;
+            float magnitude = length(direction);
+            vec2 normal = magnitude > 0.0001
+                ? vec2(-direction.y, direction.x) / magnitude
+                : vec2(0.0, 1.0);
+            float width = mix(a_PositionVec4.w, a_TexCoordVec4C2.w, a_TexCoordC4.y);
+            position.xy += normal * (a_TexCoordC4.x - 0.5) * width;
+            gl_Position = g_ModelViewProjectionMatrix * vec4(position, 1.0);
+            v_TexCoord = a_TexCoordC4;
+            v_Color = mix(a_Color, a_TexCoordVec4C3, a_TexCoordC4.y);
+        }
+        """
+    }
+
+    private var ropeParticleFragmentShader: String {
         """
         uniform sampler2D g_Texture0;
         varying vec2 v_TexCoord;
@@ -1429,6 +1929,92 @@ final class ParticleExecutorTests: XCTestCase {
         return result
     }
 
+    private func makeRawParticleTexture2x2(
+        format: UInt32,
+        bytes: [UInt8]
+    ) -> Data {
+        precondition(format == 8 || format == 9)
+        let expectedByteCount = format == 8 ? 8 : 4
+        precondition(bytes.count == expectedByteCount)
+        var result = Data()
+        appendMagic("TEXV0005", to: &result)
+        appendMagic("TEXI0001", to: &result)
+        appendUInt32(format, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(0, to: &result)
+        appendMagic("TEXB0003", to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(UInt32.max, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(UInt32(bytes.count), to: &result)
+        appendUInt32(UInt32(bytes.count), to: &result)
+        result.append(contentsOf: bytes)
+        return result
+    }
+
+    private typealias AnimatedParticleFrame = (
+        image: UInt32,
+        duration: Float,
+        x: Float,
+        y: Float,
+        width: Float,
+        widthAux: Float,
+        heightAux: Float,
+        height: Float
+    )
+
+    private func makeAnimatedParticleTexture(
+        images: [[UInt8]],
+        frames: [AnimatedParticleFrame]
+    ) -> Data {
+        precondition(!images.isEmpty && !frames.isEmpty)
+        precondition(images.allSatisfy { $0.count == 16 })
+        var result = Data()
+        appendMagic("TEXV0005", to: &result)
+        appendMagic("TEXI0001", to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(5, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(0, to: &result)
+        appendMagic("TEXB0003", to: &result)
+        appendUInt32(UInt32(images.count), to: &result)
+        appendUInt32(UInt32.max, to: &result)
+        for image in images {
+            appendUInt32(1, to: &result)
+            appendUInt32(2, to: &result)
+            appendUInt32(2, to: &result)
+            appendUInt32(0, to: &result)
+            appendUInt32(UInt32(image.count), to: &result)
+            appendUInt32(UInt32(image.count), to: &result)
+            result.append(contentsOf: image)
+        }
+        appendMagic("TEXS0003", to: &result)
+        appendUInt32(UInt32(frames.count), to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        for frame in frames {
+            appendUInt32(frame.image, to: &result)
+            appendFloat32(frame.duration, to: &result)
+            appendFloat32(frame.x, to: &result)
+            appendFloat32(frame.y, to: &result)
+            appendFloat32(frame.width, to: &result)
+            appendFloat32(frame.widthAux, to: &result)
+            appendFloat32(frame.heightAux, to: &result)
+            appendFloat32(frame.height, to: &result)
+        }
+        return result
+    }
+
     private func makePackage(_ entries: [(String, Data)]) -> Data {
         var table = Data()
         var payload = Data()
@@ -1461,6 +2047,10 @@ final class ParticleExecutorTests: XCTestCase {
         data.append(UInt8(truncatingIfNeeded: value >> 8))
         data.append(UInt8(truncatingIfNeeded: value >> 16))
         data.append(UInt8(truncatingIfNeeded: value >> 24))
+    }
+
+    private func appendFloat32(_ value: Float, to data: inout Data) {
+        appendUInt32(value.bitPattern, to: &data)
     }
 
     private func errorMessage(_ error: WESceneRuntimeErrorRef?) -> String {

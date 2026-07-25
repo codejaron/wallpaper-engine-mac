@@ -17,6 +17,7 @@ namespace we::scene {
 
 class AssetResolver;
 class Runtime;
+struct PuppetMesh;
 
 enum class SceneModelErrorCode : std::int32_t {
     invalidJson = 1,
@@ -230,7 +231,9 @@ struct Model {
     bool noPadding = false;
     std::optional<int> width;
     std::optional<int> height;
-    std::optional<std::string> puppet;
+    // Decoded once while loading the model. Frame planning and GL execution
+    // consume this immutable descriptor instead of resolving the asset again.
+    std::shared_ptr<const PuppetMesh> puppetMesh;
     std::optional<DynamicValue> cropOffset;
 };
 
@@ -312,6 +315,16 @@ struct ObjectBase {
 
 struct ImageObject {
     std::shared_ptr<const Model> model;
+    // Linux appends materials/util/effectpassthrough.json when the authored
+    // color blend mode can become non-zero. Keeping the parsed material on the
+    // image lets FrameGraph add the real compatibility pass without reparsing
+    // assets or maintaining a second material implementation.
+    std::shared_ptr<const Material> colorBlendMaterial;
+    // Linux injects materials/effects/tint.json when an effect exposes the
+    // magenta COMPOSITE=2 compatibility marker. Visibility and the marker's
+    // DynamicValue are evaluated per frame, so retain the parsed material for
+    // FrameGraph.
+    std::shared_ptr<const Material> magentaCompositeTintMaterial;
     DynamicValue alpha;
     DynamicValue color;
     DynamicValue size;
@@ -459,6 +472,14 @@ struct ParticleTurbulentVelocityRandomInitializer {
     DynamicValue right;
 };
 
+struct ParticleMapSequenceAroundControlPointInitializer {
+    std::optional<int> id;
+    DynamicValue controlPoint;
+    DynamicValue count;
+    DynamicValue speedMinimum;
+    DynamicValue speedMaximum;
+};
+
 using ParticleInitializer = std::variant<
     ParticleLifetimeRandomInitializer,
     ParticleSizeRandomInitializer,
@@ -467,7 +488,8 @@ using ParticleInitializer = std::variant<
     ParticleVelocityRandomInitializer,
     ParticleRotationRandomInitializer,
     ParticleAngularVelocityRandomInitializer,
-    ParticleTurbulentVelocityRandomInitializer
+    ParticleTurbulentVelocityRandomInitializer,
+    ParticleMapSequenceAroundControlPointInitializer
 >;
 
 struct ParticleMovementOperator {
@@ -509,6 +531,16 @@ struct ParticleOscillateAlphaOperator {
     DynamicValue phaseMaximum;
 };
 
+struct ParticleOscillateSizeOperator {
+    std::optional<int> id;
+    DynamicValue frequencyMinimum;
+    DynamicValue frequencyMaximum;
+    DynamicValue scaleMinimum;
+    DynamicValue scaleMaximum;
+    DynamicValue phaseMinimum;
+    DynamicValue phaseMaximum;
+};
+
 struct ParticleControlPointAttractOperator {
     std::optional<int> id;
     int controlPoint = 0;
@@ -517,19 +549,101 @@ struct ParticleControlPointAttractOperator {
     DynamicValue threshold;
 };
 
+struct ParticleSizeChangeOperator {
+    std::optional<int> id;
+    DynamicValue startTime;
+    DynamicValue endTime;
+    DynamicValue startValue;
+    DynamicValue endValue;
+};
+
+struct ParticleAlphaChangeOperator {
+    std::optional<int> id;
+    DynamicValue startTime;
+    DynamicValue endTime;
+    DynamicValue startValue;
+    DynamicValue endValue;
+};
+
+struct ParticleColorChangeOperator {
+    std::optional<int> id;
+    DynamicValue startTime;
+    DynamicValue endTime;
+    DynamicValue startValue;
+    DynamicValue endValue;
+};
+
+struct ParticleTurbulenceOperator {
+    std::optional<int> id;
+    DynamicValue scale;
+    DynamicValue speedMinimum;
+    DynamicValue speedMaximum;
+    DynamicValue timeScale;
+    DynamicValue mask;
+    DynamicValue phaseMinimum;
+    DynamicValue phaseMaximum;
+    DynamicValue audioProcessingMode;
+    DynamicValue audioProcessingBounds;
+    DynamicValue audioProcessingExponent;
+    DynamicValue audioProcessingFrequencyStart;
+    DynamicValue audioProcessingFrequencyEnd;
+};
+
+struct ParticleVortexOperator {
+    std::optional<int> id;
+    int controlPoint = 0;
+    std::uint32_t flags = 0;
+    DynamicValue axis;
+    DynamicValue offset;
+    DynamicValue distanceInner;
+    DynamicValue distanceOuter;
+    DynamicValue speedInner;
+    DynamicValue speedOuter;
+    DynamicValue centerForce;
+    DynamicValue ringRadius;
+    DynamicValue ringWidth;
+    DynamicValue ringPullDistance;
+    DynamicValue ringPullForce;
+    DynamicValue audioProcessingMode;
+    DynamicValue audioProcessingBounds;
+};
+
 using ParticleOperator = std::variant<
     ParticleMovementOperator,
     ParticleAlphaFadeOperator,
     ParticleAngularMovementOperator,
     ParticleOscillatePositionOperator,
     ParticleOscillateAlphaOperator,
-    ParticleControlPointAttractOperator
+    ParticleOscillateSizeOperator,
+    ParticleControlPointAttractOperator,
+    ParticleSizeChangeOperator,
+    ParticleAlphaChangeOperator,
+    ParticleColorChangeOperator,
+    ParticleTurbulenceOperator,
+    ParticleVortexOperator
 >;
 
+// Particle renderer metadata is deliberately kept in the model instead of
+// being rediscovered by the GL executor.  Linux uses the first authored
+// renderer and supports four concrete paths: screen sprites, sprite trails,
+// rope, and rope trails.  The orientation/axis fields are retained for the
+// script/model bridge even though the pinned Linux renderer uses screen-facing
+// sprites for the plain `sprite` path.
 struct ParticleSpriteRenderer {
     std::optional<int> id;
+    std::string name = "sprite";
     std::string orientation = "screen";
     ParticleVector3 axis{};
+    double length = 0.05;
+    double maxLength = 10.0;
+    double minLength = 0.0;
+    double subdivision = 1.0;
+    double segments = 4.0;
+    double uvScale = 1.0;
+    bool uvScrolling = false;
+    bool uvSmoothing = true;
+    bool fadeAlpha = false;
+    bool fadeSize = false;
 };
 
 struct ParticleControlPoint {
@@ -552,6 +666,21 @@ struct ParticleInstanceOverride {
     DynamicValue colorMultiplier;
 };
 
+// Linux currently parses child systems and carries their metadata on the
+// particle definition, but does not instantiate a second runtime simulation.
+// Keep the metadata lossless without inventing child-spawn behavior here.
+struct ParticleChild {
+    std::string type = "static";
+    std::string name;
+    int maxCount = 20;
+    int controlPointStartIndex = 0;
+    double probability = 1.0;
+    ParticleVector3 angles{};
+    ParticleVector3 origin{};
+    ParticleVector3 scale{1.0, 1.0, 1.0};
+    std::string particlePath;
+};
+
 struct ParticleDefinition {
     std::string assetPath;
     std::shared_ptr<const Material> material;
@@ -564,7 +693,13 @@ struct ParticleDefinition {
     std::vector<ParticleInitializer> initializers;
     std::vector<ParticleOperator> operators;
     std::vector<ParticleControlPoint> controlPoints;
+    std::vector<ParticleChild> children;
     ParticleSpriteRenderer renderer;
+    // Keep every authored renderer losslessly.  The Linux runtime currently
+    // consumes the first entry, while retaining the collection lets later
+    // frame-graph stages validate/diagnose additional entries without
+    // reparsing the asset.
+    std::vector<ParticleSpriteRenderer> renderers;
 };
 
 struct ParticleObject {
@@ -607,6 +742,11 @@ struct Scene {
     SceneCamera camera;
     std::map<std::string, DynamicValue> generalValues;
     std::vector<SceneObject> objects;
+    // Compatibility resources synthesized by linux-wallpaperengine for the
+    // camera bloom post-process. The JSON wrappers are virtual upstream; the
+    // referenced utility materials remain ordinary official assets.
+    std::shared_ptr<const Model> bloomModel;
+    std::shared_ptr<const Effect> bloomEffect;
 };
 
 struct SceneProject {

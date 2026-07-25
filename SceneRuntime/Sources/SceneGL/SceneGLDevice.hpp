@@ -56,6 +56,7 @@ struct FramebufferResource final {
 
 struct AssetTextureResource final {
     AssetTextureResource() = default;
+    ~AssetTextureResource();
     AssetTextureResource(const AssetTextureResource&) = delete;
     AssetTextureResource& operator=(const AssetTextureResource&) = delete;
     AssetTextureResource(AssetTextureResource&& other) noexcept;
@@ -72,6 +73,10 @@ struct AssetTextureResource final {
     std::uint32_t spritesheetRows = 0;
     std::uint32_t spritesheetFrameCount = 0;
     float spritesheetDuration = 0.0F;
+    // Opaque AVFoundation-backed decoder for TEX video assets. The decoder
+    // is owned by this resource; OpenGL images remain owned by Device.
+    void* videoDecoder = nullptr;
+    bool video = false;
 
     [[nodiscard]] bool isAnimated() const noexcept {
         return (flags & textureFlagIsGif) != 0;
@@ -117,6 +122,10 @@ public:
         [[nodiscard]] AssetTextureResource uploadTexture(
             const Texture& texture,
             std::string_view source
+        );
+        void updateVideoTexture(
+            AssetTextureResource& texture,
+            double timeSeconds
         );
         void destroyTexture(AssetTextureResource& texture) noexcept;
         [[nodiscard]] GLuint uploadCoverageTexture(

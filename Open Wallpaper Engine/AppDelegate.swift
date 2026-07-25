@@ -11,6 +11,47 @@ import AVKit
 import SceneAudio
 import WebKit
 
+private final class WallpaperScrollEvent: NSEvent {
+    private let source: NSEvent
+    private let targetWindow: NSWindow
+    private let targetLocation: NSPoint
+
+    init(source: NSEvent, targetWindow: NSWindow, targetLocation: NSPoint) {
+        precondition(source.type == .scrollWheel)
+        self.source = source
+        self.targetWindow = targetWindow
+        self.targetLocation = targetLocation
+        super.init()
+    }
+
+    required init?(coder: NSCoder) {
+        return nil
+    }
+
+    override var type: NSEvent.EventType { source.type }
+    override var window: NSWindow? { targetWindow }
+    override var windowNumber: Int { targetWindow.windowNumber }
+    override var locationInWindow: NSPoint { targetLocation }
+    override var modifierFlags: NSEvent.ModifierFlags { source.modifierFlags }
+    override var timestamp: TimeInterval { source.timestamp }
+    override var eventNumber: Int { source.eventNumber }
+    override var deltaX: CGFloat { source.deltaX }
+    override var deltaY: CGFloat { source.deltaY }
+    override var deltaZ: CGFloat { source.deltaZ }
+    override var scrollingDeltaX: CGFloat { source.scrollingDeltaX }
+    override var scrollingDeltaY: CGFloat { source.scrollingDeltaY }
+    override var hasPreciseScrollingDeltas: Bool {
+        source.hasPreciseScrollingDeltas
+    }
+    override var phase: NSEvent.Phase { source.phase }
+    override var momentumPhase: NSEvent.Phase { source.momentumPhase }
+    override var isDirectionInvertedFromDevice: Bool {
+        source.isDirectionInvertedFromDevice
+    }
+    override var cgEvent: CGEvent? { source.cgEvent }
+}
+
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     
     var statusItem: NSStatusItem!
@@ -23,6 +64,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var contentViewModel = ContentViewModel()
     var wallpaperViewModel = WallpaperViewModel()
     var globalSettingsViewModel = GlobalSettingsViewModel()
+    let sceneMediaSnapshotProvider = SceneMediaSnapshotProvider()
     lazy var sceneAudioOwnerCoordinator = MainActor.assumeIsolated {
         SceneAudioOwnerCoordinator(mainScreenId: WallpaperViewModel.mainScreenId())
     }
@@ -30,6 +72,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var importOpenPanel: NSOpenPanel!
     
     var eventHandler: Any?
+    var localEventHandler: Any?
     
     static var shared = AppDelegate()
     
@@ -79,6 +122,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.mainWindowController.window.center()
             self.mainWindowController.window.makeKeyAndOrderFront(nil)
         }
+
+        // Apply the real frontmost-application condition after wallpaper
+        // windows have reached their intended initial visibility.
+        globalSettingsViewModel.activateApplicationDidChange()
+        globalSettingsViewModel.wallpaperWindowsDidRebuild()
     }
     
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -94,6 +142,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        globalSettingsViewModel.stopPlaybackPolicyMonitoring(restorePlayback: false)
+        if let eventHandler { NSEvent.removeMonitor(eventHandler) }
+        if let localEventHandler { NSEvent.removeMonitor(localEventHandler) }
+        eventHandler = nil
+        localEventHandler = nil
         if let wallpaper = UserDefaults.standard.url(forKey: "OSWallpaper") {
             for screen in NSScreen.screens {
                 try? NSWorkspace.shared.setDesktopImageURL(wallpaper, for: screen)
@@ -189,6 +242,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         wallpaperWindows.removeAll()
         setWallpaperWindows()
         for (_, window) in wallpaperWindows { window.orderFront(nil) }
+        globalSettingsViewModel.wallpaperWindowsDidRebuild()
     }
 
     /// Called when monitors connect/disconnect — auto-enables newly connected screens.
@@ -217,39 +271,108 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Only monitor event types we actually handle — .any causes main thread starvation
         let relevantEvents: NSEvent.EventTypeMask = [
             .scrollWheel, .mouseMoved, .mouseEntered, .mouseExited,
-            .leftMouseUp, .rightMouseUp, .leftMouseDown,
+            .leftMouseUp, .rightMouseUp, .leftMouseDown, .rightMouseDown,
             .leftMouseDragged, .rightMouseDragged
         ]
         self.eventHandler = NSEvent.addGlobalMonitorForEvents(matching: relevantEvents) { [weak self] event in
             guard let self = self,
                   let frontmostApplication = NSWorkspace.shared.frontmostApplication,
                   frontmostApplication.bundleIdentifier == "com.apple.finder" else { return }
-
-            // Find the WKWebView in whichever wallpaper window the event lands on
-            let mouseLocation = NSEvent.mouseLocation
-            guard let targetWindow = self.wallpaperWindows.values.first(where: { $0.frame.contains(mouseLocation) }),
-                  let webview = targetWindow.contentView?.subviews.first?.subviews.first,
-                  webview is WKWebView else { return }
-
-            switch event.type {
-            case .scrollWheel:
-                webview.scrollWheel(with: event)
-            case .mouseMoved:
-                webview.mouseMoved(with: event)
-            case .mouseEntered:
-                webview.mouseEntered(with: event)
-            case .mouseExited:
-                webview.mouseExited(with: event)
-            case .leftMouseUp, .rightMouseUp:
-                webview.mouseUp(with: event)
-            case .leftMouseDown:
-                webview.mouseDown(with: event)
-            case .leftMouseDragged, .rightMouseDragged:
-                webview.mouseDragged(with: event)
-            default:
-                break
-            }
+            self.forwardWallpaperEvent(event)
         }
+        self.localEventHandler = NSEvent.addLocalMonitorForEvents(matching: relevantEvents) { [weak self] event in
+            self?.forwardWallpaperEvent(event)
+            return event
+        }
+    }
+
+    private func forwardWallpaperEvent(_ event: NSEvent) {
+        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder" else {
+            return
+        }
+        let mouseLocation = NSEvent.mouseLocation
+        guard let targetWindow = wallpaperWindows.values.first(where: {
+              $0.isVisible && $0.frame.contains(mouseLocation)
+        }),
+              let webview = findWebView(in: targetWindow.contentView) else { return }
+
+        // Global-monitor events carry the originating application's window
+        // number and location. Passing that event directly to a wallpaper
+        // WKWebView makes hit testing use the wrong coordinate space (and is
+        // especially visible on non-main displays). Rebuild mouse events in
+        // the target wallpaper window's local coordinates.
+        let localLocation = targetWindow.convertPoint(fromScreen: mouseLocation)
+        let forwardedMouseEvent = makeWallpaperMouseEvent(
+            event,
+            location: localLocation,
+            window: targetWindow
+        )
+
+        switch event.type {
+        case .scrollWheel:
+            // AppKit has no public scroll-wheel factory. Wrap the original
+            // deltas/phases while rebinding the event to the wallpaper window
+            // so WKWebView receives the correct location on secondary screens.
+            webview.scrollWheel(with: WallpaperScrollEvent(
+                source: event,
+                targetWindow: targetWindow,
+                targetLocation: localLocation
+            ))
+        case .mouseMoved:
+            if let forwardedMouseEvent { webview.mouseMoved(with: forwardedMouseEvent) }
+        case .mouseEntered:
+            if let forwardedMouseEvent { webview.mouseEntered(with: forwardedMouseEvent) }
+        case .mouseExited:
+            if let forwardedMouseEvent { webview.mouseExited(with: forwardedMouseEvent) }
+        case .leftMouseUp:
+            if let forwardedMouseEvent { webview.mouseUp(with: forwardedMouseEvent) }
+        case .rightMouseUp:
+            if let forwardedMouseEvent { webview.rightMouseUp(with: forwardedMouseEvent) }
+        case .leftMouseDown:
+            if let forwardedMouseEvent { webview.mouseDown(with: forwardedMouseEvent) }
+        case .rightMouseDown:
+            if let forwardedMouseEvent { webview.rightMouseDown(with: forwardedMouseEvent) }
+        case .leftMouseDragged:
+            if let forwardedMouseEvent { webview.mouseDragged(with: forwardedMouseEvent) }
+        case .rightMouseDragged:
+            if let forwardedMouseEvent { webview.rightMouseDragged(with: forwardedMouseEvent) }
+        default: break
+        }
+    }
+
+    private func makeWallpaperMouseEvent(
+        _ event: NSEvent,
+        location: NSPoint,
+        window: NSWindow
+    ) -> NSEvent? {
+        switch event.type {
+        case .mouseMoved, .mouseEntered, .mouseExited,
+             .leftMouseDown, .leftMouseUp, .leftMouseDragged,
+             .rightMouseDown, .rightMouseUp, .rightMouseDragged:
+            break
+        default:
+            return nil
+        }
+        return NSEvent.mouseEvent(
+            with: event.type,
+            location: location,
+            modifierFlags: event.modifierFlags,
+            timestamp: event.timestamp,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: event.eventNumber,
+            clickCount: event.clickCount,
+            pressure: event.pressure
+        )
+    }
+
+    private func findWebView(in view: NSView?) -> WKWebView? {
+        guard let view else { return nil }
+        if let webView = view as? WKWebView { return webView }
+        for child in view.subviews {
+            if let webView = findWebView(in: child) { return webView }
+        }
+        return nil
     }
     
     func saveCurrentWallpaper() {

@@ -53,7 +53,7 @@ struct GeneralPage: SettingsPage {
             Section {
                 Toggle(isOn: $viewModel.settings.audioOutput) {
                     Text("Audio Output")
-                }.disabled(true)
+                }
                 Toggle(isOn: $viewModel.settings.reloadWhenChangingOutputDevice) {
                     Text("Reload when changing output device")
                 }.disabled(true)

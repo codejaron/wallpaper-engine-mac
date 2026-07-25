@@ -17,7 +17,12 @@ struct VideoWallpaperView: NSViewRepresentable {
     init(wallpaperViewModel: WallpaperViewModel, screenId: String) {
         self.wallpaperViewModel = wallpaperViewModel
         self.screenId = screenId
-        self._viewModel = StateObject(wrappedValue: VideoWallpaperViewModel(wallpaper: wallpaperViewModel.wallpaper(for: screenId)))
+        self._viewModel = StateObject(
+            wrappedValue: VideoWallpaperViewModel(
+                wallpaper: wallpaperViewModel.wallpaper(for: screenId),
+                screenId: screenId
+            )
+        )
     }
 
     func makeNSView(context: Context) -> AVPlayerView {
@@ -48,7 +53,7 @@ struct VideoWallpaperView: NSViewRepresentable {
             viewModel.currentWallpaper = selectedWallpaper
         }
 
-        viewModel.playRate = wallpaperViewModel.playRate
-        viewModel.playVolume = wallpaperViewModel.playVolume
+        viewModel.playRate = wallpaperViewModel.effectivePlayRate
+        viewModel.playVolume = wallpaperViewModel.effectivePlayVolume
     }
 }

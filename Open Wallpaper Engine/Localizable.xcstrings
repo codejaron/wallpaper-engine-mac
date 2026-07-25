@@ -120,6 +120,9 @@
     "%@" : {
 
     },
+    "%@: invalid or missing runtime value" : {
+
+    },
     "%lld" : {
 
     },
@@ -341,6 +344,12 @@
           }
         }
       }
+    },
+    "Aspect fill" : {
+
+    },
+    "Aspect fit" : {
+
     },
     "Assign Hotkey" : {
       "localizations" : {
@@ -642,6 +651,9 @@
         }
       }
     },
+    "Discard Invalid Saved Properties" : {
+
+    },
     "Discover" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -721,6 +733,9 @@
           }
         }
       }
+    },
+    "Enable this display to load and edit its Scene properties." : {
+
     },
     "Enabled" : {
       "localizations" : {
@@ -1087,6 +1102,9 @@
           }
         }
       }
+    },
+    "Loading Scene properties from the runtime…" : {
+
     },
     "Log In" : {
 
@@ -1795,6 +1813,9 @@
         }
       }
     },
+    "Reset Scene Properties" : {
+
+    },
     "Resolution" : {
       "localizations" : {
         "zh-Hans" : {
@@ -1850,7 +1871,11 @@
         }
       }
     },
+    "Scene scaling" : {
+
+    },
     "Scheme Color" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1985,6 +2010,12 @@
         }
       }
     },
+    "Span mode uses one virtual canvas and presents the current display's slice. It is intended for the same Scene wallpaper on each enabled display." : {
+
+    },
+    "Span scene wallpapers across displays" : {
+
+    },
     "Split" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -2037,6 +2068,9 @@
         }
       }
     },
+    "Stretch" : {
+
+    },
     "Subscription Date" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -2088,6 +2122,9 @@
         }
       }
     },
+    "The runtime did not provide a valid slider range." : {
+
+    },
     "Theme" : {
       "localizations" : {
         "zh-Hans" : {
@@ -2102,6 +2139,9 @@
 
     },
     "This plugin enables animation of GIF thumbnail images in wallpaper explorer" : {
+
+    },
+    "This Scene property type is visible but is not safely editable yet." : {
 
     },
     "Those all settings above don't have to be saved for taking effect." : {
@@ -2316,6 +2356,9 @@
           }
         }
       }
+    },
+    "Wallpaper Engine assets directory" : {
+
     },
     "Wallpaper Engine for Mac" : {
       "localizations" : {

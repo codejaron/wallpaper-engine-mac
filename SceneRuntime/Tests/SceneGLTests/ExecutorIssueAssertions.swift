@@ -3,6 +3,41 @@ import SceneRuntimeBridge
 import XCTest
 
 extension XCTestCase {
+    func assertNoExecutorIssues(
+        _ executor: WESceneFrameExecutorRef,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        var error: WESceneRuntimeErrorRef?
+        var count = 0
+        guard we_scene_frame_executor_issue_count(
+            executor, &count, &error
+        ) == 1 else {
+            throw executorIssueFailure("count", error)
+        }
+        XCTAssertNil(error, file: file, line: line)
+        guard count == 0 else {
+            var messages: [String] = []
+            for index in 0..<count {
+                var issue = WESceneFrameExecutorIssueInfo()
+                guard we_scene_frame_executor_issue_info(
+                    executor, index, &issue, &error
+                ) == 1 else {
+                    throw executorIssueFailure("info", error)
+                }
+                messages.append(
+                    issue.message.map(String.init(cString:)) ?? "<no message>"
+                )
+            }
+            XCTFail(
+                "Expected no executor issues, received: \(messages.joined(separator: " | "))",
+                file: file,
+                line: line
+            )
+            return
+        }
+    }
+
     func assertSingleSkippedObjectIssue(
         _ executor: WESceneFrameExecutorRef,
         objectIndex: Int,

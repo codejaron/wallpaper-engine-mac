@@ -170,6 +170,31 @@ std::uint32_t checkedDimension(
     return static_cast<std::uint32_t>(value);
 }
 
+std::uint32_t checkedScaledFramebufferDimension(
+    const SceneModel& model,
+    double value,
+    std::string pointer,
+    std::string_view description
+) {
+    if (!std::isfinite(value) || value <= 0.0 ||
+        value > static_cast<double>(std::numeric_limits<std::uint32_t>::max())) {
+        frameError(
+            model,
+            SceneModelErrorCode::invalidValue,
+            std::move(pointer),
+            std::string(description) +
+                " must resolve to a finite positive 32-bit value"
+        );
+    }
+    // Wallpaper Engine effects routinely downsample small layers. Integer
+    // division can reach zero, but OpenGL framebuffers cannot; retain the
+    // authored scale while allocating the smallest valid backing texture.
+    return std::max<std::uint32_t>(
+        1,
+        static_cast<std::uint32_t>(std::floor(value))
+    );
+}
+
 double numberValue(
     const SceneModel& model,
     const EvaluatedValue& evaluated,
@@ -410,6 +435,8 @@ struct PendingRender {
     MaterialPass material;
     std::string vertexShaderPath;
     std::string fragmentShaderPath;
+    std::string materialObjectId;
+    std::string constantPointerPrefix;
     const EffectPassOverride* overridePass = nullptr;
     std::map<int, std::string> binds;
     FramebufferMap localFramebuffers;
@@ -516,6 +543,42 @@ public:
         sceneFramebuffers_.emplace("_rt_FullFrameBuffer", plan_.output);
         sceneFramebuffers_.emplace("_rt_MipMappedFrameBuffer", plan_.output);
 
+        // These runtime targets are created by the Linux renderer for every
+        // scene, even when bloom is disabled. Keeping them in the frame arena
+        // makes authored effects that bind the standard aliases resolve to a
+        // real resource instead of failing during planning.
+        const auto registerSceneFramebuffer = [&](
+            std::string logicalName,
+            std::uint32_t width,
+            std::uint32_t height
+        ) {
+            const FramebufferDescriptor descriptor = createFramebuffer(
+                "scene:" + logicalName,
+                logicalName,
+                FramebufferFormat::rgba8,
+                std::max<std::uint32_t>(1, width),
+                std::max<std::uint32_t>(1, height),
+                1.0,
+                true
+            );
+            sceneFramebuffers_.emplace(logicalName, descriptor.resource);
+            return descriptor.resource;
+        };
+        registerSceneFramebuffer("_rt_4FrameBuffer", plan_.width / 4, plan_.height / 4);
+        registerSceneFramebuffer("_rt_8FrameBuffer", plan_.width / 8, plan_.height / 8);
+        registerSceneFramebuffer("_rt_Bloom", plan_.width / 8, plan_.height / 8);
+        const FrameResourceRef shadowAtlas = registerSceneFramebuffer(
+            "_rt_shadowAtlas", plan_.width, plan_.height
+        );
+        sceneFramebuffers_.emplace(
+            "_alias_lightCookie",
+            FrameResourceRef{
+                .kind = FrameResourceKind::framebuffer,
+                .id = shadowAtlas.id,
+                .logicalName = "_alias_lightCookie",
+            }
+        );
+
         const auto clear = scene.generalValues.find("clearcolor");
         if (clear == scene.generalValues.end()) {
             frameError(
@@ -534,7 +597,9 @@ public:
         collectUnsupportedObjects();
         registerImageCompositeResources();
         planRenderableObjects();
+        planBloomObject();
         planSoundObjects();
+        finalizeScriptLayerStates();
         validateFramePlan();
         return std::move(plan_);
     }
@@ -543,11 +608,13 @@ private:
     [[nodiscard]] EvaluatedValue evaluate(
         const DynamicValue& value,
         std::string pointer,
-        std::optional<int> objectId
+        std::optional<int> objectId,
+        script::ScriptPropertyOwner owner = {}
     ) {
+        if (!owner.layerId && objectId) owner.layerId = objectId;
         EvaluatedValue result;
         if (evaluationFrame_) {
-            result = evaluationFrame_->evaluate(value, pointer);
+            result = evaluationFrame_->evaluate(value, pointer, owner);
         } else if (value.script && scriptedValues_) {
             const auto found = scriptedValues_->find(pointer);
             if (found == scriptedValues_->end()) {
@@ -594,6 +661,47 @@ private:
             }
         }
         return result;
+    }
+
+    [[nodiscard]] ConstantMap mergedConstants(
+        const MaterialPass& material,
+        const EffectPassOverride* overridePass
+    ) const {
+        ConstantMap result = material.constants;
+        if (overridePass != nullptr) {
+            for (const auto& [name, value] : overridePass->constants) {
+                result.insert_or_assign(name, value);
+            }
+        }
+        return result;
+    }
+
+    void registerMaterialObject(
+        std::string id,
+        std::string name,
+        const MaterialPass& material,
+        const EffectPassOverride* overridePass,
+        const std::string& pointerPrefix
+    ) {
+        if (!evaluationFrame_) return;
+        script::ScriptPropertyObjectDescriptor descriptor{
+            .id = std::move(id),
+            .type = script::ScriptPropertyObjectType::material,
+            .name = std::move(name),
+        };
+        for (const auto& [property, value] :
+             mergedConstants(material, overridePass)) {
+            descriptor.properties.emplace(
+                property,
+                evaluateDynamicValue(
+                    *model_,
+                    value,
+                    graphSnapshot_.propertyValues,
+                    pointerPrefix + '/' + property
+                ).value
+            );
+        }
+        evaluationFrame_->registerScriptPropertyObject(std::move(descriptor));
     }
 
     [[nodiscard]] FrameCameraDescriptor snapshotCamera(
@@ -813,16 +921,6 @@ private:
                     );
                 }
             }
-            if (const auto* image = std::get_if<ImageObject>(&object.data);
-                image != nullptr && image->model && image->model->puppet) {
-                addIssue(
-                    FramePlanIssueCode::puppetUnavailable,
-                    object.base.id,
-                    objectPointer(index, "image"),
-                    "Puppet mesh rendering is not implemented by FrameGraph"
-                );
-                skippedObjectIndexes_.emplace(index);
-            }
         }
         for (const SceneGraphNodeSnapshot& node : graphSnapshot_.nodes) {
             for (const auto* value : {&node.origin, &node.scale, &node.angles, &node.visible}) {
@@ -932,7 +1030,8 @@ private:
     [[nodiscard]] FrameVector2 imageSize(
         const ImageObject& image,
         const std::optional<FrameResourceRef>& source,
-        std::size_t objectIndex
+        std::size_t objectIndex,
+        int objectId
     ) {
         const std::string pointer = objectPointer(objectIndex, "size");
         if (image.model && image.model->fullscreen) {
@@ -942,7 +1041,7 @@ private:
             };
         }
         FrameVector2 result = vector2Value(
-            *model_, evaluate(image.size, pointer, std::nullopt), pointer,
+            *model_, evaluate(image.size, pointer, objectId), pointer,
             "Image size"
         );
         if (result.x < 0.0 || result.y < 0.0) {
@@ -1061,7 +1160,9 @@ private:
                 *image, objectIndex, node.id
             );
             const bool solidLayer = image->model && image->model->solidLayer;
-            const FrameVector2 size = imageSize(*image, source, objectIndex);
+            const FrameVector2 size = imageSize(
+                *image, source, objectIndex, node.id
+            );
             const std::uint32_t width = checkedDimension(
                 *model_, size.x, objectPointer(objectIndex, "size"), "Image width"
             );
@@ -1107,6 +1208,7 @@ private:
                 .objectIndex = objectIndex,
                 .objectId = node.id,
                 .visible = node.isVisible,
+                .solid = objects.at(objectIndex).base.solid,
                 .passthrough = image->model && image->model->passthrough,
                 .fullscreen = image->model && image->model->fullscreen,
                 .size = size,
@@ -1114,6 +1216,7 @@ private:
                 .source = resolvedSource,
                 .compositeA = compositeA.resource,
                 .compositeB = compositeB.resource,
+                .puppetMesh = image->model ? image->model->puppetMesh : nullptr,
                 .alpha = evaluate(image->alpha, objectPointer(objectIndex, "alpha"), node.id),
                 .color = evaluate(image->color, objectPointer(objectIndex, "color"), node.id),
                 .brightness = evaluate(image->brightness, objectPointer(objectIndex, "brightness"), node.id),
@@ -1244,6 +1347,26 @@ private:
         return numberValue(
             *model_, evaluate(value, pointer, objectId), pointer, description
         );
+    }
+
+    [[nodiscard]] int evaluatedParticleInteger(
+        const DynamicValue& value,
+        std::string pointer,
+        int objectId,
+        std::string_view description
+    ) {
+        const double result = evaluatedParticleNumber(
+            value, pointer, objectId, description
+        );
+        if (!std::isfinite(result) || std::floor(result) != result ||
+            result < static_cast<double>(std::numeric_limits<int>::min()) ||
+            result > static_cast<double>(std::numeric_limits<int>::max())) {
+            frameError(
+                *model_, SceneModelErrorCode::invalidValue, pointer,
+                std::string(description) + " must be a finite integer"
+            );
+        }
+        return static_cast<int>(result);
     }
 
     [[nodiscard]] bool evaluatedParticleBoolean(
@@ -1621,6 +1744,27 @@ private:
                     ),
                 };
                 return result;
+            } else if constexpr (std::is_same_v<
+                                     Source,
+                                     ParticleMapSequenceAroundControlPointInitializer>) {
+                return particle::MapSequenceAroundControlPointInitializer{
+                    .controlPoint = evaluatedParticleInteger(
+                        source.controlPoint, pointer + "/controlpoint", objectId,
+                        "Particle map-sequence control point"
+                    ),
+                    .count = evaluatedParticleInteger(
+                        source.count, pointer + "/count", objectId,
+                        "Particle map-sequence count"
+                    ),
+                    .speedMinimum = evaluatedParticleVector(
+                        source.speedMinimum, pointer + "/speedmin", objectId,
+                        "Particle map-sequence minimum speed"
+                    ),
+                    .speedMaximum = evaluatedParticleVector(
+                        source.speedMaximum, pointer + "/speedmax", objectId,
+                        "Particle map-sequence maximum speed"
+                    ),
+                };
             }
         }, initializer);
     }
@@ -1738,6 +1882,35 @@ private:
                 };
             } else if constexpr (std::is_same_v<
                                      Source,
+                                     ParticleOscillateSizeOperator>) {
+                return particle::OscillateSizeOperator{
+                    .frequencyMinimum = evaluatedParticleNumber(
+                        source.frequencyMinimum, pointer + "/frequencymin",
+                        objectId, "Particle size oscillator minimum frequency"
+                    ),
+                    .frequencyMaximum = evaluatedParticleNumber(
+                        source.frequencyMaximum, pointer + "/frequencymax",
+                        objectId, "Particle size oscillator maximum frequency"
+                    ),
+                    .scaleMinimum = evaluatedParticleNumber(
+                        source.scaleMinimum, pointer + "/scalemin", objectId,
+                        "Particle size oscillator minimum scale"
+                    ),
+                    .scaleMaximum = evaluatedParticleNumber(
+                        source.scaleMaximum, pointer + "/scalemax", objectId,
+                        "Particle size oscillator maximum scale"
+                    ),
+                    .phaseMinimum = evaluatedParticleNumber(
+                        source.phaseMinimum, pointer + "/phasemin", objectId,
+                        "Particle size oscillator minimum phase"
+                    ),
+                    .phaseMaximum = evaluatedParticleNumber(
+                        source.phaseMaximum, pointer + "/phasemax", objectId,
+                        "Particle size oscillator maximum phase"
+                    ),
+                };
+            } else if constexpr (std::is_same_v<
+                                     Source,
                                      ParticleControlPointAttractOperator>) {
                 const double threshold = evaluatedParticleNumber(
                     source.threshold, pointer + "/threshold", objectId,
@@ -1755,76 +1928,273 @@ private:
                     ),
                     .threshold = threshold,
                 };
+            } else if constexpr (std::is_same_v<
+                                     Source,
+                                     ParticleSizeChangeOperator>) {
+                return particle::SizeChangeOperator{
+                    .startTime = evaluatedParticleNumber(
+                        source.startTime, pointer + "/starttime", objectId,
+                        "Particle size-change start time"
+                    ),
+                    .endTime = evaluatedParticleNumber(
+                        source.endTime, pointer + "/endtime", objectId,
+                        "Particle size-change end time"
+                    ),
+                    .startValue = evaluatedParticleNumber(
+                        source.startValue, pointer + "/startvalue", objectId,
+                        "Particle size-change start value"
+                    ),
+                    .endValue = evaluatedParticleNumber(
+                        source.endValue, pointer + "/endvalue", objectId,
+                        "Particle size-change end value"
+                    ),
+                };
+            } else if constexpr (std::is_same_v<
+                                     Source,
+                                     ParticleAlphaChangeOperator>) {
+                return particle::AlphaChangeOperator{
+                    .startTime = evaluatedParticleNumber(
+                        source.startTime, pointer + "/starttime", objectId,
+                        "Particle alpha-change start time"
+                    ),
+                    .endTime = evaluatedParticleNumber(
+                        source.endTime, pointer + "/endtime", objectId,
+                        "Particle alpha-change end time"
+                    ),
+                    .startValue = evaluatedParticleNumber(
+                        source.startValue, pointer + "/startvalue", objectId,
+                        "Particle alpha-change start value"
+                    ),
+                    .endValue = evaluatedParticleNumber(
+                        source.endValue, pointer + "/endvalue", objectId,
+                        "Particle alpha-change end value"
+                    ),
+                };
+            } else if constexpr (std::is_same_v<
+                                     Source,
+                                     ParticleColorChangeOperator>) {
+                return particle::ColorChangeOperator{
+                    .startTime = evaluatedParticleNumber(
+                        source.startTime, pointer + "/starttime", objectId,
+                        "Particle color-change start time"
+                    ),
+                    .endTime = evaluatedParticleNumber(
+                        source.endTime, pointer + "/endtime", objectId,
+                        "Particle color-change end time"
+                    ),
+                    .startValue = evaluatedParticleVector(
+                        source.startValue, pointer + "/startvalue", objectId,
+                        "Particle color-change start value"
+                    ),
+                    .endValue = evaluatedParticleVector(
+                        source.endValue, pointer + "/endvalue", objectId,
+                        "Particle color-change end value"
+                    ),
+                };
+            } else if constexpr (std::is_same_v<
+                                     Source,
+                                     ParticleTurbulenceOperator>) {
+                return particle::TurbulenceOperator{
+                    .scale = evaluatedParticleNumber(
+                        source.scale, pointer + "/scale", objectId,
+                        "Particle turbulence scale"
+                    ),
+                    .speedMinimum = evaluatedParticleNumber(
+                        source.speedMinimum, pointer + "/speedmin", objectId,
+                        "Particle turbulence minimum speed"
+                    ),
+                    .speedMaximum = evaluatedParticleNumber(
+                        source.speedMaximum, pointer + "/speedmax", objectId,
+                        "Particle turbulence maximum speed"
+                    ),
+                    .timeScale = evaluatedParticleNumber(
+                        source.timeScale, pointer + "/timescale", objectId,
+                        "Particle turbulence time scale"
+                    ),
+                    .mask = evaluatedParticleVector(
+                        source.mask, pointer + "/mask", objectId,
+                        "Particle turbulence mask"
+                    ),
+                    .phaseMinimum = evaluatedParticleNumber(
+                        source.phaseMinimum, pointer + "/phasemin", objectId,
+                        "Particle turbulence minimum phase"
+                    ),
+                    .phaseMaximum = evaluatedParticleNumber(
+                        source.phaseMaximum, pointer + "/phasemax", objectId,
+                        "Particle turbulence maximum phase"
+                    ),
+                    .audioProcessingMode = evaluatedParticleInteger(
+                        source.audioProcessingMode,
+                        pointer + "/audioprocessingmode", objectId,
+                        "Particle turbulence audio processing mode"
+                    ),
+                };
+            } else if constexpr (std::is_same_v<
+                                     Source,
+                                     ParticleVortexOperator>) {
+                return particle::VortexOperator{
+                    .controlPoint = source.controlPoint,
+                    .flags = source.flags,
+                    .axis = evaluatedParticleVector(
+                        source.axis, pointer + "/axis", objectId,
+                        "Particle vortex axis"
+                    ),
+                    .offset = evaluatedParticleVector(
+                        source.offset, pointer + "/offset", objectId,
+                        "Particle vortex offset"
+                    ),
+                    .distanceInner = evaluatedParticleNumber(
+                        source.distanceInner, pointer + "/distanceinner", objectId,
+                        "Particle vortex inner distance"
+                    ),
+                    .distanceOuter = evaluatedParticleNumber(
+                        source.distanceOuter, pointer + "/distanceouter", objectId,
+                        "Particle vortex outer distance"
+                    ),
+                    .speedInner = evaluatedParticleNumber(
+                        source.speedInner, pointer + "/speedinner", objectId,
+                        "Particle vortex inner speed"
+                    ),
+                    .speedOuter = evaluatedParticleNumber(
+                        source.speedOuter, pointer + "/speedouter", objectId,
+                        "Particle vortex outer speed"
+                    ),
+                    .centerForce = evaluatedParticleNumber(
+                        source.centerForce, pointer + "/centerforce", objectId,
+                        "Particle vortex center force"
+                    ),
+                    .ringRadius = evaluatedParticleNumber(
+                        source.ringRadius, pointer + "/ringradius", objectId,
+                        "Particle vortex ring radius"
+                    ),
+                    .ringWidth = evaluatedParticleNumber(
+                        source.ringWidth, pointer + "/ringwidth", objectId,
+                        "Particle vortex ring width"
+                    ),
+                    .ringPullDistance = evaluatedParticleNumber(
+                        source.ringPullDistance,
+                        pointer + "/ringpulldistance", objectId,
+                        "Particle vortex ring pull distance"
+                    ),
+                    .ringPullForce = evaluatedParticleNumber(
+                        source.ringPullForce, pointer + "/ringpullforce", objectId,
+                        "Particle vortex ring pull force"
+                    ),
+                    .audioProcessingMode = evaluatedParticleInteger(
+                        source.audioProcessingMode,
+                        pointer + "/audioprocessingmode", objectId,
+                        "Particle vortex audio processing mode"
+                    ),
+                };
             }
         }, operation);
     }
 
-    [[nodiscard]] FrameResourceRef particleTexture(
+    [[nodiscard]] std::map<int, FrameResourceRef> particleTextures(
         const MaterialPass& pass,
         std::size_t objectIndex
     ) const {
         const std::string pointer = objectPointer(objectIndex, "particle") +
             "/material/passes/0";
-        if (!pass.userTextures.empty()) {
-            for (std::size_t index = 0; index < pass.userTextures.size(); ++index) {
-                if (pass.userTextures[index].name) {
-                    frameError(
-                        *model_, SceneModelErrorCode::unsupportedObject,
-                        pointer + "/usertextures/" + std::to_string(index),
-                        "Particle user textures are not supported"
-                    );
-                }
-            }
-        }
-        std::optional<std::string> texture;
+        std::map<int, std::string> names;
         for (std::size_t index = 0; index < pass.textures.size(); ++index) {
             const TextureSlot& slot = pass.textures[index];
             if (!slot.name) continue;
-            if (index != 0) {
-                frameError(
-                    *model_, SceneModelErrorCode::unsupportedObject,
-                    pointer + "/textures/" + std::to_string(index),
-                    "Particle materials support only static texture slot zero"
-                );
-            }
-            texture = *slot.name;
+            names.insert_or_assign(static_cast<int>(index), *slot.name);
         }
-        if (!texture || texture->empty()) {
+        // CParticle::detectTexture obtains the particle source from the
+        // ordinary material texture map.  User textures are still passed to
+        // the particle shader, but may not replace that primary source.
+        if (!names.contains(0) || names.at(0).empty()) {
             frameError(
                 *model_, SceneModelErrorCode::missingField,
                 pointer + "/textures/0",
-                "Particle material requires a static texture in slot zero"
+                "Particle material requires a texture in slot zero"
             );
         }
-        return resolveTexture(*texture, {}, pointer + "/textures/0");
+        for (std::size_t index = 0; index < pass.userTextures.size(); ++index) {
+            const TextureSlot& slot = pass.userTextures[index];
+            if (!slot.name || index == 0) continue;
+            names.insert_or_assign(static_cast<int>(index), *slot.name);
+        }
+        std::map<int, FrameResourceRef> result;
+        for (const auto& [index, name] : names) {
+            result.emplace(
+                index,
+                resolveTexture(
+                    name,
+                    {},
+                    pointer + "/textures/" + std::to_string(index)
+                )
+            );
+        }
+        return result;
+    }
+
+    [[nodiscard]] static bool particleTrailRenderer(
+        FrameParticleRendererKind kind
+    ) noexcept {
+        return kind == FrameParticleRendererKind::spriteTrail ||
+            kind == FrameParticleRendererKind::ropeTrail;
+    }
+
+    [[nodiscard]] FrameParticleRendererDescriptor particleRenderer(
+        const ParticleSpriteRenderer& source,
+        std::size_t objectIndex
+    ) const {
+        FrameParticleRendererDescriptor result;
+        if (source.name == "sprite") {
+            result.kind = FrameParticleRendererKind::sprite;
+        } else if (source.name == "spritetrail") {
+            result.kind = FrameParticleRendererKind::spriteTrail;
+        } else if (source.name == "rope") {
+            result.kind = FrameParticleRendererKind::rope;
+        } else if (source.name == "ropetrail") {
+            result.kind = FrameParticleRendererKind::ropeTrail;
+        } else {
+            frameError(
+                *model_, SceneModelErrorCode::unsupportedObject,
+                objectPointer(objectIndex, "particle") + "/renderer/0/name",
+                "Unsupported particle renderer '" + source.name + "'"
+            );
+        }
+        const auto finite = [&](double value, std::string_view field) {
+            if (!std::isfinite(value)) {
+                frameError(
+                    *model_, SceneModelErrorCode::invalidValue,
+                    objectPointer(objectIndex, "particle") +
+                        "/renderer/0/" + std::string(field),
+                    "Particle renderer field '" + std::string(field) +
+                        "' must be finite"
+                );
+            }
+            return value;
+        };
+        result.length = finite(source.length, "length");
+        result.maxLength = finite(source.maxLength, "maxlength");
+        result.minLength = finite(source.minLength, "minlength");
+        result.subdivision = finite(source.subdivision, "subdivision");
+        result.segments = finite(source.segments, "segments");
+        result.uvScale = finite(source.uvScale, "uvscale");
+        result.uvScrolling = source.uvScrolling;
+        result.uvSmoothing = source.uvSmoothing;
+        result.fadeAlpha = source.fadeAlpha;
+        result.fadeSize = source.fadeSize;
+        return result;
     }
 
     [[nodiscard]] ComboMap resolvedParticleCombos(
         const ComboMap& combos,
-        std::size_t objectIndex
+        FrameParticleRendererKind renderer
     ) const {
-        ComboMap result = {
-            {"GS_ENABLED", 0},
-            {"SPRITESHEET", 0},
-            {"THICKFORMAT", 1},
-            {"TRAILRENDERER", 0},
-        };
-        for (const auto& [name, value] : combos) {
-            if (name == "SPRITESHEET" && (value == 0 || value == 1)) {
-                result[name] = value;
-                continue;
-            }
-            const auto expected = result.find(name);
-            if (expected == result.end() || expected->second != value) {
-                frameError(
-                    *model_, SceneModelErrorCode::unsupportedObject,
-                    objectPointer(objectIndex, "particle") +
-                        "/material/passes/0/combos/" + name,
-                    "Particle material combo '" + name + "=" +
-                        std::to_string(value) + "' is not supported"
-                );
-            }
-        }
+        ComboMap result = combos;
+        result.insert_or_assign("GS_ENABLED", 0);
+        result.insert_or_assign("SPRITESHEET", 0);
+        result.insert_or_assign("THICKFORMAT", 1);
+        result.insert_or_assign(
+            "TRAILRENDERER",
+            particleTrailRenderer(renderer) ? 1 : 0
+        );
         return result;
     }
 
@@ -1846,43 +2216,77 @@ private:
             }
             const ParticleDefinition& definition = *object->definition;
             const Material& material = *definition.material;
-            if (material.passes.size() != 1) {
+            if (material.passes.empty()) {
                 frameError(
                     *model_, SceneModelErrorCode::unsupportedObject,
                     pointer + "/material/passes",
-                    "Particle material must contain exactly one pass"
+                    "Particle material must contain at least one pass"
                 );
             }
+            // CParticle::setupPass() in the pinned Linux renderer consumes the
+            // first authored pass and ignores any later passes. Keep that
+            // contract instead of rejecting an otherwise valid definition.
             const MaterialPass& pass = material.passes.front();
-            if (pass.shader != "genericparticle") {
-                frameError(
-                    *model_, SceneModelErrorCode::unsupportedObject,
-                    pointer + "/material/passes/0/shader",
-                    "Particle phase one supports only the 'genericparticle' shader"
-                );
-            }
-            if (!pass.constants.empty()) {
-                frameError(
-                    *model_, SceneModelErrorCode::unsupportedObject,
-                    pointer + "/material/passes/0/constantshadervalues",
-                    "Particle material shader constants are not supported"
-                );
-            }
-            const ComboMap combos = resolvedParticleCombos(
-                pass.combos, objectIndex
+            const FrameParticleRendererDescriptor renderer = particleRenderer(
+                definition.renderer, objectIndex
             );
-            const FrameResourceRef texture0 = particleTexture(pass, objectIndex);
+            const bool ropeRenderer =
+                renderer.kind == FrameParticleRendererKind::rope ||
+                renderer.kind == FrameParticleRendererKind::ropeTrail;
+            // Linux keeps the authored first-pass shader for sprite and
+            // spritetrail renderers. Rope variants alone force the dedicated
+            // genericropeparticle program.
+            const std::string shader = ropeRenderer
+                ? "genericropeparticle"
+                : pass.shader;
+            const ComboMap combos = resolvedParticleCombos(
+                pass.combos, renderer.kind
+            );
+            const std::map<int, FrameResourceRef> textures = particleTextures(
+                pass, objectIndex
+            );
+            const FrameResourceRef texture0 = textures.at(0);
             if (texture0.kind != FrameResourceKind::assetTexture) {
                 frameError(
                     *model_, SceneModelErrorCode::unsupportedObject,
                     pointer + "/material/passes/0/textures/0",
-                    "Particle texture slot zero must reference a static asset texture"
+                    "Particle texture slot zero must reference an asset texture"
                 );
             }
             const ShaderAssetPaths paths = materialShaderPaths(
-                *model_, material, pass.shader,
+                *model_, material, shader,
                 pointer + "/material/passes/0"
             );
+            const std::string materialObjectId =
+                "layer:" + std::to_string(node.id) +
+                "/particle/material/pass:0";
+            const std::string constantPointerPrefix =
+                pointer + "/material/passes/0/constants";
+            registerMaterialObject(
+                materialObjectId,
+                material.assetPath,
+                pass,
+                nullptr,
+                constantPointerPrefix
+            );
+            std::map<std::string, EvaluatedValue> constants;
+            for (const auto& [name, value] : pass.constants) {
+                constants.emplace(
+                    name,
+                    evaluate(
+                        value,
+                        constantPointerPrefix + '/' + name,
+                        node.id,
+                        script::ScriptPropertyOwner{
+                            .layerId = node.id,
+                            .type =
+                                script::ScriptPropertyOwnerType::material,
+                            .objectId = materialObjectId,
+                            .property = name,
+                        }
+                    )
+                );
+            }
             const FrameVector2 parallaxDepth = vector2Value(
                 *model_,
                 evaluate(
@@ -1948,7 +2352,7 @@ private:
                 .visible = node.isVisible,
                 .worldTransform = node.worldTransform,
                 .definitionIdentity = definition.assetPath,
-                .shader = pass.shader,
+                .shader = shader,
                 .vertexShaderPath = paths.vertex,
                 .fragmentShaderPath = paths.fragment,
                 .blending = pass.blending,
@@ -1956,11 +2360,14 @@ private:
                 .depthTest = pass.depthTest,
                 .depthWrite = pass.depthWrite,
                 .texture0 = texture0,
+                .textures = textures,
                 .combos = combos,
+                .constants = std::move(constants),
                 .parallaxDepth = parallaxDepth,
                 .perspective = (definition.flags & 4U) != 0U,
                 .animationMode = definition.animationMode,
                 .sequenceMultiplier = definition.sequenceMultiplier,
+                .renderer = renderer,
                 .configuration = std::move(configuration),
             });
             return descriptorIndex;
@@ -2004,13 +2411,6 @@ private:
                 frameError(
                     *model_, SceneModelErrorCode::invalidValue, base,
                     "Sound timing bounds must be finite and non-negative"
-                );
-            }
-            if (sound->startSilent) {
-                addIssue(
-                    FramePlanIssueCode::soundRuntimeUnavailable, node.id,
-                    base + "/startsilent",
-                    "startSilent sound activation is not implemented by the Scene runtime"
                 );
             }
             plan_.sounds.push_back({
@@ -2096,13 +2496,25 @@ private:
             const double maximum = std::max(image.size.x, image.size.y);
             const double scale = static_cast<double>(*definition.fit) / maximum;
             return {
-                checkedDimension(*model_, std::floor(image.size.x * scale), pointer + "/fit", "Framebuffer width"),
-                checkedDimension(*model_, std::floor(image.size.y * scale), pointer + "/fit", "Framebuffer height"),
+                checkedScaledFramebufferDimension(
+                    *model_, image.size.x * scale, pointer + "/fit",
+                    "Framebuffer width"
+                ),
+                checkedScaledFramebufferDimension(
+                    *model_, image.size.y * scale, pointer + "/fit",
+                    "Framebuffer height"
+                ),
             };
         }
         return {
-            checkedDimension(*model_, std::floor(image.size.x / definition.scale), pointer + "/scale", "Framebuffer width"),
-            checkedDimension(*model_, std::floor(image.size.y / definition.scale), pointer + "/scale", "Framebuffer height"),
+            checkedScaledFramebufferDimension(
+                *model_, image.size.x / definition.scale, pointer + "/scale",
+                "Framebuffer width"
+            ),
+            checkedScaledFramebufferDimension(
+                *model_, image.size.y / definition.scale, pointer + "/scale",
+                "Framebuffer height"
+            ),
         };
     }
 
@@ -2120,13 +2532,18 @@ private:
         }
         for (std::size_t passIndex = 0;
              passIndex < image.model->material->passes.size(); ++passIndex) {
+            const std::string materialPointer =
+                objectPointer(imageContext.objectIndex, "image") +
+                "/material/passes/" + std::to_string(passIndex);
+            const std::string materialObjectId =
+                "layer:" + std::to_string(imageContext.node->id) +
+                "/image/material/pass:" + std::to_string(passIndex);
             MaterialPass material = effectiveBasePass(
                 image.model->material->passes[passIndex], image, passIndex == 0
             );
             const ShaderAssetPaths paths = materialShaderPaths(
                 *model_, *image.model->material, material.shader,
-                objectPointer(imageContext.objectIndex, "image") +
-                    "/material/passes/" + std::to_string(passIndex)
+                materialPointer
             );
             result.emplace_back(PendingRender{
                 .origin = {
@@ -2137,19 +2554,17 @@ private:
                 .material = std::move(material),
                 .vertexShaderPath = paths.vertex,
                 .fragmentShaderPath = paths.fragment,
+                .materialObjectId = materialObjectId,
+                .constantPointerPrefix = materialPointer + "/constants",
             });
         }
 
+        std::optional<Vector3> magentaCompositeTint;
+        std::string magentaCompositePointer;
         for (std::size_t effectIndex = 0; effectIndex < image.effects.size(); ++effectIndex) {
             const ImageEffect& effectInstance = image.effects[effectIndex];
             const std::string effectPointer = objectPointer(imageContext.objectIndex, "effects") +
                 '/' + std::to_string(effectIndex);
-            if (!booleanValue(
-                    *model_, evaluate(effectInstance.visible, effectPointer + "/visible", imageContext.node->id),
-                    effectPointer + "/visible", "Effect visibility"
-                )) {
-                continue;
-            }
             if (!effectInstance.effect) {
                 frameError(
                     *model_, SceneModelErrorCode::assetFailure, effectPointer,
@@ -2157,6 +2572,121 @@ private:
                 );
             }
             const Effect& effect = *effectInstance.effect;
+            const std::string effectObjectId =
+                "layer:" + std::to_string(imageContext.node->id) +
+                "/effect:" + std::to_string(effectIndex);
+            std::vector<std::string> effectMaterialIds;
+            std::size_t descriptorOverrideIndex = 0;
+            for (std::size_t passIndex = 0;
+                 passIndex < effect.passes.size(); ++passIndex) {
+                const EffectPass& effectPass = effect.passes[passIndex];
+                if (!effectPass.material) continue;
+                const EffectPassOverride* overridePass = nullptr;
+                if (descriptorOverrideIndex <
+                    effectInstance.passOverrides.size()) {
+                    overridePass = &effectInstance.passOverrides[
+                        descriptorOverrideIndex
+                    ];
+                }
+                ++descriptorOverrideIndex;
+                for (std::size_t materialPassIndex = 0;
+                     materialPassIndex < effectPass.material->passes.size();
+                     ++materialPassIndex) {
+                    const std::string materialObjectId =
+                        effectObjectId + "/pass:" +
+                        std::to_string(passIndex) + "/material-pass:" +
+                        std::to_string(materialPassIndex);
+                    const std::string constantPointerPrefix =
+                        effectPointer + "/passes/" +
+                        std::to_string(passIndex) + "/material/passes/" +
+                        std::to_string(materialPassIndex) + "/constants";
+                    registerMaterialObject(
+                        materialObjectId,
+                        effectPass.material->assetPath,
+                        effectPass.material->passes[materialPassIndex],
+                        overridePass,
+                        constantPointerPrefix
+                    );
+                    effectMaterialIds.push_back(materialObjectId);
+                }
+            }
+            if (evaluationFrame_) {
+                script::ScriptPropertyObjectDescriptor descriptor{
+                    .id = effectObjectId,
+                    .type = script::ScriptPropertyObjectType::effect,
+                    .name = effectInstance.name.empty()
+                        ? effect.name
+                        : effectInstance.name,
+                    .properties = {{
+                        "visible",
+                        evaluateDynamicValue(
+                            *model_,
+                            effectInstance.visible,
+                            graphSnapshot_.propertyValues,
+                            effectPointer + "/visible"
+                        ).value,
+                    }},
+                    .materialIds = effectMaterialIds,
+                };
+                evaluationFrame_->registerScriptPropertyObject(
+                    std::move(descriptor)
+                );
+            }
+            script::ScriptPropertyOwner effectOwner{
+                .layerId = imageContext.node->id,
+                .type = script::ScriptPropertyOwnerType::effect,
+                .objectId = effectObjectId,
+                .property = "visible",
+            };
+            if (!booleanValue(
+                    *model_,
+                    evaluate(
+                        effectInstance.visible,
+                        effectPointer + "/visible",
+                        imageContext.node->id,
+                        std::move(effectOwner)
+                    ),
+                    effectPointer + "/visible", "Effect visibility"
+                )) {
+                continue;
+            }
+            if (!magentaCompositeTint) {
+                for (std::size_t overrideIndex = 0;
+                     overrideIndex < effectInstance.passOverrides.size();
+                     ++overrideIndex) {
+                    const EffectPassOverride& passOverride =
+                        effectInstance.passOverrides[overrideIndex];
+                    const auto composite = passOverride.combos.find("COMPOSITE");
+                    if (composite == passOverride.combos.end() ||
+                        composite->second != 2) {
+                        continue;
+                    }
+                    const auto color =
+                        passOverride.constants.find("compositecolor");
+                    if (color == passOverride.constants.end()) {
+                        continue;
+                    }
+                    const std::string colorPointer = effectPointer + "/passes/" +
+                        std::to_string(overrideIndex) +
+                        "/constantshadervalues/compositecolor";
+                    const Vector3 candidate = vector3Value(
+                        *model_,
+                        evaluate(
+                            color->second,
+                            colorPointer,
+                            imageContext.node->id
+                        ),
+                        colorPointer,
+                        "Composite color"
+                    );
+                    if (candidate.x > 0.55F && candidate.y < 0.25F &&
+                        candidate.z > 0.45F) {
+                        magentaCompositeTint = candidate;
+                        magentaCompositePointer = colorPointer;
+                        break;
+                    }
+                }
+            }
             const FramebufferMap localFramebuffers = effectFramebuffers(
                 imageContext, effectIndex, effect
             );
@@ -2258,10 +2788,16 @@ private:
                      ++materialPassIndex) {
                     const MaterialPass& material =
                         effectPass.material->passes[materialPassIndex];
+                    const std::string materialPointer =
+                        passPointer + "/material/passes/" +
+                        std::to_string(materialPassIndex);
+                    const std::string materialObjectId =
+                        effectObjectId + "/pass:" +
+                        std::to_string(passIndex) + "/material-pass:" +
+                        std::to_string(materialPassIndex);
                     const ShaderAssetPaths paths = materialShaderPaths(
                         *model_, *effectPass.material, material.shader,
-                        passPointer + "/material/passes/" +
-                            std::to_string(materialPassIndex)
+                        materialPointer
                     );
                     result.emplace_back(PendingRender{
                         .origin = {
@@ -2274,6 +2810,9 @@ private:
                         .material = material,
                         .vertexShaderPath = paths.vertex,
                         .fragmentShaderPath = paths.fragment,
+                        .materialObjectId = materialObjectId,
+                        .constantPointerPrefix =
+                            materialPointer + "/constants",
                         .overridePass = overridePass,
                         .binds = binds,
                         .localFramebuffers = localFramebuffers,
@@ -2281,6 +2820,106 @@ private:
                     });
                 }
             }
+        }
+
+        std::size_t compatibilityMaterialPassIndex =
+            image.model->material->passes.size();
+        if (magentaCompositeTint) {
+            if (!image.magentaCompositeTintMaterial ||
+                image.magentaCompositeTintMaterial->passes.empty()) {
+                frameError(
+                    *model_, SceneModelErrorCode::assetFailure,
+                    magentaCompositePointer,
+                    "Magenta COMPOSITE=2 requires materials/effects/tint.json"
+                );
+            }
+            MaterialPass material =
+                image.magentaCompositeTintMaterial->passes.front();
+            material.combos.insert_or_assign("BLENDMODE", 30);
+            DynamicValue color;
+            color.value = RuntimeValue::vector(
+                {
+                    magentaCompositeTint->x,
+                    magentaCompositeTint->y,
+                    magentaCompositeTint->z,
+                    0.0,
+                },
+                3
+            );
+            material.constants.insert_or_assign("color", std::move(color));
+            DynamicValue alpha;
+            alpha.value = RuntimeValue::floating(1.0);
+            material.constants.insert_or_assign("alpha", std::move(alpha));
+            const ShaderAssetPaths paths = materialShaderPaths(
+                *model_, *image.magentaCompositeTintMaterial, material.shader,
+                magentaCompositePointer
+            );
+            result.emplace_back(PendingRender{
+                .origin = {
+                    .imageIndex = imageContext.planImageIndex,
+                    .objectId = imageContext.node->id,
+                    .materialPassIndex = compatibilityMaterialPassIndex++,
+                },
+                .material = std::move(material),
+                .vertexShaderPath = paths.vertex,
+                .fragmentShaderPath = paths.fragment,
+                .materialObjectId =
+                    "layer:" + std::to_string(imageContext.node->id) +
+                    "/compat/tint/pass:" +
+                    std::to_string(compatibilityMaterialPassIndex - 1),
+                .constantPointerPrefix =
+                    magentaCompositePointer + "/compat-tint/constants",
+            });
+        }
+
+        // CImage adds the utility passthrough as a final compatibility pass
+        // when colorBlendMode is non-zero. The authored mode is a DynamicValue
+        // and may change per frame, so resolve the combo from the frozen image
+        // descriptor rather than from the loader's initial value.
+        const FrameImageDescriptor& descriptor =
+            plan_.images.at(imageContext.planImageIndex);
+        const std::int64_t blendMode = descriptor.colorBlendMode.value.integer();
+        if (blendMode > 0) {
+            if (!image.colorBlendMaterial ||
+                image.colorBlendMaterial->passes.empty()) {
+                frameError(
+                    *model_, SceneModelErrorCode::assetFailure,
+                    objectPointer(imageContext.objectIndex, "colorBlendMode"),
+                    "Non-zero colorBlendMode requires materials/util/effectpassthrough.json"
+                );
+            }
+            MaterialPass material = image.colorBlendMaterial->passes.front();
+            if (blendMode > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+                frameError(
+                    *model_, SceneModelErrorCode::invalidValue,
+                    objectPointer(imageContext.objectIndex, "colorBlendMode"),
+                    "colorBlendMode exceeds the supported combo range"
+                );
+            }
+            material.combos.insert_or_assign(
+                "BLENDMODE", static_cast<int>(blendMode)
+            );
+            const ShaderAssetPaths paths = materialShaderPaths(
+                *model_, *image.colorBlendMaterial, material.shader,
+                objectPointer(imageContext.objectIndex, "colorBlendMode")
+            );
+            result.emplace_back(PendingRender{
+                .origin = {
+                    .imageIndex = imageContext.planImageIndex,
+                    .objectId = imageContext.node->id,
+                    .materialPassIndex = compatibilityMaterialPassIndex,
+                },
+                .material = std::move(material),
+                .vertexShaderPath = paths.vertex,
+                .fragmentShaderPath = paths.fragment,
+                .materialObjectId =
+                    "layer:" + std::to_string(imageContext.node->id) +
+                    "/compat/color-blend/pass:" +
+                    std::to_string(compatibilityMaterialPassIndex),
+                .constantPointerPrefix =
+                    objectPointer(imageContext.objectIndex, "colorBlendMode") +
+                    "/compat-material/constants",
+            });
         }
         return result;
     }
@@ -2335,18 +2974,34 @@ private:
 
     [[nodiscard]] std::map<std::string, EvaluatedValue> resolveConstants(
         const PendingRender& pending,
-        std::string pointer,
         int objectId
     ) {
-        ConstantMap constants = pending.material.constants;
-        if (pending.overridePass != nullptr) {
-            for (const auto& [name, value] : pending.overridePass->constants) {
-                constants.insert_or_assign(name, value);
-            }
-        }
+        const ConstantMap constants = mergedConstants(
+            pending.material, pending.overridePass
+        );
+        registerMaterialObject(
+            pending.materialObjectId,
+            pending.material.shader,
+            pending.material,
+            pending.overridePass,
+            pending.constantPointerPrefix
+        );
         std::map<std::string, EvaluatedValue> result;
         for (const auto& [name, value] : constants) {
-            result.emplace(name, evaluate(value, pointer + '/' + name, objectId));
+            result.emplace(
+                name,
+                evaluate(
+                    value,
+                    pending.constantPointerPrefix + '/' + name,
+                    objectId,
+                    script::ScriptPropertyOwner{
+                        .layerId = objectId,
+                        .type = script::ScriptPropertyOwnerType::material,
+                        .objectId = pending.materialObjectId,
+                        .property = name,
+                    }
+                )
+            );
         }
         return result;
     }
@@ -2419,6 +3074,198 @@ private:
         }
     }
 
+    void planBloomObject() {
+        const Scene& scene = model_->project().scene;
+        const auto bloom = scene.generalValues.find("bloom");
+        if (bloom == scene.generalValues.end()) {
+            frameError(
+                *model_, SceneModelErrorCode::missingField,
+                "/general/bloom", "Scene bloom value is required"
+            );
+        }
+        const bool enabled = booleanValue(
+            *model_, evaluate(bloom->second, "/general/bloom", std::nullopt),
+            "/general/bloom", "Bloom enabled"
+        );
+        if (!enabled) {
+            return;
+        }
+        if (!scene.bloomModel || !scene.bloomEffect) {
+            frameError(
+                *model_, SceneModelErrorCode::assetFailure,
+                "/general/bloom",
+                "Bloom is enabled but its Linux compatibility resources are unavailable"
+            );
+        }
+
+        const PlanCheckpoint before = checkpoint();
+        const std::size_t syntheticIndex = model_->project().scene.objects.size();
+        try {
+            const FrameResourceRef compositeA = imageCompositeResource(-1, 'a');
+            const FrameResourceRef compositeB = imageCompositeResource(-1, 'b');
+            sceneFramebuffers_.emplace(compositeA.logicalName, compositeA);
+            sceneFramebuffers_.emplace(compositeB.logicalName, compositeB);
+            const FramebufferDescriptor descriptorA = createFramebuffer(
+                compositeA.id, compositeA.logicalName, FramebufferFormat::rgba8,
+                plan_.width, plan_.height, 1.0, true
+            );
+            const FramebufferDescriptor descriptorB = createFramebuffer(
+                compositeB.id, compositeB.logicalName, FramebufferFormat::rgba8,
+                plan_.width, plan_.height, 1.0, true
+            );
+
+            const auto dynamicLiteral = [](RuntimeValue value) {
+                DynamicValue result;
+                result.value = std::move(value);
+                return result;
+            };
+            const auto evaluatedLiteral = [](RuntimeValue value) {
+                return EvaluatedValue{
+                    .value = std::move(value),
+                    .source = DynamicValueSource::literal,
+                };
+            };
+
+            ImageObject bloomImage;
+            bloomImage.model = scene.bloomModel;
+            bloomImage.alpha = dynamicLiteral(RuntimeValue::floating(1.0));
+            bloomImage.color = dynamicLiteral(
+                RuntimeValue::color({1.0, 1.0, 1.0, 1.0})
+            );
+            bloomImage.size = dynamicLiteral(RuntimeValue::vector(
+                {static_cast<double>(plan_.width), static_cast<double>(plan_.height), 0.0, 0.0},
+                2
+            ));
+            bloomImage.parallaxDepth = dynamicLiteral(RuntimeValue::vector(
+                {0.0, 0.0, 0.0, 0.0}, 2
+            ));
+            bloomImage.brightness = dynamicLiteral(RuntimeValue::floating(1.0));
+            bloomImage.colorBlendMode = dynamicLiteral(RuntimeValue::integer(0));
+
+            const auto strength = scene.generalValues.find("bloomstrength");
+            const auto threshold = scene.generalValues.find("bloomthreshold");
+            if (strength == scene.generalValues.end() ||
+                threshold == scene.generalValues.end()) {
+                frameError(
+                    *model_, SceneModelErrorCode::missingField,
+                    "/general", "Bloom strength and threshold are required"
+                );
+            }
+            const EvaluatedValue strengthValue = evaluate(
+                strength->second, "/general/bloomstrength", std::nullopt
+            );
+            const EvaluatedValue thresholdValue = evaluate(
+                threshold->second, "/general/bloomthreshold", std::nullopt
+            );
+            const double strengthNumber = numberValue(
+                *model_, strengthValue, "/general/bloomstrength",
+                "Bloom strength"
+            );
+            const double thresholdNumber = numberValue(
+                *model_, thresholdValue, "/general/bloomthreshold",
+                "Bloom threshold"
+            );
+            const auto makeOverride = [
+                &dynamicLiteral,
+                strengthNumber,
+                thresholdNumber
+            ]() {
+                EffectPassOverride result;
+                result.id = -1;
+                result.constants.emplace(
+                    "bloomstrength",
+                    dynamicLiteral(RuntimeValue::floating(strengthNumber))
+                );
+                result.constants.emplace(
+                    "bloomthreshold",
+                    dynamicLiteral(RuntimeValue::floating(thresholdNumber))
+                );
+                return result;
+            };
+            ImageEffect bloomEffect;
+            bloomEffect.visible = dynamicLiteral(RuntimeValue::boolean(true));
+            bloomEffect.effect = scene.bloomEffect;
+            // The Linux synthetic object supplies exactly three overrides for
+            // its four material passes. Strength/threshold configure the three
+            // downsample/blur stages; the final combine pass intentionally has
+            // no override.
+            constexpr std::size_t linuxBloomOverrideCount = 3;
+            bloomEffect.passOverrides.reserve(linuxBloomOverrideCount);
+            for (std::size_t index = 0;
+                 index < linuxBloomOverrideCount; ++index) {
+                bloomEffect.passOverrides.push_back(makeOverride());
+            }
+            bloomImage.effects.push_back(std::move(bloomEffect));
+
+            const double bloomOriginX = static_cast<double>(plan_.width / 2);
+            const double bloomOriginY = static_cast<double>(plan_.height / 2);
+            SceneGraphNodeSnapshot node;
+            node.objectIndex = syntheticIndex;
+            node.id = -1;
+            node.origin = evaluatedLiteral(RuntimeValue::vector({
+                bloomOriginX,
+                bloomOriginY,
+                0.0,
+                0.0,
+            }, 3));
+            node.scale = evaluatedLiteral(RuntimeValue::vector({1.0, 1.0, 1.0, 0.0}, 3));
+            node.angles = evaluatedLiteral(RuntimeValue::vector({0.0, 0.0, 0.0, 0.0}, 3));
+            node.visible = evaluatedLiteral(RuntimeValue::boolean(true));
+            node.localTransform = {
+                .origin = {bloomOriginX, bloomOriginY, 0.0},
+                .scale = {1.0, 1.0, 1.0},
+                .angles = {0.0, 0.0, 0.0},
+            };
+            node.worldTransform = node.localTransform;
+            node.isVisible = true;
+
+            const std::size_t imageIndex = plan_.images.size();
+            plan_.images.push_back({
+                .objectIndex = syntheticIndex,
+                .objectId = -1,
+                .visible = true,
+                .solid = false,
+                .passthrough = false,
+                .fullscreen = false,
+                .size = {
+                    static_cast<double>(plan_.width),
+                    static_cast<double>(plan_.height),
+                },
+                .worldTransform = node.worldTransform,
+                .source = plan_.output,
+                .compositeA = descriptorA.resource,
+                .compositeB = descriptorB.resource,
+                .puppetMesh = nullptr,
+                .alpha = evaluatedLiteral(RuntimeValue::floating(1.0)),
+                .color = evaluatedLiteral(RuntimeValue::color({1.0, 1.0, 1.0, 1.0})),
+                .brightness = evaluatedLiteral(RuntimeValue::floating(1.0)),
+                .colorBlendMode = evaluatedLiteral(RuntimeValue::integer(0)),
+                .parallaxDepth = evaluatedLiteral(RuntimeValue::vector({0.0, 0.0, 0.0, 0.0}, 2)),
+                .horizontalAlignment = "center",
+            });
+            scheduleImage(ImageContext{
+                .planImageIndex = imageIndex,
+                .objectIndex = syntheticIndex,
+                .image = &bloomImage,
+                .node = &node,
+                .currentMain = descriptorA.resource,
+                .currentSub = descriptorB.resource,
+            });
+        } catch (const std::bad_alloc&) {
+            rollback(before);
+            throw;
+        } catch (const std::exception& error) {
+            rollback(before);
+            addIssue(
+                FramePlanIssueCode::objectPlanningFailed,
+                -1,
+                "/general/bloom",
+                std::string("Bloom post-process planning failed: ") + error.what(),
+                FramePlanIssueSeverity::frameFatal
+            );
+        }
+    }
+
     void planSoundObjects() {
         const auto& objects = model_->project().scene.objects;
         for (std::size_t objectIndex = 0;
@@ -2434,6 +3281,69 @@ private:
                     createSoundDescriptor(objectIndex);
                 }
             );
+        }
+    }
+
+    void finalizeScriptLayerStates() {
+        const auto textureAnimations = evaluationFrame_
+            ? evaluationFrame_->textureAnimationSnapshots()
+            : graphSnapshot_.textureAnimations;
+        std::map<int, script::ScriptTextureAnimationSnapshot> animationsByLayer;
+        for (const auto& animation : textureAnimations) {
+            animationsByLayer.insert_or_assign(animation.layerId, animation);
+        }
+        for (FrameImageDescriptor& image : plan_.images) {
+            if (evaluationFrame_) {
+                if (const auto solid = evaluationFrame_->layerProperty(
+                        image.objectId, "solid"
+                    )) {
+                    image.solid = solid->boolean();
+                }
+            }
+            const auto animation = animationsByLayer.find(image.objectId);
+            if (animation == animationsByLayer.end()) continue;
+            if (image.source.kind != FrameResourceKind::assetTexture ||
+                image.source.id != animation->second.assetIdentity) {
+                frameError(
+                    *model_,
+                    SceneModelErrorCode::invalidValue,
+                    objectPointer(image.objectIndex, "image"),
+                    "Texture animation controller asset does not match the image source"
+                );
+            }
+            image.textureAnimation = FrameTextureAnimationOverride{
+                .assetIdentity = animation->second.assetIdentity,
+                .frame = animation->second.frame,
+            };
+        }
+
+        const auto sounds = evaluationFrame_
+            ? evaluationFrame_->soundSnapshots()
+            : graphSnapshot_.sounds;
+        std::map<int, script::ScriptSoundSnapshot> soundsByLayer;
+        for (const auto& sound : sounds) {
+            soundsByLayer.insert_or_assign(sound.layerId, sound);
+        }
+        for (FrameSoundDescriptor& sound : plan_.sounds) {
+            const auto state = soundsByLayer.find(sound.objectId);
+            if (state == soundsByLayer.end()) continue;
+            if (!state->second.command) continue;
+            FrameSoundPlaybackCommandAction action;
+            switch (state->second.command->action) {
+                case script::ScriptSoundCommandAction::play:
+                    action = FrameSoundPlaybackCommandAction::play;
+                    break;
+                case script::ScriptSoundCommandAction::pause:
+                    action = FrameSoundPlaybackCommandAction::pause;
+                    break;
+                case script::ScriptSoundCommandAction::stop:
+                    action = FrameSoundPlaybackCommandAction::stop;
+                    break;
+            }
+            sound.playbackCommand = FrameSoundPlaybackCommand{
+                .action = action,
+                .generation = state->second.command->generation,
+            };
         }
     }
 
@@ -2488,7 +3398,11 @@ private:
                     inTargetEffectSequence ? effectInput : std::nullopt;
                 FrameGeometryKind geometry = FrameGeometryKind::imageLocal;
                 FrameTexCoordKind texcoords = FrameTexCoordKind::image;
-                if (firstDraw && image.passthrough) {
+                const bool firstPuppetDraw =
+                    firstDraw && image.puppetMesh != nullptr;
+                if (firstPuppetDraw) {
+                    geometry = FrameGeometryKind::puppetMesh;
+                } else if (firstDraw && image.passthrough) {
                     geometry = image.fullscreen
                         ? FrameGeometryKind::fullscreenLocal
                         : FrameGeometryKind::passthroughCapture;
@@ -2497,7 +3411,10 @@ private:
                     geometry = FrameGeometryKind::fullscreenLocal;
                     texcoords = FrameTexCoordKind::full;
                 }
-                if (finalPass) {
+                // A one-pass Puppet image is both the first and final draw;
+                // keep the indexed geometry in that case. Effects after the
+                // first draw intentionally remain fullscreen quads.
+                if (finalPass && !firstPuppetDraw) {
                     geometry = FrameGeometryKind::imageScene;
                 }
                 const std::string pointer = objectPointer(context.objectIndex, "effects");
@@ -2519,11 +3436,26 @@ private:
                         *render, asInput, previous, render->localFramebuffers, pointer
                     ),
                     .combos = resolveCombos(*render),
-                    .constants = resolveConstants(
-                        *render, pointer + "/constants", context.node->id
-                    ),
+                    .constants = resolveConstants(*render, context.node->id),
                     .writeAlpha = !finalPass,
                 };
+                if (firstPuppetDraw && destination != plan_.output) {
+                    // Linux clears an intermediate target to transparent
+                    // immediately before drawing the partial Puppet mesh.
+                    // Composite framebuffers persist across frames here, so
+                    // omitting this clear would leak stale pixels outside the
+                    // indexed triangles.
+                    plan_.operations.emplace_back(FrameClearCommand{
+                        .origin = render->origin,
+                        .destination = destination,
+                        .color = {
+                            .red = 0.0,
+                            .green = 0.0,
+                            .blue = 0.0,
+                            .alpha = 0.0,
+                        },
+                    });
+                }
                 plan_.operations.emplace_back(std::move(operation));
                 imageRenderOperations.push_back(plan_.operations.size() - 1);
                 firstDraw = false;
@@ -2569,6 +3501,16 @@ private:
             );
             last.blending = first.blending;
             first.blending = BlendingMode::normal;
+        }
+        if (!imageRenderOperations.empty() && image.puppetMesh) {
+            auto& first = std::get<FrameRenderPass>(
+                plan_.operations.at(imageRenderOperations.front())
+            );
+            if (first.geometry == FrameGeometryKind::puppetMesh) {
+                // Linux forces the indexed Puppet pass to translucent after
+                // moving the authored base blend mode to the final pass.
+                first.blending = BlendingMode::translucent;
+            }
         }
     }
 
@@ -2757,6 +3699,33 @@ private:
                     } else if constexpr (std::is_same_v<Operation, FrameTextCommand>) {
                         write(value.destination, basePointer + "/destination");
                     } else if constexpr (std::is_same_v<Operation, FrameParticleCommand>) {
+                        const FrameParticleDescriptor& descriptor =
+                            plan_.particles.at(value.particleIndex);
+                        const bool refract = [&] {
+                            const auto combo = descriptor.combos.find("REFRACT");
+                            return combo != descriptor.combos.end() &&
+                                combo->second != 0;
+                        }();
+                        for (const auto& [slot, resource] : descriptor.textures) {
+                            read(
+                                resource,
+                                basePointer + "/textures/" +
+                                    std::to_string(slot)
+                            );
+                        }
+                        if (value.destination.kind == FrameResourceKind::framebuffer &&
+                            operationReads.contains(value.destination.id) &&
+                            !refract) {
+                            addIssue(
+                                FramePlanIssueCode::framebufferFeedbackLoop,
+                                objectId,
+                                basePointer + "/destination",
+                                "Particle render operation samples framebuffer '" +
+                                    value.destination.id +
+                                    "' while writing to the same resource"
+                            );
+                            valid = false;
+                        }
                         write(value.destination, basePointer + "/destination");
                     }
                 },
@@ -2925,10 +3894,21 @@ EvaluatedFramePlan SceneFrameGraph::evaluate(
     const SceneFrameInputs& inputs,
     std::optional<FrameProjectionSize> drawableFallback
 ) const {
-    auto evaluation = graph_->evaluationFrame(inputs);
-    FrameEvaluationState state(graph_, graph_->snapshot(*evaluation), inputs);
+    const FrameProjectionSize projection = projectionSize(drawableFallback);
+    SceneFrameInputs resolvedInputs = inputs;
+    resolvedInputs.cursorWorldPosition = std::array<double, 3>{
+        std::clamp(inputs.pointerX, 0.0, 1.0) *
+            static_cast<double>(projection.width),
+        (1.0 - std::clamp(inputs.pointerY, 0.0, 1.0)) *
+            static_cast<double>(projection.height),
+        0.0,
+    };
+    auto evaluation = graph_->evaluationFrame(resolvedInputs);
+    FrameEvaluationState state(
+        graph_, graph_->snapshot(*evaluation), resolvedInputs
+    );
     FramePlan plan = PlanBuilder(
-        graph_->model(), state.graphSnapshot_, projectionSize(drawableFallback),
+        graph_->model(), state.graphSnapshot_, projection,
         state.inputs_, evaluation.get()
     ).build();
     state.scriptedValues_ = evaluation->evaluatedScriptValues();

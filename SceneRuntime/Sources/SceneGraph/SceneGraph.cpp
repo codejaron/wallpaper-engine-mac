@@ -1,7 +1,15 @@
 #include <SceneGraph/SceneGraph.hpp>
 
+#include <SceneCore/AssetResolver.hpp>
+#include <SceneCore/FormatError.hpp>
+#include <SceneCore/Runtime.hpp>
+#include <SceneCore/Texture.hpp>
+
 #include <algorithm>
+#include <charconv>
 #include <cmath>
+#include <ctime>
+#include <limits>
 #include <sstream>
 #include <set>
 #include <mutex>
@@ -11,6 +19,30 @@
 
 namespace we::scene {
 namespace {
+
+double localDaytimeFraction() {
+    const std::time_t now = std::time(nullptr);
+    if (now == static_cast<std::time_t>(-1)) {
+        throw SceneModelError(
+            SceneModelErrorCode::invalidValue,
+            "",
+            "/frameInputs/timeOfDay",
+            {},
+            "Reading local wall-clock time failed"
+        );
+    }
+    std::tm local{};
+    if (::localtime_r(&now, &local) == nullptr) {
+        throw SceneModelError(
+            SceneModelErrorCode::invalidValue,
+            "",
+            "/frameInputs/timeOfDay",
+            {},
+            "Converting local wall-clock time failed"
+        );
+    }
+    return static_cast<double>(local.tm_hour * 60 + local.tm_min) / (24.0 * 60.0);
+}
 
 enum class VisitState : std::uint8_t { unvisited, visiting, visited };
 
@@ -170,6 +202,161 @@ std::vector<std::size_t> buildOrder(
     return order;
 }
 
+struct LayerScriptOwner final {
+    int id = 0;
+    std::string property;
+};
+
+std::optional<LayerScriptOwner> layerScriptOwner(
+    const SceneModel& model,
+    std::string_view pointer
+) {
+    constexpr std::string_view prefix = "/objects/";
+    if (!pointer.starts_with(prefix)) return std::nullopt;
+    const std::size_t indexEnd = pointer.find('/', prefix.size());
+    if (indexEnd == std::string_view::npos || indexEnd + 1 >= pointer.size()) {
+        return std::nullopt;
+    }
+    std::size_t objectIndex = 0;
+    const auto parsed = std::from_chars(
+        pointer.data() + prefix.size(),
+        pointer.data() + indexEnd,
+        objectIndex
+    );
+    if (parsed.ec != std::errc{} || parsed.ptr != pointer.data() + indexEnd ||
+        objectIndex >= model.project().scene.objects.size()) {
+        return std::nullopt;
+    }
+    const std::size_t propertyStart = indexEnd + 1;
+    const std::size_t propertyEnd = pointer.find('/', propertyStart);
+    // Only the DynamicValue directly owned by the scene object may receive
+    // the layer-registry overlay. Nested paths (for example
+    // `/objects/0/origin/scriptproperties/amount`) describe a script's own
+    // inputs; treating them as the owner's `origin` would replace the real
+    // user-bound value with the layer vector and can turn arithmetic into NaN.
+    if (propertyEnd != std::string_view::npos) return std::nullopt;
+    std::string property(
+        pointer.substr(
+            propertyStart,
+            std::string_view::npos
+        )
+    );
+    if (property.empty()) return std::nullopt;
+    // SceneScript exposes the names used by Wallpaper Engine's public layer
+    // contract. Keep the graph's canonical DynamicValue keys as the single
+    // storage location for common aliases.
+    if (property == "opacity") property = "alpha";
+    if (property == "pointsize") property = "pointSize";
+    const SceneObject& object = model.project().scene.objects[objectIndex];
+    if (std::holds_alternative<GroupObject>(object.data)) {
+        return std::nullopt;
+    }
+    return LayerScriptOwner{.id = object.base.id, .property = property};
+}
+
+std::optional<std::string> primaryTextureIdentity(const ImageObject& image) {
+    if (!image.model || image.model->solidLayer ||
+        !image.model->material || image.model->material->passes.empty()) {
+        return std::nullopt;
+    }
+    const MaterialPass& pass = image.model->material->passes.front();
+    const auto slotName = [](const TextureSlots& slots) -> std::optional<std::string> {
+        if (slots.empty() || !slots.front().name || slots.front().name->empty()) {
+            return std::nullopt;
+        }
+        return *slots.front().name;
+    };
+    // Match FrameGraph's first-pass precedence. Instance slots fill an absent
+    // authored slot; they do not replace one already present in the material.
+    std::optional<std::string> name = slotName(pass.userTextures);
+    if (!name) name = slotName(image.instanceUserTextures);
+    if (!name) name = slotName(pass.textures);
+    if (!name) name = slotName(image.instanceTextures);
+    if (!name) return std::nullopt;
+    std::string path = "materials/" + *name;
+    if (!path.ends_with(".tex")) path += ".tex";
+    return path;
+}
+
+std::vector<script::ScriptLayerDescriptor> sceneLayerDescriptors(
+    const SceneModel& model,
+    const std::map<std::string, Value>& properties
+) {
+    const auto& objects = model.project().scene.objects;
+    std::vector<script::ScriptLayerDescriptor> result;
+    result.reserve(objects.size());
+    for (std::size_t index = 0; index < objects.size(); ++index) {
+        const SceneObject& object = objects[index];
+        script::ScriptLayerType type;
+        if (std::holds_alternative<ImageObject>(object.data)) {
+            type = script::ScriptLayerType::image;
+        } else if (std::holds_alternative<TextObject>(object.data)) {
+            type = script::ScriptLayerType::text;
+        } else if (std::holds_alternative<ParticleObject>(object.data)) {
+            type = script::ScriptLayerType::particle;
+        } else if (std::holds_alternative<SoundObject>(object.data)) {
+            type = script::ScriptLayerType::sound;
+        } else {
+            continue;
+        }
+        script::ScriptLayerDescriptor descriptor{
+            .id = object.base.id,
+            .name = object.base.name,
+            .type = type,
+        };
+        const auto add = [&](std::string_view name, const DynamicValue& value) {
+            descriptor.properties.emplace(
+                std::string(name),
+                evaluateDynamicValue(
+                    model, value,
+                    properties,
+                    objectPointer(index, name)
+                ).value
+            );
+        };
+        add("origin", object.base.origin);
+        add("scale", object.base.scale);
+        add("angles", object.base.angles);
+        add("visible", object.base.visible);
+        if (const auto* image = std::get_if<ImageObject>(&object.data)) {
+            descriptor.properties.emplace(
+                "solid", RuntimeValue::boolean(object.base.solid)
+            );
+            descriptor.textureAssetIdentity = primaryTextureIdentity(*image);
+            add("alpha", image->alpha);
+            add("color", image->color);
+            add("size", image->size);
+            add("parallaxDepth", image->parallaxDepth);
+            add("brightness", image->brightness);
+            add("colorBlendMode", image->colorBlendMode);
+        } else if (const auto* text = std::get_if<TextObject>(&object.data)) {
+            add("text", text->text);
+            add("pointSize", text->pointSize);
+            add("size", text->size);
+            add("color", text->color);
+            add("alpha", text->alpha);
+            add("padding", text->padding);
+            add("spacing", text->spacing);
+        } else if (const auto* particle = std::get_if<ParticleObject>(&object.data)) {
+            add("parallaxDepth", particle->parallaxDepth);
+            add("enabled", particle->instanceOverride.enabled);
+            add("alpha", particle->instanceOverride.alpha);
+            add("size", particle->instanceOverride.size);
+            add("lifetime", particle->instanceOverride.lifetime);
+            add("rate", particle->instanceOverride.rate);
+            add("speed", particle->instanceOverride.speed);
+            add("count", particle->instanceOverride.count);
+            add("color", particle->instanceOverride.color);
+            add("colorMultiplier", particle->instanceOverride.colorMultiplier);
+        } else if (const auto* sound = std::get_if<SoundObject>(&object.data)) {
+            descriptor.soundStartsAutomatically = !sound->startSilent;
+            add("volume", sound->volume);
+        }
+        result.push_back(std::move(descriptor));
+    }
+    return result;
+}
+
 Vector3 vector3Value(
     const SceneModel& model,
     const EvaluatedValue& evaluated,
@@ -202,6 +389,202 @@ bool booleanValue(
     (void)model;
     (void)pointer;
     return evaluated.value.boolean();
+}
+
+script::ScriptSceneSnapshot sceneScriptSnapshot(
+    const SceneModel& model,
+    const std::map<std::string, Value>& properties
+) {
+    const Scene& scene = model.project().scene;
+    script::ScriptSceneSnapshot result;
+
+    const auto evaluate = [&](const DynamicValue& dynamic, std::string pointer) {
+        return evaluateDynamicValue(
+            model, dynamic, properties, std::move(pointer)
+        ).value;
+    };
+    const auto number = [&](const DynamicValue& dynamic, std::string pointer) {
+        const RuntimeValue value = evaluate(dynamic, pointer);
+        const double result = value.number();
+        if (!std::isfinite(result)) {
+            graphError(
+                model,
+                SceneModelErrorCode::invalidValue,
+                std::move(pointer),
+                {},
+                "SceneScript scene number is not finite"
+            );
+        }
+        return result;
+    };
+    const auto boolean = [&](const DynamicValue& dynamic, std::string pointer) {
+        return evaluate(dynamic, pointer).boolean();
+    };
+    const auto integer32 = [&](const DynamicValue& dynamic, std::string pointer) {
+        const RuntimeValue value = evaluate(dynamic, pointer);
+        const std::int64_t result = value.integer();
+        if (result < std::numeric_limits<std::int32_t>::min() ||
+            result > std::numeric_limits<std::int32_t>::max()) {
+            graphError(
+                model,
+                SceneModelErrorCode::invalidValue,
+                std::move(pointer),
+                {},
+                "SceneScript scene integer is outside Int32 range"
+            );
+        }
+        return static_cast<std::int32_t>(result);
+    };
+    const auto color = [&](const DynamicValue& dynamic, std::string pointer) {
+        const RuntimeValue value = evaluate(dynamic, pointer);
+        if (!value.isVector() || value.componentCount() < 3) {
+            graphError(
+                model,
+                SceneModelErrorCode::typeMismatch,
+                std::move(pointer),
+                {},
+                "SceneScript scene color must project to three components"
+            );
+        }
+        const auto& components = value.vector();
+        std::array<double, 3> result{
+            components[0], components[1], components[2]
+        };
+        if (!std::all_of(
+                result.begin(), result.end(),
+                [](double component) { return std::isfinite(component); })) {
+            graphError(
+                model,
+                SceneModelErrorCode::invalidValue,
+                std::move(pointer),
+                {},
+                "SceneScript scene color contains a non-finite component"
+            );
+        }
+        return result;
+    };
+
+    const auto general = [&](std::string_view key) -> const DynamicValue& {
+        const auto found = scene.generalValues.find(std::string(key));
+        if (found == scene.generalValues.end()) {
+            graphError(
+                model,
+                SceneModelErrorCode::missingField,
+                "/general/" + std::string(key),
+                {},
+                "SceneScript scene value is missing"
+            );
+        }
+        return found->second;
+    };
+
+    result.bloom = boolean(general("bloom"), "/general/bloom");
+    // Linux's SceneObject adapter exposes Int32 projections for these values.
+    result.bloomStrength = integer32(
+        general("bloomstrength"), "/general/bloomstrength"
+    );
+    result.bloomThreshold = integer32(
+        general("bloomthreshold"), "/general/bloomthreshold"
+    );
+    // Preserve the pinned Linux contract: clearenabled is wired to bloom,
+    // rather than to a separate clear-enabled field.
+    result.clearEnabled = result.bloom;
+    result.clearColor = color(general("clearcolor"), "/general/clearcolor");
+    result.ambientColor = color(
+        general("ambientcolor"), "/general/ambientcolor"
+    );
+    // The upstream Linux adapter currently returns ambientcolor here. This is
+    // intentional parity, including the historical accessor quirk.
+    result.skylightColor = result.ambientColor;
+    result.fieldOfView = number(scene.camera.fieldOfView, "/camera/fov");
+    result.nearZ = number(scene.camera.nearPlane, "/camera/nearz");
+    result.farZ = number(scene.camera.farPlane, "/camera/farz");
+    result.cameraFade = boolean(general("camerafade"), "/general/camerafade");
+    result.cameraShake = boolean(general("camerashake"), "/general/camerashake");
+    result.cameraShakeSpeed = number(
+        general("camerashakespeed"), "/general/camerashakespeed"
+    );
+    result.cameraShakeAmplitude = number(
+        general("camerashakeamplitude"), "/general/camerashakeamplitude"
+    );
+    result.cameraShakeRoughness = number(
+        general("camerashakeroughness"), "/general/camerashakeroughness"
+    );
+    result.cameraParallax = boolean(
+        general("cameraparallax"), "/general/cameraparallax"
+    );
+    result.cameraParallaxAmount = number(
+        general("cameraparallaxamount"), "/general/cameraparallaxamount"
+    );
+    result.cameraParallaxDelay = number(
+        general("cameraparallaxdelay"), "/general/cameraparallaxdelay"
+    );
+    result.cameraParallaxMouseInfluence = number(
+        general("cameraparallaxmouseinfluence"),
+        "/general/cameraparallaxmouseinfluence"
+    );
+    return result;
+}
+
+std::shared_ptr<const script::ScriptUserPropertiesSnapshot>
+sceneScriptUserPropertiesSnapshot(
+    const SceneModel& model,
+    const std::map<std::string, Value>& properties
+) {
+    auto result = std::make_shared<script::ScriptUserPropertiesSnapshot>();
+    for (const auto& [name, value] : properties) {
+        const auto definition = model.project().properties.find(name);
+        if (definition == model.project().properties.end()) {
+            graphError(
+                model,
+                SceneModelErrorCode::danglingReference,
+                "/properties/" + name,
+                {name},
+                "Project user-property snapshot contains an unknown key"
+            );
+        }
+        try {
+            if (definition->second.type == PropertyType::color) {
+                const auto* source = std::get_if<std::string>(&value.storage);
+                if (source == nullptr) {
+                    graphError(
+                        model,
+                        SceneModelErrorCode::typeMismatch,
+                        "/properties/" + name,
+                        {name},
+                        "Color user property must be stored as a color string"
+                    );
+                }
+                const RuntimeValue color = RuntimeValue::colorString(*source);
+                if (!color.isVector() || color.componentCount() < 3) {
+                    graphError(
+                        model,
+                        SceneModelErrorCode::typeMismatch,
+                        "/properties/" + name,
+                        {name},
+                        "Color user property must project to a Vec3"
+                    );
+                }
+                result->values.emplace(
+                    name, RuntimeValue::vector(color.vector(), 3)
+                );
+            } else {
+                result->values.emplace(name, RuntimeValue::fromValue(value));
+            }
+        } catch (const SceneModelError&) {
+            throw;
+        } catch (const std::exception& error) {
+            graphError(
+                model,
+                SceneModelErrorCode::invalidValue,
+                "/properties/" + name,
+                {name},
+                "Project user property cannot be exposed to SceneScript: " +
+                    std::string(error.what())
+            );
+        }
+    }
+    return result;
 }
 
 Vector3 multiply(const Vector3& lhs, const Vector3& rhs) {
@@ -240,6 +623,11 @@ struct SceneGraph::ScriptState final {
     };
 
     script::ScriptRuntime runtime;
+    std::shared_ptr<script::ScriptLayerRegistry> layerRegistry =
+        std::make_shared<script::ScriptLayerRegistry>();
+    std::shared_ptr<script::ScriptPropertyObjectRegistry>
+        propertyObjectRegistry =
+            std::make_shared<script::ScriptPropertyObjectRegistry>();
     std::map<std::string, Instance> instances;
     std::recursive_mutex mutex;
 };
@@ -250,23 +638,80 @@ struct SceneGraph::EvaluationFrame::Impl final {
           properties(owner.model_->propertyState()) {
         if (!std::isfinite(inputs.runtimeSeconds) || inputs.runtimeSeconds < 0 ||
             !std::isfinite(inputs.frameTimeSeconds) || inputs.frameTimeSeconds < 0 ||
+            (inputs.timeOfDay &&
+                (!std::isfinite(*inputs.timeOfDay) || *inputs.timeOfDay < 0 || *inputs.timeOfDay > 1)) ||
+          (inputs.audioSpectrum &&
+                !audioSpectrumIsFinite(*inputs.audioSpectrum)) ||
             !std::isfinite(inputs.pointerX) || !std::isfinite(inputs.pointerY)) {
             graphError(
                 *graph.model_, SceneModelErrorCode::invalidValue, "/frameInputs", {},
                 "Scene frame inputs must be finite and time values must be non-negative"
             );
         }
+        if (!inputs.timeOfDay) {
+            inputs.timeOfDay = localDaytimeFraction();
+        }
+        if (!inputs.sceneSnapshot) {
+            inputs.sceneSnapshot = sceneScriptSnapshot(
+                *graph.model_, properties.values
+            );
+        }
+        userProperties = sceneScriptUserPropertiesSnapshot(
+            *graph.model_, properties.values
+        );
+        graph.scriptState_->layerRegistry->setRuntimeSeconds(
+            inputs.runtimeSeconds
+        );
+        graph.scriptState_->layerRegistry->setBaseLayers(
+            sceneLayerDescriptors(*graph.model_, properties.values)
+        );
+        graph.scriptState_->layerRegistry->setSoundRuntimeStates(
+            inputs.soundRuntimeStates
+        );
     }
 
     EvaluatedValue evaluate(
         const DynamicValue& dynamic,
-        const std::string& pointer
+        const std::string& pointer,
+        script::ScriptPropertyOwner owner = {}
     ) {
         const EvaluatedValue connected = evaluateDynamicValue(
             *graph.model_, dynamic, properties.values, pointer
         );
+        if (owner.type == script::ScriptPropertyOwnerType::none) {
+            if (const auto layerOwner = layerScriptOwner(*graph.model_, pointer)) {
+                owner.layerId = layerOwner->id;
+                owner.type = script::ScriptPropertyOwnerType::layer;
+                owner.property = layerOwner->property;
+            }
+        }
+        EvaluatedValue connectedWithOverlay = connected;
+        const auto readOwner = [&]() -> std::optional<RuntimeValue> {
+            if (owner.type == script::ScriptPropertyOwnerType::layer &&
+                owner.layerId && !owner.property.empty()) {
+                return graph.scriptState_->layerRegistry->read(
+                    *owner.layerId, owner.property
+                );
+            }
+            if ((owner.type == script::ScriptPropertyOwnerType::effect ||
+                 owner.type == script::ScriptPropertyOwnerType::material) &&
+                !owner.objectId.empty() && !owner.property.empty()) {
+                return graph.scriptState_->propertyObjectRegistry->read(
+                    owner.objectId, owner.property
+                );
+            }
+            return std::nullopt;
+        };
         if (!dynamic.script) {
-            return connected;
+            if (const auto ownerValue = readOwner()) {
+                connectedWithOverlay.value = *ownerValue;
+                connectedWithOverlay.source = dynamic.user
+                    ? DynamicValueSource::user
+                    : DynamicValueSource::literal;
+            }
+        }
+        if (!dynamic.script) {
+            return connectedWithOverlay;
         }
         if (const auto found = values.find(pointer); found != values.end()) {
             ++scriptStats.at(pointer).cacheHitCount;
@@ -286,9 +731,15 @@ struct SceneGraph::EvaluationFrame::Impl final {
 
         std::map<std::string, RuntimeValue> scriptProperties;
         for (const auto& [name, child] : dynamic.scriptProperties) {
+            script::ScriptPropertyOwner childOwner;
+            childOwner.layerId = owner.layerId;
             scriptProperties.emplace(
                 name,
-                evaluate(child, pointer + "/scriptproperties/" + name).value
+                evaluate(
+                    child,
+                    pointer + "/scriptproperties/" + name,
+                    childOwner
+                ).value
             );
         }
 
@@ -302,7 +753,10 @@ struct SceneGraph::EvaluationFrame::Impl final {
                     *dynamic.script,
                     connected.value,
                     scriptProperties,
-                    dynamic.user ? dynamic.user->condition : std::nullopt
+                    dynamic.user ? dynamic.user->condition : std::nullopt,
+                    graph.scriptState_->layerRegistry,
+                    graph.scriptState_->propertyObjectRegistry,
+                    owner
                 );
                 if (dynamic.user) {
                     instance.connectedUserValue = connected.value;
@@ -320,8 +774,17 @@ struct SceneGraph::EvaluationFrame::Impl final {
                 .value = instance.script->evaluate({
                     .runtimeSeconds = inputs.runtimeSeconds,
                     .frameTimeSeconds = inputs.frameTimeSeconds,
+                    .timeOfDay = inputs.timeOfDay,
+                    .isScreensaver = inputs.isScreensaver,
+                    .audioSpectrum = inputs.audioSpectrum,
+                    .sceneSnapshot = inputs.sceneSnapshot,
+                    .userProperties = userProperties,
                     .pointerX = inputs.pointerX,
                     .pointerY = inputs.pointerY,
+                    .cursorWorldPosition = inputs.cursorWorldPosition,
+                    .pointerLeftDown = inputs.pointerLeftDown,
+                    .cursorEvents = inputs.cursorEvents,
+                    .mediaSnapshot = inputs.mediaSnapshot,
                 }),
                 .source = DynamicValueSource::script,
             };
@@ -350,6 +813,7 @@ struct SceneGraph::EvaluationFrame::Impl final {
     std::unique_lock<std::recursive_mutex> frameLock;
     SceneFrameInputs inputs;
     PropertyStateSnapshot properties;
+    std::shared_ptr<const script::ScriptUserPropertiesSnapshot> userProperties;
     std::map<std::string, EvaluatedValue> values;
     std::map<std::string, EvaluationFrame::ScriptEvaluationStats> scriptStats;
     std::set<std::string> evaluating;
@@ -454,6 +918,42 @@ SceneGraph::SceneGraph(std::shared_ptr<SceneModel> model)
             "Scene model is required to create a scene graph"
         );
     }
+    const std::weak_ptr<SceneModel> weakModel = model_;
+    scriptState_->layerRegistry->setTextureAnimationResolver(
+        [weakModel](std::string_view assetIdentity)
+            -> std::optional<script::ScriptTextureAnimationMetadata> {
+            const auto model = weakModel.lock();
+            if (!model) {
+                throw std::runtime_error(
+                    "Scene model is unavailable while resolving texture animation"
+                );
+            }
+            try {
+                const Texture texture = model->runtime()->assetResolver().parseTexture(
+                    assetIdentity
+                );
+                if (!texture.isAnimated() || texture.frames.empty()) {
+                    return std::nullopt;
+                }
+                script::ScriptTextureAnimationMetadata result{
+                    .assetIdentity = std::string(assetIdentity),
+                };
+                result.frameDurations.reserve(texture.frames.size());
+                for (const TextureFrame& frame : texture.frames) {
+                    result.frameDurations.push_back(frame.frameTime);
+                }
+                return result;
+            } catch (const FormatError& error) {
+                throw SceneModelError(
+                    SceneModelErrorCode::assetFailure,
+                    model->project().scene.assetPath,
+                    "/textureAnimations/" + std::string(assetIdentity),
+                    {std::string(assetIdentity)},
+                    error.what()
+                );
+            }
+        }
+    );
     const auto& objects = model_->project().scene.objects;
     for (std::size_t index = 0; index < objects.size(); ++index) {
         objectIndices_.emplace(objects[index].base.id, index);
@@ -473,6 +973,11 @@ SceneGraphSnapshot SceneGraph::snapshot() const {
     result.propertyValues = std::move(propertyState.values);
     result.initializationOrder = initializationOrder_;
     result.renderOrder = renderOrder_;
+    {
+        std::lock_guard lock(scriptState_->mutex);
+        result.textureAnimations = scriptState_->layerRegistry->textureAnimationSnapshots();
+        result.sounds = scriptState_->layerRegistry->soundSnapshots();
+    }
     result.nodes.reserve(objects.size());
 
     const auto& snapshotProperties = result.propertyValues;
@@ -538,9 +1043,18 @@ SceneGraph::EvaluationFrame::EvaluationFrame(std::unique_ptr<Impl> impl)
     : impl_(std::move(impl)) {}
 SceneGraph::EvaluationFrame::~EvaluationFrame() = default;
 EvaluatedValue SceneGraph::EvaluationFrame::evaluate(
-    const DynamicValue& dynamic, std::string pointer
+    const DynamicValue& dynamic,
+    std::string pointer,
+    script::ScriptPropertyOwner owner
 ) {
-    return impl_->evaluate(dynamic, pointer);
+    return impl_->evaluate(dynamic, pointer, std::move(owner));
+}
+void SceneGraph::EvaluationFrame::registerScriptPropertyObject(
+    script::ScriptPropertyObjectDescriptor descriptor
+) {
+    impl_->graph.scriptState_->propertyObjectRegistry->setBaseObject(
+        std::move(descriptor)
+    );
 }
 std::uint64_t SceneGraph::EvaluationFrame::modelRevision() const noexcept {
     return impl_->properties.revision;
@@ -559,6 +1073,23 @@ SceneGraph::EvaluationFrame::scriptEvaluationStats() const {
     result.reserve(impl_->scriptStats.size());
     for (const auto& [pointer, stats] : impl_->scriptStats) result.push_back(stats);
     return result;
+}
+
+std::vector<script::ScriptTextureAnimationSnapshot>
+SceneGraph::EvaluationFrame::textureAnimationSnapshots() const {
+    return impl_->graph.scriptState_->layerRegistry->textureAnimationSnapshots();
+}
+
+std::vector<script::ScriptSoundSnapshot>
+SceneGraph::EvaluationFrame::soundSnapshots() const {
+    return impl_->graph.scriptState_->layerRegistry->soundSnapshots();
+}
+
+std::optional<RuntimeValue> SceneGraph::EvaluationFrame::layerProperty(
+    int layerId,
+    std::string_view property
+) const {
+    return impl_->graph.scriptState_->layerRegistry->read(layerId, property);
 }
 
 std::unique_ptr<SceneGraph::EvaluationFrame> SceneGraph::evaluationFrame(
@@ -606,6 +1137,14 @@ SceneGraphSnapshot SceneGraph::snapshot(EvaluationFrame& frame) const {
             );
         }
     }
+    // Dynamic object fields can execute SceneScript callbacks that mutate
+    // texture-animation and sound state through the shared layer registry.
+    // Capture those behavior snapshots only after every dynamic field has
+    // been evaluated, otherwise this immutable graph snapshot can contain
+    // state from the beginning of the frame while its node values represent
+    // the end of the frame.
+    result.textureAnimations = frame.textureAnimationSnapshots();
+    result.sounds = frame.soundSnapshots();
     return result;
 }
 

@@ -9,7 +9,9 @@ import AVKit
 import SwiftUI
 import Combine
 
+@MainActor
 class VideoWallpaperViewModel: ObservableObject {
+    let screenId: String
     var currentWallpaper: WEWallpaper {
         didSet {
             // Remove observer for old item before replacing
@@ -20,27 +22,29 @@ class VideoWallpaperViewModel: ObservableObject {
             self.player.replaceCurrentItem(with: newItem)
             NotificationCenter.default.addObserver(self, selector: #selector(playerDidFinishPlaying(_:)), name: .AVPlayerItemDidPlayToEndTime, object: newItem)
             // Force-apply rate and volume — replaceCurrentItem resets player to paused
-            self.player.rate = self.playRate
-            self.player.volume = self.playVolume
+            self.applyEffectiveRate()
+            self.applyEffectiveVolume()
         }
     }
 
     var playRate: Float = 0 {
         didSet {
-            self.player.rate = playRate
+            applyEffectiveRate()
         }
     }
 
     var playVolume: Float = 0 {
         didSet {
-            self.player.volume = playVolume
+            applyEffectiveVolume()
         }
     }
 
     var player = AVPlayer()
     private var cancellables = Set<AnyCancellable>()
+    private var isSystemSleeping = false
 
-    init(wallpaper currentWallpaper: WEWallpaper) {
+    init(wallpaper currentWallpaper: WEWallpaper, screenId: String) {
+        self.screenId = screenId
         self.currentWallpaper = currentWallpaper
         self.player = AVPlayer(url: currentWallpaper.wallpaperDirectory.appending(path: currentWallpaper.project.file))
         NotificationCenter.default.addObserver(self, selector: #selector(playerDidFinishPlaying(_:)), name: .AVPlayerItemDidPlayToEndTime, object: self.player.currentItem)
@@ -49,17 +53,28 @@ class VideoWallpaperViewModel: ObservableObject {
 
         // Directly observe playRate/playVolume changes from the shared WallpaperViewModel
         let wvm = AppDelegate.shared.wallpaperViewModel
-        wvm.$playRate
+        wvm.$effectivePlayRate
             .receive(on: DispatchQueue.main)
             .sink { [weak self] rate in
                 self?.playRate = rate
             }
             .store(in: &cancellables)
-        wvm.$playVolume
+        wvm.$effectivePlayVolume
             .receive(on: DispatchQueue.main)
             .sink { [weak self] volume in
                 self?.playVolume = volume
             }
+            .store(in: &cancellables)
+        applyEffectiveVolume()
+        AppDelegate.shared.sceneAudioOwnerCoordinator.$ownerScreenId
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.applyEffectiveVolume() }
+            .store(in: &cancellables)
+        AppDelegate.shared.globalSettingsViewModel.$settings
+            .map(\.audioOutput)
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.applyEffectiveVolume() }
             .store(in: &cancellables)
     }
 
@@ -71,19 +86,31 @@ class VideoWallpaperViewModel: ObservableObject {
     @objc private func playerDidFinishPlaying(_ notification: Notification) {
         // Replay video
         self.player.seek(to: CMTime.zero)
-        self.player.rate = self.playRate
+        applyEffectiveRate()
     }
 
     @objc private func playerDidStopPlaying(_ notification: Notification) {
         // Resume playback
-        self.player.rate = self.playRate
+        applyEffectiveRate()
     }
 
     @objc func systemWillSleep(_ notification: Notification) {
-        self.player.rate = 0
+        isSystemSleeping = true
+        applyEffectiveRate()
     }
 
     @objc func systemDidWake(_ notification: Notification) {
-        self.player.rate = self.playRate
+        isSystemSleeping = false
+        applyEffectiveRate()
+    }
+
+    private func applyEffectiveRate() {
+        player.rate = isSystemSleeping ? 0 : playRate
+    }
+
+    private func applyEffectiveVolume() {
+        let enabled = AppDelegate.shared.globalSettingsViewModel.settings.audioOutput
+        let owner = AppDelegate.shared.sceneAudioOwnerCoordinator.isAudible(screenId: screenId)
+        player.volume = owner && enabled ? playVolume : 0
     }
 }

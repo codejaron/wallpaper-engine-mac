@@ -12,25 +12,32 @@
 #include <string>
 
 using we::scene::particle::AlphaFadeOperator;
+using we::scene::particle::AlphaChangeOperator;
 using we::scene::particle::AlphaRandomInitializer;
 using we::scene::particle::AngularMovementOperator;
 using we::scene::particle::AngularVelocityRandomInitializer;
 using we::scene::particle::BoxRandomEmitter;
 using we::scene::particle::ColorRandomInitializer;
+using we::scene::particle::ColorChangeOperator;
 using we::scene::particle::Configuration;
 using we::scene::particle::ControlPoint;
 using we::scene::particle::ControlPointAttractOperator;
 using we::scene::particle::LifetimeRandomInitializer;
 using we::scene::particle::MovementOperator;
+using we::scene::particle::MapSequenceAroundControlPointInitializer;
 using we::scene::particle::OscillateAlphaOperator;
 using we::scene::particle::OscillatePositionOperator;
+using we::scene::particle::OscillateSizeOperator;
 using we::scene::particle::ParticleSimulation;
 using we::scene::particle::RotationRandomInitializer;
 using we::scene::particle::SizeRandomInitializer;
+using we::scene::particle::SizeChangeOperator;
 using we::scene::particle::SphereRandomEmitter;
+using we::scene::particle::TurbulenceOperator;
 using we::scene::particle::TurbulentVelocityRandomInitializer;
 using we::scene::particle::Vector3;
 using we::scene::particle::VelocityRandomInitializer;
+using we::scene::particle::VortexOperator;
 
 struct WESceneParticleTestHandle {
     explicit WESceneParticleTestHandle(ParticleSimulation value)
@@ -518,6 +525,14 @@ Configuration oscillatorConfiguration() {
             .phaseMinimum = 0.0,
             .phaseMaximum = 1.0,
         },
+        OscillateSizeOperator{
+            .frequencyMinimum = 0.5,
+            .frequencyMaximum = 2.0,
+            .scaleMinimum = 0.5,
+            .scaleMaximum = 1.5,
+            .phaseMinimum = 0.0,
+            .phaseMaximum = 1.0,
+        },
     };
     return configuration;
 }
@@ -547,6 +562,137 @@ Configuration turbulentConfiguration() {
             .right = {0.0, 0.0, 1.0},
         },
     };
+    return configuration;
+}
+
+Configuration changesConfiguration() {
+    Configuration configuration;
+    configuration.maxCount = 1;
+    configuration.fixedStepSeconds = 0.25;
+    configuration.emitters.push_back(BoxRandomEmitter{.base = {
+        .directions = {},
+        .distanceMin = {},
+        .distanceMax = {},
+        .origin = {},
+        .instantaneous = 1,
+        .rate = 0.0,
+    }});
+    configuration.initializers = {
+        LifetimeRandomInitializer{1.0, 1.0},
+        SizeRandomInitializer{10.0, 10.0, 1.0},
+        ColorRandomInitializer{{1.0, 1.0, 1.0}, {1.0, 1.0, 1.0}},
+        AlphaRandomInitializer{1.0, 1.0},
+    };
+    configuration.operators = {
+        SizeChangeOperator{
+            .startTime = 0.0,
+            .endTime = 1.0,
+            .startValue = 1.0,
+            .endValue = 3.0,
+        },
+        AlphaChangeOperator{
+            .startTime = 0.0,
+            .endTime = 1.0,
+            .startValue = 1.0,
+            .endValue = 0.0,
+        },
+        ColorChangeOperator{
+            .startTime = 0.0,
+            .endTime = 1.0,
+            .startValue = {1.0, 0.0, 0.0},
+            .endValue = {0.0, 1.0, 1.0},
+        },
+    };
+    return configuration;
+}
+
+Configuration mapSequenceConfiguration() {
+    Configuration configuration;
+    configuration.maxCount = 4;
+    configuration.fixedStepSeconds = 0.1;
+    configuration.controlPoints.push_back(ControlPoint{
+        .id = 2,
+        .position = {10.0, 20.0, 0.0},
+    });
+    configuration.emitters.push_back(BoxRandomEmitter{.base = {
+        .directions = {},
+        .distanceMin = {},
+        .distanceMax = {},
+        .origin = {},
+        .instantaneous = 4,
+        .rate = 0.0,
+    }});
+    configuration.initializers = {
+        LifetimeRandomInitializer{2.0, 2.0},
+        MapSequenceAroundControlPointInitializer{
+            .controlPoint = 2,
+            .count = 4,
+            .speedMinimum = {1.0, 0.0, 0.0},
+            .speedMaximum = {1.0, 0.0, 0.0},
+        },
+    };
+    return configuration;
+}
+
+Configuration turbulenceOperatorConfiguration() {
+    Configuration configuration;
+    configuration.maxCount = 1;
+    configuration.fixedStepSeconds = 0.1;
+    configuration.emitters.push_back(BoxRandomEmitter{.base = {
+        .directions = {},
+        .distanceMin = {},
+        .distanceMax = {},
+        .origin = {},
+        .instantaneous = 1,
+        .rate = 0.0,
+    }});
+    configuration.initializers.push_back(LifetimeRandomInitializer{5.0, 5.0});
+    configuration.operators.push_back(TurbulenceOperator{
+        .scale = 0.25,
+        .speedMinimum = 4.0,
+        .speedMaximum = 4.0,
+        .timeScale = 0.5,
+        .mask = {1.0, 1.0, 0.0},
+        .phaseMinimum = 0.0,
+        .phaseMaximum = 0.0,
+        .audioProcessingMode = 0,
+    });
+    return configuration;
+}
+
+Configuration vortexConfiguration(bool audioMode) {
+    Configuration configuration;
+    configuration.maxCount = 1;
+    configuration.fixedStepSeconds = 0.1;
+    configuration.controlPoints.push_back(ControlPoint{
+        .id = 0,
+        .position = {},
+    });
+    configuration.emitters.push_back(BoxRandomEmitter{.base = {
+        .directions = {},
+        .distanceMin = {},
+        .distanceMax = {},
+        .origin = {10.0, 0.0, 0.0},
+        .instantaneous = 1,
+        .rate = 0.0,
+    }});
+    configuration.initializers.push_back(LifetimeRandomInitializer{5.0, 5.0});
+    configuration.operators.push_back(VortexOperator{
+        .controlPoint = 0,
+        .flags = 0,
+        .axis = {0.0, 0.0, 1.0},
+        .offset = {},
+        .distanceInner = 0.0,
+        .distanceOuter = 20.0,
+        .speedInner = 2.0,
+        .speedOuter = 2.0,
+        .centerForce = 0.0,
+        .ringRadius = 300.0,
+        .ringWidth = 50.0,
+        .ringPullDistance = 50.0,
+        .ringPullForce = 10.0,
+        .audioProcessingMode = audioMode ? 1 : 0,
+    });
     return configuration;
 }
 
@@ -801,6 +947,21 @@ Configuration configurationFor(const std::string& scenario) {
     }
     if (scenario == "turbulent") {
         return turbulentConfiguration();
+    }
+    if (scenario == "changes") {
+        return changesConfiguration();
+    }
+    if (scenario == "mapSequence") {
+        return mapSequenceConfiguration();
+    }
+    if (scenario == "turbulenceOperator") {
+        return turbulenceOperatorConfiguration();
+    }
+    if (scenario == "vortex") {
+        return vortexConfiguration(false);
+    }
+    if (scenario == "vortexAudio") {
+        return vortexConfiguration(true);
     }
     if (scenario == "reverseRanges") {
         return reverseRangeConfiguration();

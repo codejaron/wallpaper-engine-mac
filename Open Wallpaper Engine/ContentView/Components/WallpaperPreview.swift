@@ -201,7 +201,11 @@ struct WallpaperPreview: SubviewOfContentView {
                                     .frame(width: 35)
                             }
                         case "web":
-                            EmptyView()
+                            ScenePropertyControls(
+                                wallpaperViewModel: wallpaperViewModel,
+                                screenId: wallpaperViewModel.selectedScreenId,
+                                wallpaper: wallpaperViewModel.currentWallpaper
+                            )
                         case "scene":
                             ScenePropertyControls(
                                 wallpaperViewModel: wallpaperViewModel,

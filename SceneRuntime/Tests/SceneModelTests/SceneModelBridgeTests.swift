@@ -512,6 +512,51 @@ final class SceneModelBridgeTests: XCTestCase {
         }
     }
 
+    func testSyntheticAudioProcessingCapabilityReportsUnavailableInput() throws {
+        var documents = validDocuments()
+        var project = documents["project.json"] as! [String: Any]
+        var general = project["general"] as! [String: Any]
+        general["supportsaudioprocessing"] = true
+        project["general"] = general
+        documents["project.json"] = project
+
+        let loaded = try loadSynthetic(documents)
+        defer {
+            we_scene_model_destroy(loaded.model)
+            we_scene_runtime_destroy(loaded.runtime)
+            try? FileManager.default.removeItem(at: loaded.root)
+        }
+
+        var info = WESceneProjectInfo()
+        var error: WESceneRuntimeErrorRef?
+        XCTAssertEqual(
+            we_scene_model_project_info(loaded.model, &info, &error),
+            1,
+            errorMessage(error)
+        )
+        defer { we_scene_runtime_error_destroy(error) }
+
+        XCTAssertEqual(info.supports_audio_processing, 1)
+        XCTAssertEqual(
+            info.audio_input_status,
+            WE_SCENE_AUDIO_INPUT_UNAVAILABLE
+        )
+    }
+
+    func testOrdinaryEffectDoesNotRequireMagentaCompatibilityMaterial() throws {
+        let documents = validDocuments()
+        XCTAssertNil(documents["materials/effects/tint.json"])
+
+        let loaded = try loadSynthetic(documents)
+        defer {
+            we_scene_model_destroy(loaded.model)
+            we_scene_runtime_destroy(loaded.runtime)
+            try? FileManager.default.removeItem(at: loaded.root)
+        }
+
+        XCTAssertEqual(try objectInfos(loaded.model).count, 4)
+    }
+
     func testSyntheticDeepTypedModelContract() throws {
         let fixture = try makeSyntheticPackage(documents: validDocuments())
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -971,6 +1016,11 @@ final class SceneModelBridgeTests: XCTestCase {
             "scalemax": 0.8, "scalemin": 0.2,
         ])
         operators.append([
+            "frequencymax": 5, "frequencymin": 1,
+            "name": "oscillatesize", "phasemax": 2, "phasemin": 0.5,
+            "scalemax": 1.4, "scalemin": 0.6,
+        ])
+        operators.append([
             "controlpoint": 1, "name": "controlpointattract",
             "origin": "1 2 3", "scale": 200, "threshold": 500,
         ])
@@ -1015,7 +1065,7 @@ final class SceneModelBridgeTests: XCTestCase {
         }
         XCTAssertEqual(particle.flags, 4)
         XCTAssertEqual(particle.initializer_count, 8)
-        XCTAssertEqual(particle.operator_count, 6)
+        XCTAssertEqual(particle.operator_count, 7)
 
         var angular = WESceneModelTestParticleInitializerInfo()
         try checkTypedQuery { errorBuffer, size in
@@ -1352,7 +1402,7 @@ final class SceneModelBridgeTests: XCTestCase {
         XCTAssertEqual(typed.stats.particle_object_count, 1)
     }
 
-    func testSyntheticParticleUnsupportedContractsAreStructured() throws {
+    func testSyntheticParticleTrailRendererAndChildContractsAreRetained() throws {
         func mutateDefinition(
             _ body: (inout [String: Any]) -> Void
         ) -> [String: Any] {
@@ -1363,19 +1413,72 @@ final class SceneModelBridgeTests: XCTestCase {
             return documents
         }
 
-        let unsupportedRenderer = try loadSyntheticFailure(mutateDefinition {
-            $0["renderer"] = [["name": "spritetrail"]]
+        let rendererFixture = try makeSyntheticPackage(documents: mutateDefinition {
+            $0["renderer"] = [[
+                "fadealpha": true,
+                "fadesize": true,
+                "length": 0.25,
+                "maxlength": 8,
+                "minlength": 0.1,
+                "name": "spritetrail",
+                "segments": 6,
+                "subdivision": 3,
+                "uvscale": 2,
+                "uvscrolling": true,
+                "uvsmoothing": false,
+            ]]
         })
-        XCTAssertEqual(unsupportedRenderer.jsonPointer, "/renderer/0/name")
-
-        let children = try loadSyntheticFailure(mutateDefinition {
-            $0["children"] = [["particle": "particles/child.json"]]
-        })
-        XCTAssertEqual(children.jsonPointer, "/children")
-        XCTAssertEqual(
-            children.code,
-            WE_SCENE_RUNTIME_ERROR_SCENE_UNSUPPORTED_OBJECT
+        defer { try? FileManager.default.removeItem(at: rendererFixture.root) }
+        let rendererTyped = try loadTypedModel(
+            assets: rendererFixture.assets,
+            package: rendererFixture.package
         )
+        defer { we_scene_model_test_destroy(rendererTyped.handle) }
+        var rendererParticle = WESceneModelTestParticleInfo()
+        try checkTypedQuery { errorBuffer, size in
+            we_scene_model_test_particle_info(
+                rendererTyped.handle, 4, &rendererParticle, errorBuffer, size
+            )
+        }
+        XCTAssertEqual(string(rendererParticle.renderer_name), "spritetrail")
+        XCTAssertEqual(rendererParticle.renderer_length, 0.25, accuracy: 1e-9)
+        XCTAssertEqual(rendererParticle.renderer_max_length, 8, accuracy: 1e-9)
+        XCTAssertEqual(rendererParticle.renderer_min_length, 0.1, accuracy: 1e-9)
+        XCTAssertEqual(rendererParticle.renderer_subdivision, 3, accuracy: 1e-9)
+        XCTAssertEqual(rendererParticle.renderer_segments, 6, accuracy: 1e-9)
+        XCTAssertEqual(rendererParticle.renderer_uv_scale, 2, accuracy: 1e-9)
+        XCTAssertEqual(rendererParticle.renderer_uv_scrolling, 1)
+        XCTAssertEqual(rendererParticle.renderer_uv_smoothing, 0)
+        XCTAssertEqual(rendererParticle.renderer_fade_alpha, 1)
+        XCTAssertEqual(rendererParticle.renderer_fade_size, 1)
+
+        var childDocuments = mutateDefinition {
+            $0["children"] = [[
+                "angles": "0 0 0",
+                "controlpointstartindex": 2,
+                "maxcount": 7,
+                "name": "particles/child.json",
+                "origin": "0 5 0",
+                "particle": "particles/child.json",
+                "probability": 0.5,
+                "scale": 1.25,
+                "type": "static",
+            ]]
+        }
+        let childFixture = try makeSyntheticPackage(documents: childDocuments)
+        defer { try? FileManager.default.removeItem(at: childFixture.root) }
+        let childTyped = try loadTypedModel(
+            assets: childFixture.assets,
+            package: childFixture.package
+        )
+        defer { we_scene_model_test_destroy(childTyped.handle) }
+        var childParticle = WESceneModelTestParticleInfo()
+        try checkTypedQuery { errorBuffer, size in
+            we_scene_model_test_particle_info(
+                childTyped.handle, 4, &childParticle, errorBuffer, size
+            )
+        }
+        XCTAssertEqual(childParticle.child_count, 1)
     }
 
     func testSyntheticParticleMetadataAndParentFollowUpstreamAcceptance() throws {
@@ -1426,8 +1529,8 @@ final class SceneModelBridgeTests: XCTestCase {
         XCTAssertEqual(particle.object_id, 5)
         XCTAssertEqual(string(particle.asset_path), "particles/test.json")
         XCTAssertEqual(particle.emitter_count, 2)
-        XCTAssertEqual(particle.initializer_count, 6)
-        XCTAssertEqual(particle.operator_count, 2)
+        XCTAssertEqual(particle.initializer_count, 7)
+        XCTAssertEqual(particle.operator_count, 3)
     }
 
     func testSyntheticParticleReferenceAndTypeFailuresAreExplicit() throws {

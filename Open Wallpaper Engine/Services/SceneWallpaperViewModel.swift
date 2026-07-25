@@ -3,8 +3,6 @@ import OpenGL
 import SceneAudio
 import SceneRuntimeBridge
 
-private let scenePresentationScaling = WE_SCENE_PRESENTATION_ASPECT_FILL
-
 private struct SceneExecutorIssue: Hashable {
     let severity: String
     let objectIndex: Int
@@ -43,9 +41,17 @@ final class SceneRuntimeSession {
     private var previousExecutorIssues: Set<SceneExecutorIssue> = []
     private var previousExecutorIssueReadFailure: String?
     private var isPaused = false
+    private var lastMediaSnapshot: SceneMediaProviderSnapshot?
+    private(set) var audioPlaybackIssue: String?
+    private(set) var requiresAudioSpectrum = false
     private(set) var properties: [ScenePropertyDefinition] = []
 
-    init(wallpaper: WEWallpaper, assetsDirectory: String?, cglContext: CGLContextObj) throws {
+    init(
+        wallpaper: WEWallpaper,
+        assetsDirectory: String?,
+        cglContext: CGLContextObj,
+        isScreensaver: Bool
+    ) throws {
         guard let assetsPath = assetsDirectory, !assetsPath.isEmpty else {
             throw SceneRuntimeSessionError.configuration(
                 "Wallpaper Engine assets directory is not configured"
@@ -78,6 +84,11 @@ final class SceneRuntimeSession {
                 we_scene_runtime_model_create(runtime, $0, &error)
             }
             guard let model else { throw bridgeError("Loading Scene model", error) }
+            var projectInfo = WESceneProjectInfo()
+            guard we_scene_model_project_info(model, &projectInfo, &error) == 1 else {
+                throw bridgeError("Reading Scene project metadata", error)
+            }
+            requiresAudioSpectrum = projectInfo.supports_audio_processing == 1
             properties = try loadProperties(from: model)
 
             graph = we_scene_model_graph_create(model, &error)
@@ -91,6 +102,13 @@ final class SceneRuntimeSession {
             )
             guard executor != nil else {
                 throw bridgeError("Creating Scene OpenGL executor", error)
+            }
+            guard we_scene_frame_executor_set_screensaver_state(
+                executor,
+                isScreensaver ? 1 : 0,
+                &error
+            ) == 1 else {
+                throw bridgeError("Setting Scene screensaver mode", error)
             }
         } catch {
             unload()
@@ -107,8 +125,12 @@ final class SceneRuntimeSession {
         frameTimeSeconds: Double,
         pointerX: Double,
         pointerY: Double,
+        pointerActive: Bool,
+        pointerLeftDown: Bool,
+        mediaSnapshot: SceneMediaProviderSnapshot,
         drawableWidth: UInt32,
         drawableHeight: UInt32,
+        presentation: ScenePresentationLayout,
         masterVolume: Float,
         audioOutputEnabled: Bool,
         isAudibleOwner: Bool
@@ -123,35 +145,245 @@ final class SceneRuntimeSession {
             frame_time_seconds: frameTimeSeconds
         )
         var error: WESceneRuntimeErrorRef?
-        guard we_scene_frame_executor_render_for_drawable(
+        guard we_scene_frame_executor_set_pointer_state(
             executor,
-            &inputs,
-            drawableWidth,
-            drawableHeight,
-            scenePresentationScaling,
+            pointerActive ? 1 : 0,
+            pointerLeftDown ? 1 : 0,
             &error
         ) == 1 else {
+            throw bridgeError("Updating Scene pointer state", error)
+        }
+        var soundRuntimeStates = audioController.soundRuntimeSnapshots().map {
+            snapshot -> WESceneSoundRuntimeStateInput in
+            let state: WESceneSoundRuntimeState
+            switch snapshot.state {
+            case .stopped: state = WE_SCENE_SOUND_RUNTIME_STOPPED
+            case .playing: state = WE_SCENE_SOUND_RUNTIME_PLAYING
+            case .paused: state = WE_SCENE_SOUND_RUNTIME_PAUSED
+            case .ended: state = WE_SCENE_SOUND_RUNTIME_ENDED
+            }
+            return WESceneSoundRuntimeStateInput(
+                object_id: Int32(snapshot.objectId),
+                state: state,
+                position: snapshot.position
+            )
+        }
+        let soundStateResult = soundRuntimeStates.withUnsafeBufferPointer {
+            we_scene_frame_executor_set_sound_runtime_states(
+                executor, $0.baseAddress, $0.count, &error
+            )
+        }
+        guard soundStateResult == 1 else {
+            throw bridgeError("Updating Scene sound runtime state", error)
+        }
+        if lastMediaSnapshot != mediaSnapshot {
+            try applyMediaSnapshot(mediaSnapshot, to: executor)
+            lastMediaSnapshot = mediaSnapshot
+        }
+        // A zero-filled spectrum is not equivalent to an unavailable capture:
+        // scripts use registerAudioBuffers() during module evaluation and the
+        // Linux contract reports an explicit unavailable error until a real
+        // recorder frame exists. Only pass the audio ABI when ScreenCaptureKit
+        // has actually reached the running state.
+        let renderResult: Int32
+        if var viewport = try presentation.viewport(
+            drawableWidth: drawableWidth,
+            drawableHeight: drawableHeight
+        ) {
+            if case .running = SceneSystemAudioSpectrumProvider.shared.status {
+                let spectrum = SceneSystemAudioSpectrumProvider.shared.latestFrame
+                renderResult = withAudioSpectrumInputs(spectrum) { audioInputs in
+                    we_scene_frame_executor_render_for_viewport_with_audio_spectrum(
+                        executor,
+                        &inputs,
+                        &audioInputs,
+                        &viewport,
+                        presentation.bridgeScaling,
+                        &error
+                    )
+                }
+            } else {
+                renderResult = we_scene_frame_executor_render_for_viewport(
+                    executor,
+                    &inputs,
+                    &viewport,
+                    presentation.bridgeScaling,
+                    &error
+                )
+            }
+        } else if case .running = SceneSystemAudioSpectrumProvider.shared.status {
+            let spectrum = SceneSystemAudioSpectrumProvider.shared.latestFrame
+            renderResult = withAudioSpectrumInputs(spectrum) { audioInputs in
+                we_scene_frame_executor_render_for_drawable_with_audio_spectrum(
+                    executor,
+                    &inputs,
+                    &audioInputs,
+                    drawableWidth,
+                    drawableHeight,
+                    presentation.bridgeScaling,
+                    &error
+                )
+            }
+        } else {
+            renderResult = we_scene_frame_executor_render_for_drawable(
+                executor,
+                &inputs,
+                drawableWidth,
+                drawableHeight,
+                presentation.bridgeScaling,
+                &error
+            )
+        }
+        guard renderResult == 1 else {
             invalidateExecutorIssueSnapshot()
             throw bridgeError("Rendering Scene frame", error)
         }
         reportExecutorIssues(from: executor)
-        let sounds = try loadSoundSnapshot(from: executor)
-        try reconcileAudio(
-            sounds,
+        try present(
+            drawableWidth: drawableWidth,
+            drawableHeight: drawableHeight,
+            presentation: presentation
+        )
+        synchronizeAudio(
+            from: executor,
             masterVolume: masterVolume,
             audioOutputEnabled: audioOutputEnabled,
             isAudibleOwner: isAudibleOwner
         )
-        lastSounds = sounds
-        try present(drawableWidth: drawableWidth, drawableHeight: drawableHeight)
+    }
+
+    private func withAudioSpectrumInputs<T>(
+        _ frame: SceneAudioSpectrumFrame,
+        _ body: (inout WESceneAudioSpectrumInputs) -> T
+    ) -> T {
+        frame.spectrum16Left.withUnsafeBufferPointer { left16 in
+            frame.spectrum16Right.withUnsafeBufferPointer { right16 in
+                frame.spectrum32Left.withUnsafeBufferPointer { left32 in
+                    frame.spectrum32Right.withUnsafeBufferPointer { right32 in
+                        frame.spectrum64Left.withUnsafeBufferPointer { left64 in
+                            frame.spectrum64Right.withUnsafeBufferPointer { right64 in
+                                var inputs = WESceneAudioSpectrumInputs(
+                                    spectrum_16_left: left16.baseAddress,
+                                    spectrum_16_right: right16.baseAddress,
+                                    spectrum_32_left: left32.baseAddress,
+                                    spectrum_32_right: right32.baseAddress,
+                                    spectrum_64_left: left64.baseAddress,
+                                    spectrum_64_right: right64.baseAddress
+                                )
+                                return body(&inputs)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func applyMediaSnapshot(
+        _ snapshot: SceneMediaProviderSnapshot,
+        to executor: WESceneFrameExecutorRef
+    ) throws {
+        var allocatedStrings: [UnsafeMutablePointer<CChar>] = []
+        defer {
+            for pointer in allocatedStrings { free(pointer) }
+        }
+
+        func copiedCString(_ value: String) throws -> UnsafePointer<CChar> {
+            guard let pointer = strdup(value) else {
+                throw SceneRuntimeSessionError.runtime(
+                    "Allocating Scene media bridge input failed"
+                )
+            }
+            allocatedStrings.append(pointer)
+            return UnsafePointer(pointer)
+        }
+
+        var bridgeSnapshot: WESceneMediaSnapshot
+        switch snapshot {
+        case .unavailable(let revision):
+            bridgeSnapshot = WESceneMediaSnapshot(
+                revision: revision,
+                available: 0,
+                playback_state: WE_SCENE_MEDIA_STOPPED,
+                title: nil,
+                artist: nil,
+                content_type: nil,
+                album_title: nil,
+                sub_title: nil,
+                album_artist: nil,
+                genres: nil,
+                position: 0,
+                duration: 0,
+                has_thumbnail: 0,
+                primary_color: (0, 0, 0),
+                secondary_color: (0, 0, 0),
+                tertiary_color: (0, 0, 0),
+                text_color: (0, 0, 0),
+                high_contrast_color: (0, 0, 0)
+            )
+        case .available(let revision, let content):
+            let playbackState: WESceneMediaPlaybackState
+            switch content.playbackState {
+            case .stopped: playbackState = WE_SCENE_MEDIA_STOPPED
+            case .playing: playbackState = WE_SCENE_MEDIA_PLAYING
+            case .paused: playbackState = WE_SCENE_MEDIA_PAUSED
+            }
+            bridgeSnapshot = WESceneMediaSnapshot(
+                revision: revision,
+                available: 1,
+                playback_state: playbackState,
+                title: try copiedCString(content.title),
+                artist: try copiedCString(content.artist),
+                content_type: try copiedCString(content.contentType),
+                album_title: try copiedCString(content.albumTitle),
+                sub_title: try copiedCString(content.subTitle),
+                album_artist: try copiedCString(content.albumArtist),
+                genres: try copiedCString(content.genres),
+                position: content.position,
+                duration: content.duration,
+                has_thumbnail: content.hasThumbnail ? 1 : 0,
+                primary_color: (
+                    content.primaryColor.red,
+                    content.primaryColor.green,
+                    content.primaryColor.blue
+                ),
+                secondary_color: (
+                    content.secondaryColor.red,
+                    content.secondaryColor.green,
+                    content.secondaryColor.blue
+                ),
+                tertiary_color: (
+                    content.tertiaryColor.red,
+                    content.tertiaryColor.green,
+                    content.tertiaryColor.blue
+                ),
+                text_color: (
+                    content.textColor.red,
+                    content.textColor.green,
+                    content.textColor.blue
+                ),
+                high_contrast_color: (
+                    content.highContrastColor.red,
+                    content.highContrastColor.green,
+                    content.highContrastColor.blue
+                )
+            )
+        }
+
+        var error: WESceneRuntimeErrorRef?
+        guard we_scene_frame_executor_set_media_snapshot(
+            executor, &bridgeSnapshot, &error
+        ) == 1 else {
+            throw bridgeError("Updating Scene media snapshot", error)
+        }
     }
 
     func updateAudioConfiguration(
         masterVolume: Float,
         audioOutputEnabled: Bool,
         isAudibleOwner: Bool
-    ) throws {
-        try reconcileAudio(
+    ) {
+        synchronizeAudio(
             lastSounds,
             masterVolume: masterVolume,
             audioOutputEnabled: audioOutputEnabled,
@@ -161,47 +393,79 @@ final class SceneRuntimeSession {
 
     func replayLastEvaluatedFrame(
         drawableWidth: UInt32,
-        drawableHeight: UInt32
+        drawableHeight: UInt32,
+        presentation: ScenePresentationLayout
     ) throws {
         guard let executor else {
             throw SceneRuntimeSessionError.runtime("Scene executor is not available")
         }
         var error: WESceneRuntimeErrorRef?
-        guard we_scene_frame_executor_replay_for_drawable(
-            executor,
-            drawableWidth,
-            drawableHeight,
-            &error
-        ) == 1 else {
+        let replayResult: Int32
+        if var viewport = try presentation.viewport(
+            drawableWidth: drawableWidth,
+            drawableHeight: drawableHeight
+        ) {
+            replayResult = we_scene_frame_executor_replay_for_viewport(
+                executor, &viewport, &error
+            )
+        } else {
+            replayResult = we_scene_frame_executor_replay_for_drawable(
+                executor, drawableWidth, drawableHeight, &error
+            )
+        }
+        guard replayResult == 1 else {
             invalidateExecutorIssueSnapshot()
             throw bridgeError("Reprojecting paused Scene frame", error)
         }
         reportExecutorIssues(from: executor)
-        try present(drawableWidth: drawableWidth, drawableHeight: drawableHeight)
+        try present(
+            drawableWidth: drawableWidth,
+            drawableHeight: drawableHeight,
+            presentation: presentation
+        )
     }
 
-    func setPaused(_ value: Bool) throws {
+    func setPaused(_ value: Bool) {
         guard isPaused != value else { return }
         if value {
             audioController.pauseAll()
         } else {
-            try audioController.resumeAll()
+            do {
+                try audioController.resumeAll()
+            } catch {
+                recordAudioFailure(error)
+            }
         }
         isPaused = value
     }
 
-    func present(drawableWidth: UInt32, drawableHeight: UInt32) throws {
+    func present(
+        drawableWidth: UInt32,
+        drawableHeight: UInt32,
+        presentation: ScenePresentationLayout
+    ) throws {
         guard let executor else {
             throw SceneRuntimeSessionError.runtime("Scene executor is not available")
         }
         var error: WESceneRuntimeErrorRef?
-        guard we_scene_frame_executor_present(
-            executor,
-            drawableWidth,
-            drawableHeight,
-            scenePresentationScaling,
-            &error
-        ) == 1 else {
+        let presentResult: Int32
+        if var viewport = try presentation.viewport(
+            drawableWidth: drawableWidth,
+            drawableHeight: drawableHeight
+        ) {
+            presentResult = we_scene_frame_executor_present_for_viewport(
+                executor, &viewport, presentation.bridgeScaling, &error
+            )
+        } else {
+            presentResult = we_scene_frame_executor_present(
+                executor,
+                drawableWidth,
+                drawableHeight,
+                presentation.bridgeScaling,
+                &error
+            )
+        }
+        guard presentResult == 1 else {
             throw bridgeError("Presenting Scene frame", error)
         }
     }
@@ -307,6 +571,7 @@ final class SceneRuntimeSession {
     func close() {
         audioController.stopAll()
         lastSounds = []
+        audioPlaybackIssue = nil
         invalidateExecutorIssueSnapshot()
         isPaused = false
         unload()
@@ -355,9 +620,38 @@ final class SceneRuntimeSession {
                     "Scene sound object \(info.object_id) has an unknown playback mode"
                 )
             }
-            if !loop && (info.minimum_time != 0 || info.maximum_time != 0) {
+            let playbackCommand: SceneSoundPlaybackCommand?
+            switch info.playback_command {
+            case WE_SCENE_FRAME_SOUND_COMMAND_NONE:
+                guard info.playback_command_generation == 0 else {
+                    throw SceneRuntimeSessionError.runtime(
+                        "Scene sound object \(info.object_id) has a generation without a command"
+                    )
+                }
+                playbackCommand = nil
+            case WE_SCENE_FRAME_SOUND_COMMAND_PLAY:
+                playbackCommand = SceneSoundPlaybackCommand(
+                    action: .play,
+                    generation: info.playback_command_generation
+                )
+            case WE_SCENE_FRAME_SOUND_COMMAND_PAUSE:
+                playbackCommand = SceneSoundPlaybackCommand(
+                    action: .pause,
+                    generation: info.playback_command_generation
+                )
+            case WE_SCENE_FRAME_SOUND_COMMAND_STOP:
+                playbackCommand = SceneSoundPlaybackCommand(
+                    action: .stop,
+                    generation: info.playback_command_generation
+                )
+            default:
                 throw SceneRuntimeSessionError.runtime(
-                    "Scene sound object \(info.object_id) uses unsupported timed one-shot playback bounds"
+                    "Scene sound object \(info.object_id) has an unknown playback command"
+                )
+            }
+            if playbackCommand != nil && info.playback_command_generation == 0 {
+                throw SceneRuntimeSessionError.runtime(
+                    "Scene sound object \(info.object_id) uses reserved command generation 0"
                 )
             }
             let sources = try (0..<info.source_count).map { sourceIndex in
@@ -383,7 +677,10 @@ final class SceneRuntimeSession {
             return SceneSoundSnapshot(
                 objectId: Int(info.object_id),
                 visible: info.visible == 1,
-                sources: sources
+                sources: sources,
+                playbackCommand: playbackCommand,
+                minimumTime: info.minimum_time,
+                maximumTime: info.maximum_time
             )
         }
     }
@@ -463,22 +760,56 @@ final class SceneRuntimeSession {
         }
     }
 
-    private func reconcileAudio(
+    private func synchronizeAudio(
+        from executor: WESceneFrameExecutorRef,
+        masterVolume: Float,
+        audioOutputEnabled: Bool,
+        isAudibleOwner: Bool
+    ) {
+        do {
+            let sounds = try loadSoundSnapshot(from: executor)
+            lastSounds = sounds
+            synchronizeAudio(
+                sounds,
+                masterVolume: masterVolume,
+                audioOutputEnabled: audioOutputEnabled,
+                isAudibleOwner: isAudibleOwner
+            )
+        } catch {
+            lastSounds = []
+            recordAudioFailure(error)
+        }
+    }
+
+    private func synchronizeAudio(
         _ sounds: [SceneSoundSnapshot],
         masterVolume: Float,
         audioOutputEnabled: Bool,
         isAudibleOwner: Bool
-    ) throws {
+    ) {
         guard let runtime else {
-            throw SceneRuntimeSessionError.runtime("Scene runtime is not available")
+            recordAudioFailure(
+                SceneRuntimeSessionError.runtime(
+                    "Scene runtime is not available while synchronizing audio"
+                )
+            )
+            return
         }
-        try audioController.reconcile(
+        let issue = audioController.synchronize(
             sounds,
             masterVolume: masterVolume,
             audioOutput: audioOutputEnabled && isAudibleOwner ? 1 : 0
         ) { path in
             try SceneAssetDataLoader.load(runtime: runtime, path: path)
         }
+        audioPlaybackIssue = issue.map {
+            "Scene audio unavailable: \($0.message)"
+        }
+    }
+
+    private func recordAudioFailure(_ error: Error) {
+        audioController.stopAll()
+        audioPlaybackIssue = "Scene audio unavailable: \(error.localizedDescription)"
     }
 
     private func loadProperties(

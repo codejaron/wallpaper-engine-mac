@@ -160,6 +160,7 @@ let package = Package(
                 .linkedFramework("OpenGL"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("ImageIO"),
+                .linkedFramework("AVFoundation"),
             ]
         ),
         .target(
@@ -181,7 +182,12 @@ let package = Package(
             name: "SceneAudio",
             dependencies: ["SceneRuntimeBridge"],
             path: "Sources/SceneAudio",
-            linkerSettings: [.linkedFramework("AVFoundation")]
+            linkerSettings: [
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("Accelerate"),
+                .linkedFramework("CoreMedia"),
+            ]
         ),
         .testTarget(
             name: "SceneCoreTests",

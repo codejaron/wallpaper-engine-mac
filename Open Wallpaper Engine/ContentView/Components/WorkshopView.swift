@@ -172,6 +172,11 @@ private struct SteamLoginView: View {
                     Text("Authenticating with Steam...")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Text("If Steam sends a sign-in request, open Steam Mobile and approve it to continue.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(width: 300)
                 }
             }
 

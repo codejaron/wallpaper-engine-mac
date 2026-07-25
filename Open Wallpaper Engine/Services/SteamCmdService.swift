@@ -15,6 +15,35 @@ class SteamCmdService: ObservableObject {
         case failed(String)
     }
 
+    enum LoginResult: Equatable {
+        case success
+        case steamGuardRequired
+        case invalidCredentials
+        case timedOut
+        case failed
+
+        var errorMessage: String? {
+            switch self {
+            case .success:
+                return nil
+            case .steamGuardRequired:
+                return "Steam Guard code required"
+            case .invalidCredentials:
+                return "Invalid username or password"
+            case .timedOut:
+                return "Login timed out. Check Steam Mobile for an approval request, then try again."
+            case .failed:
+                return "Login failed. Check credentials and try again."
+            }
+        }
+    }
+
+    private struct CommandResult {
+        let output: String
+        let exitCode: Int32
+        let didTimeOut: Bool
+    }
+
     private static let lastUsernameKey = "SteamLastUsername"
 
     init() {
@@ -24,8 +53,10 @@ class SteamCmdService: ObservableObject {
 
     /// Run a steamcmd process with proper pipe handling to avoid deadlocks.
     /// Reads stdout/stderr concurrently with process execution and applies a timeout.
-    private func runSteamCmd(arguments: [String], timeout: TimeInterval = 30) -> (output: String, exitCode: Int32) {
-        guard let cmdPath = steamCmdPath else { return ("", -1) }
+    private func runSteamCmd(arguments: [String], timeout: TimeInterval = 30) -> CommandResult {
+        guard let cmdPath = steamCmdPath else {
+            return CommandResult(output: "", exitCode: -1, didTimeOut: false)
+        }
 
         let process = Process()
         let outputPipe = Pipe()
@@ -49,7 +80,11 @@ class SteamCmdService: ObservableObject {
             try process.run()
         } catch {
             handle.readabilityHandler = nil
-            return ("Failed to run steamcmd: \(error.localizedDescription)", -1)
+            return CommandResult(
+                output: "Failed to run steamcmd: \(error.localizedDescription)",
+                exitCode: -1,
+                didTimeOut: false
+            )
         }
 
         // Wait with timeout
@@ -64,7 +99,10 @@ class SteamCmdService: ObservableObject {
         if waitGroup.wait(timeout: deadline) == .timedOut {
             process.terminate()
             handle.readabilityHandler = nil
-            return ("steamcmd timed out after \(Int(timeout))s", -1)
+            let output = readQueue.sync {
+                String(data: outputData, encoding: .utf8) ?? ""
+            }
+            return CommandResult(output: output, exitCode: -1, didTimeOut: true)
         }
 
         handle.readabilityHandler = nil
@@ -73,7 +111,27 @@ class SteamCmdService: ObservableObject {
         readQueue.sync { outputData.append(remaining) }
 
         let output = String(data: outputData, encoding: .utf8) ?? ""
-        return (output, process.terminationStatus)
+        return CommandResult(
+            output: output,
+            exitCode: process.terminationStatus,
+            didTimeOut: false
+        )
+    }
+
+    static func loginResult(output: String, exitCode: Int32, didTimeOut: Bool) -> LoginResult {
+        if didTimeOut {
+            return .timedOut
+        }
+        if output.contains("Logged in OK") || (output.contains("OK") && exitCode == 0) {
+            return .success
+        }
+        if output.contains("Steam Guard") || output.contains("Two-factor") {
+            return .steamGuardRequired
+        }
+        if output.contains("Invalid Password") || output.contains("FAILED") {
+            return .invalidCredentials
+        }
+        return .failed
     }
 
     /// Automatically try cached session if we have a saved username and steamcmd is installed.
@@ -179,20 +237,21 @@ class SteamCmdService: ObservableObject {
             }
             args += ["+quit"]
 
-            let (output, exitCode) = self.runSteamCmd(arguments: args, timeout: 60)
+            let commandResult = self.runSteamCmd(arguments: args, timeout: 60)
+            let loginResult = Self.loginResult(
+                output: commandResult.output,
+                exitCode: commandResult.exitCode,
+                didTimeOut: commandResult.didTimeOut
+            )
 
             DispatchQueue.main.async {
                 self.isLoggingIn = false
-                if output.contains("Logged in OK") || (output.contains("OK") && exitCode == 0) {
+                if loginResult == .success {
                     self.isLoggedIn = true
                     self.loginError = nil
                     UserDefaults.standard.set(username, forKey: Self.lastUsernameKey)
-                } else if output.contains("Steam Guard") || output.contains("Two-factor") {
-                    self.loginError = "Steam Guard code required"
-                } else if output.contains("Invalid Password") || output.contains("FAILED") {
-                    self.loginError = "Invalid username or password"
                 } else {
-                    self.loginError = "Login failed. Check credentials and try again."
+                    self.loginError = loginResult.errorMessage
                 }
             }
         }
@@ -209,13 +268,23 @@ class SteamCmdService: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
 
-            let (output, exitCode) = self.runSteamCmd(arguments: ["+login", username, "+quit"], timeout: 30)
+            let commandResult = self.runSteamCmd(
+                arguments: ["+login", username, "+quit"],
+                timeout: 30
+            )
+            let loginResult = Self.loginResult(
+                output: commandResult.output,
+                exitCode: commandResult.exitCode,
+                didTimeOut: commandResult.didTimeOut
+            )
 
             DispatchQueue.main.async {
                 self.isLoggingIn = false
-                if output.contains("Logged in OK") || (output.contains("OK") && exitCode == 0) {
+                if loginResult == .success {
                     self.isLoggedIn = true
                     UserDefaults.standard.set(username, forKey: Self.lastUsernameKey)
+                } else if loginResult == .timedOut {
+                    self.loginError = loginResult.errorMessage
                 } else {
                     self.loginError = "Cached session expired. Please log in with password."
                 }

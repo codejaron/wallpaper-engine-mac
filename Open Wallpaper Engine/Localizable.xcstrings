@@ -994,6 +994,9 @@
         }
       }
     },
+    "If Steam sends a sign-in request, open Steam Mobile and approve it to continue." : {
+
+    },
     "Import" : {
       "localizations" : {
         "zh-Hans" : {

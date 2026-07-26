@@ -1,8 +1,6 @@
 import Accelerate
 import AudioToolbox
-import CoreMedia
 import Foundation
-import ScreenCaptureKit
 
 /// The six fixed-size spectrum arrays exposed by Wallpaper Engine shaders.
 /// Values are deliberately kept as signed floating point values. The Linux
@@ -209,14 +207,14 @@ public final class SceneAudioCaptureLease {
     }
 }
 
-/// One process-wide ScreenCaptureKit capture. Multiple scene windows consume
+/// One process-wide Core Audio tap. Multiple scene windows consume
 /// the same latest spectrum, avoiding one permission prompt and one capture
 /// stream per monitor.
-public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendable {
+public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
     public static let shared = SceneSystemAudioSpectrumProvider()
 
     private let lock = NSLock()
-    private var stream: SCStream?
+    private var capture: CoreAudioSystemCapture?
     private var statusStorage: SceneAudioCaptureStatus = .idle
     private var pendingSamples: [Float] = []
     private var latestFrameStorage = SceneAudioSpectrumFrame.zero
@@ -228,9 +226,7 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
     @MainActor private var startTask: Task<Void, Error>?
     @MainActor private var startGeneration: UUID?
 
-    private override init() {
-        super.init()
-    }
+    private init() {}
 
     public var status: SceneAudioCaptureStatus {
         withLock { statusStorage }
@@ -240,7 +236,7 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
         withLock { latestFrameStorage }
     }
 
-    /// ScreenCaptureKit excludes this process, so this signal represents
+    /// The Core Audio tap excludes this process, so this signal represents
     /// audio emitted by another application. A short hold avoids policy
     /// flapping between sparse audio packets.
     public var isOtherApplicationPlayingAudio: Bool {
@@ -275,7 +271,7 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
     }
 
     /// Acquires shared capture ownership. Concurrent callers await the same
-    /// in-flight ScreenCaptureKit startup instead of observing `.starting` as
+    /// in-flight Core Audio startup instead of observing `.starting` as
     /// if capture were already usable.
     @MainActor
     public func acquire() async throws -> SceneAudioCaptureLease {
@@ -319,7 +315,7 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
             throw SceneAudioCaptureError.disabled
         }
         guard !captureSuspended, !activeLeaseIDs.isEmpty else { return }
-        if withLock({ stream != nil && statusStorage == .running }) {
+        if withLock({ capture != nil && statusStorage == .running }) {
             return
         }
         if let startTask {
@@ -353,56 +349,31 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
     private func startCapture(generation: UUID) async throws {
 
         do {
-            let shareableContent = try await SCShareableContent.excludingDesktopWindows(
-                false,
-                onScreenWindowsOnly: false
-            )
-            guard let display = shareableContent.displays.first else {
-                throw SceneAudioCaptureError.noDisplay
+            let nextCapture = CoreAudioSystemCapture { [weak self] samples in
+                self?.append(samples: samples)
             }
-
-            let filter = SCContentFilter(
-                display: display,
-                excludingApplications: [],
-                exceptingWindows: []
-            )
-            let configuration = SCStreamConfiguration()
-            configuration.capturesAudio = true
-            configuration.excludesCurrentProcessAudio = true
-            configuration.sampleRate = 44_100
-            configuration.channelCount = 1
-            configuration.width = 2
-            configuration.height = 2
-            configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
-
-            let nextStream = SCStream(filter: filter, configuration: configuration, delegate: self)
-            try nextStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: .global(qos: .userInteractive))
-            try await nextStream.startCapture()
+            try nextCapture.start()
 
             guard startGeneration == generation,
                   !Task.isCancelled,
                   capturePolicy.shouldRun else {
-                do {
-                    try await nextStream.stopCapture()
-                } catch {
-                    NSLog("[SceneAudio] Stopping cancelled capture failed: %@", error.localizedDescription)
-                }
+                nextCapture.stop()
                 throw CancellationError()
             }
 
             withLock {
-                stream = nextStream
+                capture = nextCapture
                 statusStorage = .running
             }
         } catch is CancellationError {
             withLock {
-                if stream == nil { statusStorage = .idle }
+                if capture == nil { statusStorage = .idle }
             }
             throw CancellationError()
         } catch {
             guard startGeneration == generation, !Task.isCancelled else {
                 withLock {
-                    if stream == nil { statusStorage = .idle }
+                    if capture == nil { statusStorage = .idle }
                 }
                 throw CancellationError()
             }
@@ -424,7 +395,7 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
             return
         }
         guard startTask == nil,
-              !withLock({ stream != nil && statusStorage == .running }) else {
+              !withLock({ capture != nil && statusStorage == .running }) else {
             return
         }
         Task { @MainActor [weak self] in
@@ -442,24 +413,16 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
         startTask?.cancel()
         startTask = nil
         startGeneration = nil
-        let currentStream = withLock { () -> SCStream? in
-            let currentStream = stream
-            stream = nil
+        let currentCapture = withLock { () -> CoreAudioSystemCapture? in
+            let currentCapture = capture
+            capture = nil
             statusStorage = .idle
             pendingSamples.removeAll(keepingCapacity: true)
             latestFrameStorage = .zero
             lastSignalUptime = nil
-            return currentStream
+            return currentCapture
         }
-        if let currentStream {
-            Task {
-                do {
-                    try await currentStream.stopCapture()
-                } catch {
-                    NSLog("[SceneAudio] Stopping system audio capture failed: %@", error.localizedDescription)
-                }
-            }
-        }
+        currentCapture?.stop()
     }
 
     private func append(samples: [Float]) {
@@ -489,105 +452,18 @@ public final class SceneSystemAudioSpectrumProvider: NSObject, @unchecked Sendab
 
 public enum SceneAudioCaptureError: LocalizedError, Equatable {
     case disabled
-    case noDisplay
     case startFailed(String)
 
     public var errorDescription: String? {
         switch self {
         case .disabled: return "System audio capture is disabled in Settings"
-        case .noDisplay: return "No display is available for system-audio capture"
         case .startFailed(let message): return "Starting system-audio capture failed: \(message)"
         }
     }
 }
 
-extension SceneSystemAudioSpectrumProvider: SCStreamOutput, SCStreamDelegate {
-    public func stream(
-        _ stream: SCStream,
-        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-        of type: SCStreamOutputType
-    ) {
-        guard type == .audio,
-              let samples = decodeAudioSamples(sampleBuffer) else { return }
-        append(samples: samples)
-    }
-
-    public func stream(
-        _ stream: SCStream,
-        didStopWithError error: Error
-    ) {
-        withLock {
-            if self.stream === stream {
-                self.stream = nil
-                statusStorage = .unavailable(error.localizedDescription)
-                pendingSamples.removeAll(keepingCapacity: true)
-                latestFrameStorage = .zero
-                lastSignalUptime = nil
-            }
-        }
-    }
-}
-
-private func decodeAudioSamples(_ sampleBuffer: CMSampleBuffer) -> [Float]? {
-    guard CMSampleBufferDataIsReady(sampleBuffer),
-          let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
-          let basicDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)
-    else { return nil }
-
-    let asbd = basicDescription.pointee
-    let frameCount = Int(CMSampleBufferGetNumSamples(sampleBuffer))
-    guard frameCount > 0 else { return nil }
-
-    // ScreenCaptureKit is allowed to return either one interleaved buffer or
-    // several planar buffers. Asking for a fixed one-buffer list silently
-    // truncates planar data (and can even make the list write past its stack
-    // allocation). Query the required size first, then decode every buffer
-    // that the sample actually contains.
-    var requiredBufferListSize = 0
-    var blockBuffer: CMBlockBuffer?
-    let sizeStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-        sampleBuffer,
-        bufferListSizeNeededOut: &requiredBufferListSize,
-        bufferListOut: nil,
-        bufferListSize: 0,
-        blockBufferAllocator: nil,
-        blockBufferMemoryAllocator: nil,
-        flags: 0,
-        blockBufferOut: &blockBuffer
-    )
-    guard (sizeStatus == noErr || sizeStatus == kCMSampleBufferError_ArrayTooSmall),
-          requiredBufferListSize >= MemoryLayout<AudioBufferList>.size else {
-        return nil
-    }
-
-    let rawBufferList = UnsafeMutableRawPointer.allocate(
-        byteCount: requiredBufferListSize,
-        alignment: MemoryLayout<AudioBufferList>.alignment
-    )
-    defer { rawBufferList.deallocate() }
-    let audioBufferList = rawBufferList.bindMemory(to: AudioBufferList.self, capacity: 1)
-    let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-        sampleBuffer,
-        bufferListSizeNeededOut: nil,
-        bufferListOut: audioBufferList,
-        bufferListSize: requiredBufferListSize,
-        blockBufferAllocator: nil,
-        blockBufferMemoryAllocator: nil,
-        flags: 0,
-        blockBufferOut: &blockBuffer
-    )
-    guard status == noErr else { return nil }
-
-    return decodePCMBufferList(
-        UnsafeMutableAudioBufferListPointer(audioBufferList),
-        frameCount: frameCount,
-        format: asbd
-    )
-}
-
-/// Decodes and downmixes every channel in an AudioBufferList. This boundary
-/// is intentionally independent from CMSampleBuffer allocation so planar and
-/// interleaved layouts can share one validated implementation.
+/// Decodes and downmixes every channel in an AudioBufferList so planar and
+/// interleaved layouts share one validated implementation.
 func decodePCMBufferList(
     _ list: UnsafeMutableAudioBufferListPointer,
     frameCount: Int,
@@ -701,7 +577,7 @@ private func decodeAudioSample(
         }
     }
 
-    // The only unsigned PCM format emitted by the supported capture path is
+    // The only unsigned PCM format accepted by the supported capture path is
     // 8-bit unsigned PCM. Keep other formats explicit rather than treating
     // arbitrary bytes as valid audio.
     guard bytesPerSample == 1 else { return nil }
@@ -710,6 +586,6 @@ private func decodeAudioSample(
 
 private func asbdUnsignedIntegerFormat(bytesPerSample: Int) -> Bool {
     // Kept as a named predicate to make the supported unsigned branch above
-    // explicit and easy to extend when a new ScreenCaptureKit format appears.
+    // explicit and easy to extend when Core Audio adds another tap format.
     bytesPerSample == 1
 }

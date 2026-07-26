@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "SceneRuntime",
     platforms: [
-        .macOS(.v13),
+        .macOS("14.2"),
     ],
     products: [
         .library(
@@ -184,9 +184,8 @@ let package = Package(
             path: "Sources/SceneAudio",
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
-                .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("CoreAudio"),
                 .linkedFramework("Accelerate"),
-                .linkedFramework("CoreMedia"),
             ]
         ),
         .testTarget(

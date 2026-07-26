@@ -145,6 +145,24 @@ final class SceneAudioTests: XCTestCase {
         XCTAssertFalse(policy.shouldRun)
     }
 
+    func testSystemAudioTapIsPrivateGlobalMixExcludingCurrentProcess() {
+        let processObjectID = AudioObjectID(42)
+        let uuid = UUID(uuidString: "61A39357-10FE-4A51-8A92-1B96F210F890")!
+
+        let description = makeSystemAudioTapDescription(
+            excluding: processObjectID,
+            uuid: uuid
+        )
+
+        XCTAssertEqual(description.processes, [processObjectID])
+        XCTAssertTrue(description.isExclusive)
+        XCTAssertTrue(description.isPrivate)
+        XCTAssertTrue(description.isMono)
+        XCTAssertTrue(description.isMixdown)
+        XCTAssertEqual(description.muteBehavior, .unmuted)
+        XCTAssertEqual(description.uuid, uuid)
+    }
+
     func testPlanarFloatCaptureDownmixesEveryBuffer() throws {
         var left: [Float] = [1, -1, 0.5]
         var right: [Float] = [0, 0.5, -0.5]

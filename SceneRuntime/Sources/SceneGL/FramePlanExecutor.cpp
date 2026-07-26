@@ -1523,6 +1523,11 @@ struct FramePlanExecutor::Impl final {
         bool dirty = false;
     };
 
+    struct ImageAttributeState final {
+        GLint position = -1;
+        GLint texCoord = -1;
+    };
+
     struct PreparedUniform final {
         enum class Kind { integer, float1, float2, float3, float4 };
 
@@ -1616,6 +1621,7 @@ struct FramePlanExecutor::Impl final {
         std::array<Vertex, 6> vertices{};
         std::vector<Vertex> puppetVertices;
         std::vector<std::uint16_t> puppetIndices;
+        GLint firstVertex = 0;
         GLint positionLocation = -1;
         GLint texCoordLocation = -1;
     };
@@ -1693,6 +1699,7 @@ struct FramePlanExecutor::Impl final {
 
     struct PreparedFrame final {
         std::vector<std::optional<PreparedOperation>> operations;
+        std::vector<Vertex> imageVertices;
         std::map<std::size_t, ParticleDrawBatch> particleBatches;
         const std::map<std::size_t, ParticleDrawBatch>* frozenParticleBatches =
             nullptr;
@@ -1706,6 +1713,27 @@ struct FramePlanExecutor::Impl final {
         int objectId = 0;
         std::vector<std::size_t> operationIndexes;
     };
+
+    struct TextRasterKey final {
+        std::string utf8;
+        std::string font;
+        double pointSize = 0.0;
+
+        [[nodiscard]] bool operator<(const TextRasterKey& other) const {
+            if (font != other.font) return font < other.font;
+            if (utf8 != other.utf8) return utf8 < other.utf8;
+            return pointSize < other.pointSize;
+        }
+    };
+
+    struct CachedTextRaster final {
+        text::RasterizedText rasterized;
+        std::size_t bytes = 0;
+        std::uint64_t lastUsed = 0;
+    };
+
+    static constexpr std::size_t maximumTextRasterEntries = 64;
+    static constexpr std::size_t maximumTextRasterBytes = 32 * 1024 * 1024;
 
     struct LastFrameState final {
         FramePlan sourcePlan;
@@ -1789,6 +1817,101 @@ struct FramePlanExecutor::Impl final {
 
     const AssetResolver& resolver() const {
         return frameGraph->graph()->model()->runtime()->assetResolver();
+    }
+
+    [[nodiscard]] std::uint64_t nextTextRasterUse() noexcept {
+        if (textRasterUseSequence ==
+            std::numeric_limits<std::uint64_t>::max()) {
+            for (auto& [key, entry] : textRasters) {
+                static_cast<void>(key);
+                entry.lastUsed = 0;
+            }
+            textRasterUseSequence = 1;
+        } else {
+            ++textRasterUseSequence;
+        }
+        return textRasterUseSequence;
+    }
+
+    [[nodiscard]] const text::RasterizedText& cachedTextRaster(
+        const FrameTextDescriptor& descriptor,
+        double pointSize
+    ) {
+        if (!std::isfinite(pointSize) || pointSize <= 0.0) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Text raster point size must be finite and greater than zero"
+            );
+        }
+        TextRasterKey key{
+            .utf8 = descriptor.text,
+            .font = descriptor.font,
+            .pointSize = pointSize,
+        };
+        if (auto found = textRasters.find(key); found != textRasters.end()) {
+            found->second.lastUsed = nextTextRasterUse();
+            return found->second.rasterized;
+        }
+
+        text::FontSource font;
+        std::optional<ResolvedAsset> fontAsset;
+        if (descriptor.font.starts_with("systemfont_")) {
+            font = text::FontSource::system("Arial");
+        } else {
+            fontAsset = resolver().resolve(descriptor.font);
+            font = text::FontSource::bytes(fontAsset->bytes);
+        }
+        text::RasterizedText rasterized = text::rasterize({
+            .utf8 = descriptor.text,
+            .pointSize = pointSize,
+            .font = font,
+        });
+        const std::size_t bytes = rasterized.coverage.size();
+        if (bytes > std::numeric_limits<std::size_t>::max() -
+                textRasterBytes) {
+            throw Error(
+                ErrorCode::internalFailure,
+                "Text raster cache byte accounting overflowed"
+            );
+        }
+        const auto [inserted, didInsert] = textRasters.try_emplace(
+            std::move(key),
+            CachedTextRaster{
+                .rasterized = std::move(rasterized),
+                .bytes = bytes,
+                .lastUsed = nextTextRasterUse(),
+            }
+        );
+        if (!didInsert) {
+            throw Error(
+                ErrorCode::internalFailure,
+                "Text raster cache key changed during insertion"
+            );
+        }
+        textRasterBytes += bytes;
+        return inserted->second.rasterized;
+    }
+
+    void trimTextRasterCache() {
+        while (textRasters.size() > maximumTextRasterEntries ||
+               textRasterBytes > maximumTextRasterBytes) {
+            const auto victim = std::min_element(
+                textRasters.begin(),
+                textRasters.end(),
+                [](const auto& left, const auto& right) {
+                    return left.second.lastUsed < right.second.lastUsed;
+                }
+            );
+            if (victim == textRasters.end() ||
+                victim->second.bytes > textRasterBytes) {
+                throw Error(
+                    ErrorCode::internalFailure,
+                    "Text raster cache metadata is inconsistent"
+                );
+            }
+            textRasterBytes -= victim->second.bytes;
+            textRasters.erase(victim);
+        }
     }
 
     void clearNewFramebuffer(
@@ -2153,6 +2276,11 @@ struct FramePlanExecutor::Impl final {
                 static_cast<void>(framebuffer(resource, aliases));
                 return true;
             case FrameResourceKind::assetTexture:
+                // Asset textures are immutable for the lifetime of an
+                // executor. Once uploaded, the GPU cache is the authoritative
+                // ready state; consulting the resolver again would perform
+                // needless filesystem/package work on every frame.
+                if (assets.contains(resource.id)) return true;
                 if (!resolver().contains(
                         resource.logicalName.empty()
                             ? resource.id
@@ -3010,6 +3138,48 @@ struct FramePlanExecutor::Impl final {
         session.destroyVertexArray(puppetVertexArray);
     }
 
+    static void configureImageAttributes(
+        ImageAttributeState& current,
+        GLint position,
+        GLint texCoord,
+        GLsizei stride
+    ) {
+        if (current.position == position && current.texCoord == texCoord) {
+            return;
+        }
+        if (current.position >= 0) {
+            glDisableVertexAttribArray(
+                static_cast<GLuint>(current.position)
+            );
+        }
+        if (current.texCoord >= 0 &&
+            current.texCoord != current.position) {
+            glDisableVertexAttribArray(
+                static_cast<GLuint>(current.texCoord)
+            );
+        }
+        if (position >= 0) {
+            glEnableVertexAttribArray(static_cast<GLuint>(position));
+            glVertexAttribPointer(
+                static_cast<GLuint>(position),
+                3, GL_FLOAT, GL_FALSE, stride,
+                reinterpret_cast<const void*>(offsetof(Vertex, position))
+            );
+        }
+        if (texCoord >= 0) {
+            glEnableVertexAttribArray(static_cast<GLuint>(texCoord));
+            glVertexAttribPointer(
+                static_cast<GLuint>(texCoord),
+                2, GL_FLOAT, GL_FALSE, stride,
+                reinterpret_cast<const void*>(offsetof(Vertex, texCoord))
+            );
+        }
+        current = {
+            .position = position,
+            .texCoord = texCoord,
+        };
+    }
+
     [[nodiscard]] PreparedDraw prepareDraw(
         Device::Session& session,
         const FramePlan& plan,
@@ -3463,6 +3633,13 @@ struct FramePlanExecutor::Impl final {
         result.texCoordLocation = glGetAttribLocation(
             activeProgram, "a_TexCoord"
         );
+        if (result.positionLocation >= 0 &&
+            result.positionLocation == result.texCoordLocation) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Image position and texture-coordinate attributes share an OpenGL location"
+            );
+        }
         session.checkError(
             ErrorCode::draw,
             "preparing a frame render pass"
@@ -3521,28 +3698,6 @@ struct FramePlanExecutor::Impl final {
             prepared.viewProjection
         );
 
-        const auto bindImageAttributes = [&prepared](GLsizei stride) {
-            if (prepared.positionLocation >= 0) {
-                glEnableVertexAttribArray(
-                    static_cast<GLuint>(prepared.positionLocation)
-                );
-                glVertexAttribPointer(
-                    static_cast<GLuint>(prepared.positionLocation),
-                    3, GL_FLOAT, GL_FALSE, stride,
-                    reinterpret_cast<const void*>(offsetof(Vertex, position))
-                );
-            }
-            if (prepared.texCoordLocation >= 0) {
-                glEnableVertexAttribArray(
-                    static_cast<GLuint>(prepared.texCoordLocation)
-                );
-                glVertexAttribPointer(
-                    static_cast<GLuint>(prepared.texCoordLocation),
-                    2, GL_FLOAT, GL_FALSE, stride,
-                    reinterpret_cast<const void*>(offsetof(Vertex, texCoord))
-                );
-            }
-        };
         if (prepared.pass.geometry == FrameGeometryKind::puppetMesh) {
             if (prepared.puppetVertices.empty() ||
                 prepared.puppetIndices.empty() ||
@@ -3566,7 +3721,6 @@ struct FramePlanExecutor::Impl final {
             glBindVertexArray(puppetVertexArray);
             glBindBuffer(GL_ARRAY_BUFFER, puppetVertexBuffer);
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, puppetElementBuffer);
-            disableVertexAttributes();
             glBufferData(
                 GL_ARRAY_BUFFER,
                 static_cast<GLsizeiptr>(
@@ -3583,7 +3737,12 @@ struct FramePlanExecutor::Impl final {
                 prepared.puppetIndices.data(),
                 GL_STATIC_DRAW
             );
-            bindImageAttributes(static_cast<GLsizei>(sizeof(Vertex)));
+            configureImageAttributes(
+                puppetAttributeState,
+                prepared.positionLocation,
+                prepared.texCoordLocation,
+                static_cast<GLsizei>(sizeof(Vertex))
+            );
             glDrawElements(
                 GL_TRIANGLES,
                 static_cast<GLsizei>(prepared.puppetIndices.size()),
@@ -3593,16 +3752,15 @@ struct FramePlanExecutor::Impl final {
         } else {
             glBindVertexArray(vertexArray);
             glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
-            disableVertexAttributes();
-            glBufferSubData(
-                GL_ARRAY_BUFFER, 0, sizeof(prepared.vertices),
-                prepared.vertices.data()
+            configureImageAttributes(
+                imageAttributeState,
+                prepared.positionLocation,
+                prepared.texCoordLocation,
+                static_cast<GLsizei>(sizeof(Vertex))
             );
-            bindImageAttributes(static_cast<GLsizei>(sizeof(Vertex)));
-            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glDrawArrays(GL_TRIANGLES, prepared.firstVertex, 6);
         }
         session.checkError(ErrorCode::draw, "executing frame render pass");
-
     }
 
     [[nodiscard]] PreparedDraw prepareCopy(
@@ -3736,25 +3894,16 @@ struct FramePlanExecutor::Impl final {
             throw Error(ErrorCode::resourceValidation, "Frame text command object identity is inconsistent");
         }
         static_cast<void>(framebuffer(command.destination, aliases));
-        text::FontSource font;
-        std::optional<ResolvedAsset> fontAsset;
-        if (descriptor.font.starts_with("systemfont_")) {
-            font = text::FontSource::system("Arial");
-        } else {
-            fontAsset = resolver().resolve(descriptor.font);
-            font = text::FontSource::bytes(fontAsset->bytes);
-        }
         const auto& transform = descriptor.worldTransform;
         const double averageScale =
             (std::abs(transform.scale.x) + std::abs(transform.scale.y)) * 0.5;
         const double rasterScale = averageScale > 0.0 && averageScale < 1.0
             ? std::min(1.0 / averageScale, 32.0)
             : 1.0;
-        const auto rasterized = text::rasterize({
-            .utf8 = descriptor.text,
-            .pointSize = descriptor.pointSize * rasterScale,
-            .font = font,
-        });
+        const text::RasterizedText& rasterized = cachedTextRaster(
+            descriptor,
+            descriptor.pointSize * rasterScale
+        );
         const std::array<double, 4> layoutComponents{
             descriptor.size.x, descriptor.size.y,
             descriptor.padding.x, descriptor.padding.y,
@@ -5556,16 +5705,12 @@ struct FramePlanExecutor::Impl final {
         auto& output = framebuffer(plan.output);
         glBindFramebuffer(GL_FRAMEBUFFER, output.framebuffer);
         glViewport(0, 0, output.width, output.height);
-        glClearColor(0, 0, 0, 0);
+        glClearColor(
+            authoredClear[0], authoredClear[1],
+            authoredClear[2], authoredClear[3]
+        );
         glClearDepth(1.0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        if (plan.clearEnabled) {
-            glClearColor(
-                authoredClear[0], authoredClear[1],
-                authoredClear[2], authoredClear[3]
-            );
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        }
         session.checkError(ErrorCode::draw, "clearing the frame output");
     }
 
@@ -5616,6 +5761,11 @@ struct FramePlanExecutor::Impl final {
     ) {
         PreparedFrame result;
         result.operations.resize(plan.operations.size());
+        if (plan.operations.size() <=
+            static_cast<std::size_t>(
+                std::numeric_limits<GLint>::max()) / 6U) {
+            result.imageVertices.reserve(plan.operations.size() * 6U);
+        }
         result.frozenParticleBatches = frozenParticleBatches;
         if (frozenParticleBatches == nullptr) {
             result.particleStates = particles;
@@ -5803,6 +5953,33 @@ struct FramePlanExecutor::Impl final {
                 );
             }
         }
+        for (auto& operation : result.operations) {
+            if (!operation) continue;
+            auto* drawOperation = std::get_if<PreparedDraw>(&*operation);
+            if (drawOperation == nullptr ||
+                drawOperation->pass.geometry ==
+                    FrameGeometryKind::puppetMesh) {
+                continue;
+            }
+            if (result.imageVertices.size() >
+                static_cast<std::size_t>(
+                    std::numeric_limits<GLint>::max()) -
+                    drawOperation->vertices.size()) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Prepared image geometry exceeds OpenGL vertex-index range"
+                );
+            }
+            drawOperation->firstVertex = static_cast<GLint>(
+                result.imageVertices.size()
+            );
+            result.imageVertices.insert(
+                result.imageVertices.end(),
+                drawOperation->vertices.begin(),
+                drawOperation->vertices.end()
+            );
+        }
+        trimTextRasterCache();
         result.finalAliases = std::move(aliases);
         return result;
     }
@@ -5814,6 +5991,32 @@ struct FramePlanExecutor::Impl final {
         const auto& particleBatches = prepared.frozenParticleBatches != nullptr
             ? *prepared.frozenParticleBatches
             : prepared.particleBatches;
+        if (!prepared.imageVertices.empty()) {
+            if (prepared.imageVertices.size() >
+                static_cast<std::size_t>(
+                    std::numeric_limits<GLsizeiptr>::max()) /
+                    sizeof(Vertex)) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Prepared image geometry exceeds OpenGL buffer range"
+                );
+            }
+            ensureGeometry(session);
+            glBindVertexArray(vertexArray);
+            glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
+            glBufferData(
+                GL_ARRAY_BUFFER,
+                static_cast<GLsizeiptr>(
+                    prepared.imageVertices.size() * sizeof(Vertex)
+                ),
+                prepared.imageVertices.data(),
+                GL_STREAM_DRAW
+            );
+            session.checkError(
+                ErrorCode::draw,
+                "uploading prepared frame image geometry"
+            );
+        }
         for (const auto& operation : prepared.operations) {
             if (!operation) continue;
             if (const auto* drawOperation =
@@ -6376,14 +6579,19 @@ struct FramePlanExecutor::Impl final {
     std::map<std::string, AssetTextureResource> assets;
     std::map<std::string, ProgramResource> programs;
     TextCoverageRenderer textRenderer;
+    std::map<TextRasterKey, CachedTextRaster> textRasters;
+    std::size_t textRasterBytes = 0;
+    std::uint64_t textRasterUseSequence = 0;
     GLuint vertexArray = 0;
     GLuint vertexBuffer = 0;
+    ImageAttributeState imageAttributeState;
     GLuint particleVertexArray = 0;
     GLuint particleVertexBuffer = 0;
     GLuint particleElementBuffer = 0;
     GLuint puppetVertexArray = 0;
     GLuint puppetVertexBuffer = 0;
     GLuint puppetElementBuffer = 0;
+    ImageAttributeState puppetAttributeState;
     std::map<int, ParticleState> particles;
     std::string outputId;
     std::uint32_t width = 0;

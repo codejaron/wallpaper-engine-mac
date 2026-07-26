@@ -57,12 +57,15 @@ public:
         const noexcept;
 
 private:
-    [[nodiscard]] std::optional<ResolvedAsset> resolveDirectory(
+    struct AssetLocation;
+
+    [[nodiscard]] AssetLocation locate(std::string_view path) const;
+    [[nodiscard]] std::optional<AssetLocation> locateDirectory(
         const std::filesystem::path& root,
         const std::string& normalizedPath,
         AssetSource source
     ) const;
-    [[nodiscard]] std::optional<ResolvedAsset> resolvePackage(
+    [[nodiscard]] std::optional<AssetLocation> locatePackage(
         const PackageArchive& package,
         const std::string& normalizedPath,
         AssetSource source

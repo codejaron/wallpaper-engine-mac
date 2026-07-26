@@ -212,9 +212,15 @@ void AssetResolver::addVirtual(
     );
 }
 
+struct AssetResolver::AssetLocation final {
+    std::string logicalPath;
+    AssetSource source = AssetSource::virtualMemory;
+    std::optional<fs::path> physicalPath;
+};
+
 bool AssetResolver::contains(std::string_view path) const {
     try {
-        static_cast<void>(resolve(path));
+        static_cast<void>(locate(path));
         return true;
     } catch (const FormatError& error) {
         if (error.code() == FormatErrorCode::assetNotFound) {
@@ -224,39 +230,39 @@ bool AssetResolver::contains(std::string_view path) const {
     }
 }
 
-ResolvedAsset AssetResolver::resolve(std::string_view path) const {
+AssetResolver::AssetLocation AssetResolver::locate(
+    std::string_view path
+) const {
     const std::string normalized = normalizeAssetPath(path);
 
-    if (const auto found = virtualFiles_.find(normalized);
-        found != virtualFiles_.end()) {
+    if (virtualFiles_.contains(normalized)) {
         return {
             .logicalPath = normalized,
             .source = AssetSource::virtualMemory,
             .physicalPath = std::nullopt,
-            .bytes = found->second,
         };
     }
-    if (auto asset = resolveDirectory(
+    if (auto location = locateDirectory(
             projectDirectory_, normalized, AssetSource::projectDirectory
         )) {
-        return std::move(*asset);
+        return std::move(*location);
     }
-    if (auto asset = resolvePackage(
+    if (auto location = locatePackage(
             scenePackage_, normalized, AssetSource::scenePackage
         )) {
-        return std::move(*asset);
+        return std::move(*location);
     }
     if (gifScenePackage_) {
-        if (auto asset = resolvePackage(
+        if (auto location = locatePackage(
                 *gifScenePackage_, normalized, AssetSource::gifScenePackage
             )) {
-            return std::move(*asset);
+            return std::move(*location);
         }
     }
-    if (auto asset = resolveDirectory(
+    if (auto location = locateDirectory(
             assetsDirectory_, normalized, AssetSource::officialAssets
         )) {
-        return std::move(*asset);
+        return std::move(*location);
     }
 
     throw FormatError(
@@ -266,6 +272,36 @@ ResolvedAsset AssetResolver::resolve(std::string_view path) const {
         "Asset was not found in virtual memory, project files, scene.pkg, "
         "gifscene.pkg, or the configured official assets directory"
     );
+}
+
+ResolvedAsset AssetResolver::resolve(std::string_view path) const {
+    AssetLocation location = locate(path);
+    std::vector<std::uint8_t> bytes;
+    switch (location.source) {
+        case AssetSource::virtualMemory:
+            bytes = virtualFiles_.at(location.logicalPath);
+            break;
+        case AssetSource::projectDirectory:
+        case AssetSource::officialAssets:
+            bytes = readBinaryFile(*location.physicalPath);
+            break;
+        case AssetSource::scenePackage: {
+            const auto data = scenePackage_.data(location.logicalPath);
+            bytes.assign(data.begin(), data.end());
+            break;
+        }
+        case AssetSource::gifScenePackage: {
+            const auto data = gifScenePackage_->data(location.logicalPath);
+            bytes.assign(data.begin(), data.end());
+            break;
+        }
+    }
+    return {
+        .logicalPath = std::move(location.logicalPath),
+        .source = location.source,
+        .physicalPath = std::move(location.physicalPath),
+        .bytes = std::move(bytes),
+    };
 }
 
 std::string AssetResolver::readString(std::string_view path) const {
@@ -314,7 +350,7 @@ const fs::path& AssetResolver::projectDirectory() const noexcept {
     return projectDirectory_;
 }
 
-std::optional<ResolvedAsset> AssetResolver::resolveDirectory(
+std::optional<AssetResolver::AssetLocation> AssetResolver::locateDirectory(
     const fs::path& root,
     const std::string& normalizedPath,
     AssetSource source
@@ -364,15 +400,14 @@ std::optional<ResolvedAsset> AssetResolver::resolveDirectory(
         return std::nullopt;
     }
 
-    return ResolvedAsset {
+    return AssetLocation {
         .logicalPath = normalizedPath,
         .source = source,
         .physicalPath = canonical,
-        .bytes = readBinaryFile(canonical),
     };
 }
 
-std::optional<ResolvedAsset> AssetResolver::resolvePackage(
+std::optional<AssetResolver::AssetLocation> AssetResolver::locatePackage(
     const PackageArchive& package,
     const std::string& normalizedPath,
     AssetSource source
@@ -380,12 +415,10 @@ std::optional<ResolvedAsset> AssetResolver::resolvePackage(
     if (!package.contains(normalizedPath)) {
         return std::nullopt;
     }
-    const auto data = package.data(normalizedPath);
-    return ResolvedAsset {
+    return AssetLocation {
         .logicalPath = normalizedPath,
         .source = source,
         .physicalPath = std::nullopt,
-        .bytes = std::vector<std::uint8_t>(data.begin(), data.end()),
     };
 }
 

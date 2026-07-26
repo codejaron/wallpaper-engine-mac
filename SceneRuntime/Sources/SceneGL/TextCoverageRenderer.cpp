@@ -24,6 +24,15 @@ struct Vertex final {
     float v;
 };
 
+constexpr std::array<Vertex, 6> coverageQuad{{
+    {0, 0, 0, 0},
+    {0, 1, 0, 1},
+    {1, 1, 1, 1},
+    {0, 0, 0, 0},
+    {1, 1, 1, 1},
+    {1, 0, 1, 0},
+}};
+
 struct Key final {
     std::uint64_t a = 1469598103934665603ULL;
     std::uint64_t b = 1099511628211ULL;
@@ -139,9 +148,9 @@ struct TextCoverageRenderer::Impl final {
             glBindBuffer(GL_ARRAY_BUFFER, candidateVertexBuffer);
             glBufferData(
                 GL_ARRAY_BUFFER,
-                sizeof(Vertex) * 6,
-                nullptr,
-                GL_DYNAMIC_DRAW
+                sizeof(coverageQuad),
+                coverageQuad.data(),
+                GL_STATIC_DRAW
             );
             glEnableVertexAttribArray(0);
             glVertexAttribPointer(
@@ -308,14 +317,19 @@ void TextCoverageRenderer::drawPrepared(
     // CoreGraphics coverage is top-down, matching every other Wallpaper Engine
     // source texture. Keep v=0 on the local bottom edge; presentation performs
     // the one global vertical correction for the completed scene.
-    const Vertex vertices[] = {
-        {0, 0, 0, 0},
-        {0, height, 0, 1},
-        {width, height, 1, 1},
-        {0, 0, 0, 0},
-        {width, height, 1, 1},
-        {width, 0, 1, 0},
-    };
+    std::array<float, 16> scaledModelViewProjection =
+        request.modelViewProjection;
+    for (std::size_t row = 0; row < 4; ++row) {
+        scaledModelViewProjection[row] *= width;
+        scaledModelViewProjection[4 + row] *= height;
+        if (!std::isfinite(scaledModelViewProjection[row]) ||
+            !std::isfinite(scaledModelViewProjection[4 + row])) {
+            throw Error(
+                ErrorCode::invalidArgument,
+                "Scaled text transform must be finite"
+            );
+        }
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, destination.framebuffer);
     glViewport(0, 0, destination.width, destination.height);
     glDisable(GL_DEPTH_TEST);
@@ -338,11 +352,10 @@ void TextCoverageRenderer::drawPrepared(
         impl_->modelViewProjectionLocation,
         1,
         GL_FALSE,
-        request.modelViewProjection.data()
+        scaledModelViewProjection.data()
     );
     glBindVertexArray(impl_->vertexArray);
     glBindBuffer(GL_ARRAY_BUFFER, impl_->vertexBuffer);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
     session.checkError(ErrorCode::draw, "drawing text coverage");

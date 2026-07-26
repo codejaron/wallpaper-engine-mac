@@ -618,6 +618,33 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertEqual(try readPixels(loaded.executor), repeatedPixel([0, 255, 0, 255]))
     }
 
+    func testUploadedAssetTextureRemainsReadyWithoutBackingFileReread() throws {
+        let loaded = try loadFixture(
+            fragmentSource: validFragmentShader,
+            textureInProjectDirectory: true
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, timeSeconds: 1)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 0, 0, 255])
+        )
+
+        try FileManager.default.removeItem(
+            at: loaded.fixture.root
+                .appendingPathComponent("materials", isDirectory: true)
+                .appendingPathComponent("red.tex")
+        )
+
+        try render(loaded.executor, timeSeconds: 2)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 0, 0, 255]),
+            "A frame must reuse the texture already uploaded to the executor instead of resolving and reading its immutable backing asset again"
+        )
+    }
+
     func testDynamicImageCloneExecutesAsDistinctRuntimeObject() throws {
         let loaded = try loadFixture(
             fragmentSource: validFragmentShader,
@@ -1997,6 +2024,34 @@ final class FrameExecutorPixelTests: XCTestCase {
         })
     }
 
+    func testRasterizedTextReusesImmutableFontAssetAcrossFrames() throws {
+        let fixtureFont = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("SceneTextTests/Fixtures/Silkscreen-Regular.ttf")
+        let fontPath = "fonts/fixture.ttf"
+        let loaded = try loadTextFixture(
+            font: fontPath,
+            text: "CACHE",
+            fontData: try Data(contentsOf: fixtureFont)
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, timeSeconds: 1)
+        try assertNoExecutorIssues(loaded.executor)
+        let firstFrame = try readPixels(loaded.executor)
+        try FileManager.default.removeItem(
+            at: loaded.fixture.root.appendingPathComponent(fontPath)
+        )
+
+        try render(loaded.executor, timeSeconds: 2)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertTrue(
+            try readPixels(loaded.executor) == firstFrame,
+            "Unchanged text must reuse its rasterized immutable font resource instead of resolving and rasterizing the font again every frame"
+        )
+    }
+
     func testUnknownSystemFontIdentifierFallsBackToRenderableSystemFont() throws {
         let loaded = try loadTextFixture(font: "systemfont_not_real")
         defer { destroy(loaded) }
@@ -2629,7 +2684,8 @@ final class FrameExecutorPixelTests: XCTestCase {
         scriptedMediaAmount: Bool = false,
         textureAnimationScript: String? = nil,
         sceneTexturePropertyKey: String? = nil,
-        hostTextureNames: [String] = []
+        hostTextureNames: [String] = [],
+        textureInProjectDirectory: Bool = false
     ) throws -> RuntimePipeline {
         let fixture = try makeFixture(
             fragmentSource: fragmentSource,
@@ -2666,7 +2722,8 @@ final class FrameExecutorPixelTests: XCTestCase {
             scriptedMediaAmount: scriptedMediaAmount,
             textureAnimationScript: textureAnimationScript,
             sceneTexturePropertyKey: sceneTexturePropertyKey,
-            hostTextureNames: hostTextureNames
+            hostTextureNames: hostTextureNames,
+            textureInProjectDirectory: textureInProjectDirectory
         )
         do {
             var error: WESceneRuntimeErrorRef?
@@ -2736,7 +2793,8 @@ final class FrameExecutorPixelTests: XCTestCase {
         origin: String = "0 0 0",
         scale: String = "1 1 1",
         size: String = "64 64",
-        text: String = "I"
+        text: String = "I",
+        fontData: Data? = nil
     ) throws -> RuntimePipeline {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -2744,6 +2802,14 @@ final class FrameExecutorPixelTests: XCTestCase {
         let shaders = assets.appendingPathComponent("shaders", isDirectory: true)
         let package = root.appendingPathComponent("scene.pkg")
         try FileManager.default.createDirectory(at: shaders, withIntermediateDirectories: true)
+        if let fontData {
+            let fontURL = root.appendingPathComponent(font)
+            try FileManager.default.createDirectory(
+                at: fontURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try fontData.write(to: fontURL)
+        }
         let project: [String: Any] = [
             "file": "scene.json", "title": "Text executor fixture",
             "type": "scene", "version": 2,
@@ -3292,7 +3358,8 @@ final class FrameExecutorPixelTests: XCTestCase {
         scriptedMediaAmount: Bool = false,
         textureAnimationScript: String? = nil,
         sceneTexturePropertyKey: String? = nil,
-        hostTextureNames: [String] = []
+        hostTextureNames: [String] = [],
+        textureInProjectDirectory: Bool = false
     ) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -3724,13 +3791,29 @@ final class FrameExecutorPixelTests: XCTestCase {
         if drawableSizedSolidLayer {
             model["fullscreen"] = true
         }
+        let primaryTexture = textureData ?? makeRGBA8Texture2x2(
+            pixel: [255, 0, 0, 255]
+        )
         var entries: [(String, Data)] = [
             ("materials/pixel.json", try json(material)),
-            ("materials/red.tex", textureData ?? makeRGBA8Texture2x2(pixel: [255, 0, 0, 255])),
             ("models/pixel.json", try json(model)),
             ("project.json", try json(project)),
             ("scene.json", try json(scene)),
         ]
+        if textureInProjectDirectory {
+            let materials = root.appendingPathComponent(
+                "materials", isDirectory: true
+            )
+            try FileManager.default.createDirectory(
+                at: materials,
+                withIntermediateDirectories: true
+            )
+            try primaryTexture.write(
+                to: materials.appendingPathComponent("red.tex")
+            )
+        } else {
+            entries.append(("materials/red.tex", primaryTexture))
+        }
         if let puppetData {
             entries.append(("models/pixel.mdl", puppetData))
         }

@@ -1449,12 +1449,12 @@
         }
       }
     },
-    "Other Application Fullscreen:" : {
+    "When Another App Window Is Fullscreen or Maximized:" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "needs_review",
-            "value" : "当其他应用程序进入全屏时"
+            "value" : "存在全屏或铺满桌面的其他应用窗口时"
           }
         }
       }

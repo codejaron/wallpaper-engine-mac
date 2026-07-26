@@ -32,7 +32,7 @@ enum GSPlayback: String, CaseIterable, Identifiable, Codable, Sendable {
 /// `PlaybackPolicyReducer`.
 struct PlaybackPolicyConfiguration: Equatable, Sendable {
     var otherApplicationFocused: GSPlayback = .keepRunning
-    var otherApplicationFullscreen: GSPlayback = .keepRunning
+    var otherApplicationFullscreenOrMaximized: GSPlayback = .keepRunning
     var otherApplicationPlayingAudio: GSPlayback = .keepRunning
     var laptopOnBattery: GSPlayback = .keepRunning
 }
@@ -42,7 +42,7 @@ struct PlaybackPolicyConfiguration: Equatable, Sendable {
 /// last detector event win.
 struct PlaybackPolicyConditions: Equatable, Sendable {
     var otherApplicationFocused = false
-    var otherApplicationFullscreen = false
+    var otherApplicationFullscreenOrMaximized = false
     var otherApplicationPlayingAudio = false
     var displayAsleep = false
     var laptopOnBattery = false
@@ -53,7 +53,7 @@ enum PlaybackPolicyEvent: Equatable, Sendable {
     case configurationChanged(PlaybackPolicyConfiguration)
     case conditionsChanged(PlaybackPolicyConditions)
     case otherApplicationFocused(Bool)
-    case otherApplicationFullscreen(Bool)
+    case otherApplicationFullscreenOrMaximized(Bool)
     case otherApplicationPlayingAudio(Bool)
     case displayAsleep(Bool)
     case laptopOnBattery(Bool)
@@ -112,8 +112,8 @@ enum PlaybackPolicyReducer {
             state.conditions = conditions
         case .otherApplicationFocused(let active):
             state.conditions.otherApplicationFocused = active
-        case .otherApplicationFullscreen(let active):
-            state.conditions.otherApplicationFullscreen = active
+        case .otherApplicationFullscreenOrMaximized(let active):
+            state.conditions.otherApplicationFullscreenOrMaximized = active
         case .otherApplicationPlayingAudio(let active):
             state.conditions.otherApplicationPlayingAudio = active
         case .displayAsleep(let active):
@@ -135,8 +135,8 @@ enum PlaybackPolicyReducer {
         let candidates: [GSPlayback] = [
             conditions.otherApplicationFocused
                 ? configuration.otherApplicationFocused : .keepRunning,
-            conditions.otherApplicationFullscreen
-                ? configuration.otherApplicationFullscreen : .keepRunning,
+            conditions.otherApplicationFullscreenOrMaximized
+                ? configuration.otherApplicationFullscreenOrMaximized : .keepRunning,
             conditions.otherApplicationPlayingAudio
                 ? configuration.otherApplicationPlayingAudio : .keepRunning,
             conditions.displayAsleep ? .pause : .keepRunning,

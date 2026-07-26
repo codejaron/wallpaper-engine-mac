@@ -46,6 +46,20 @@ final class PlaybackPolicyTests: XCTestCase {
         )
     }
 
+    func testPersistedFullscreenSettingFeedsFullscreenOrMaximizedPolicy() throws {
+        let data = try XCTUnwrap(
+            #"{"otherApplicationFullscreen":"pause"}"#.data(using: .utf8)
+        )
+
+        let settings = try JSONDecoder().decode(GlobalSettings.self, from: data)
+
+        XCTAssertEqual(
+            settings.playbackPolicyConfiguration
+                .otherApplicationFullscreenOrMaximized,
+            .pause
+        )
+    }
+
     func testDisplaySleepAppliesAnUnconditionalPause() {
         var state = PlaybackPolicyState()
 
@@ -60,11 +74,11 @@ final class PlaybackPolicyTests: XCTestCase {
         var state = PlaybackPolicyState(
             configuration: PlaybackPolicyConfiguration(
                 otherApplicationFocused: .pause,
-                otherApplicationFullscreen: .stop
+                otherApplicationFullscreenOrMaximized: .stop
             )
         )
         state.reduce(.otherApplicationFocused(true))
-        state.reduce(.otherApplicationFullscreen(true))
+        state.reduce(.otherApplicationFullscreenOrMaximized(true))
         state.reduce(.displayAsleep(true))
 
         let wakeTransition = state.reduce(.displayAsleep(false))
@@ -83,6 +97,98 @@ final class PlaybackPolicyTests: XCTestCase {
         XCTAssertEqual(wakeTransition.previous, .pause)
         XCTAssertEqual(wakeTransition.current, .keepRunning)
         XCTAssertEqual(state.effectiveAction, .keepRunning)
+    }
+
+    func testFullscreenGeometryAcceptsWholeDisplayAndUsableDesktopArea() {
+        let display = PlaybackDisplayGeometry(
+            fullFrame: CGRect(x: 0, y: 0, width: 1_470, height: 956),
+            usableFrame: CGRect(x: 0, y: 34, width: 1_470, height: 922)
+        )
+
+        XCTAssertTrue(
+            PlaybackWindowGeometry.isFullscreenOrMaximized(
+                CGRect(x: 0, y: 0, width: 1_470, height: 956),
+                on: [display]
+            )
+        )
+        XCTAssertTrue(
+            PlaybackWindowGeometry.isFullscreenOrMaximized(
+                CGRect(x: 0, y: 34, width: 1_470, height: 922),
+                on: [display]
+            )
+        )
+    }
+
+    func testFullscreenGeometryRejectsLargeWindowThatDoesNotReachUsableEdges() {
+        let display = PlaybackDisplayGeometry(
+            fullFrame: CGRect(x: 0, y: 0, width: 1_470, height: 956),
+            usableFrame: CGRect(x: 0, y: 34, width: 1_470, height: 922)
+        )
+
+        XCTAssertFalse(
+            PlaybackWindowGeometry.isFullscreenOrMaximized(
+                CGRect(x: 12, y: 46, width: 1_446, height: 898),
+                on: [display]
+            )
+        )
+    }
+
+    func testFullscreenDetectionFindsBackgroundAppBehindSmallFrontWindow() {
+        let display = PlaybackDisplayGeometry(
+            fullFrame: CGRect(x: 0, y: 0, width: 1_470, height: 956),
+            usableFrame: CGRect(x: 0, y: 34, width: 1_470, height: 922)
+        )
+        let frontToBackWindows = [
+            PlaybackWindowCandidate(
+                ownerProcessID: 100,
+                frame: CGRect(x: 200, y: 180, width: 700, height: 500)
+            ),
+            PlaybackWindowCandidate(
+                ownerProcessID: 200,
+                frame: display.usableFrame
+            ),
+        ]
+
+        XCTAssertTrue(
+            PlaybackWindowGeometry.hasFullscreenOrMaximizedWindow(
+                frontToBackWindows,
+                on: [display],
+                excludingOwnerProcessIDs: [999]
+            )
+        )
+    }
+
+    func testFullscreenDetectionExcludesWallpaperEngineWindows() {
+        let display = PlaybackDisplayGeometry(
+            fullFrame: CGRect(x: 0, y: 0, width: 1_470, height: 956),
+            usableFrame: CGRect(x: 0, y: 34, width: 1_470, height: 922)
+        )
+
+        XCTAssertFalse(
+            PlaybackWindowGeometry.hasFullscreenOrMaximizedWindow(
+                [
+                    PlaybackWindowCandidate(
+                        ownerProcessID: 999,
+                        frame: display.fullFrame
+                    ),
+                ],
+                on: [display],
+                excludingOwnerProcessIDs: [999]
+            )
+        )
+    }
+
+    func testUsableDisplayGeometryConvertsAppKitInsetsToQuartzCoordinates() {
+        let display = PlaybackDisplayGeometry(
+            screenFrame: CGRect(x: 0, y: 0, width: 1_470, height: 956),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1_470, height: 922),
+            quartzFrame: CGRect(x: 0, y: 0, width: 1_470, height: 956)
+        )
+
+        XCTAssertEqual(
+            display.usableFrame,
+            CGRect(x: 0, y: 34, width: 1_470, height: 922)
+        )
     }
 }
 

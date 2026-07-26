@@ -66,6 +66,8 @@ struct GlobalSettings: Codable, Equatable {
     
     // MARK: Playback
     var otherApplicationFocused = GSPlayback.keepRunning
+    // Keep the persisted key for compatibility with existing settings. The
+    // detector now treats both native fullscreen and desktop maximize as active.
     var otherApplicationFullscreen = GSPlayback.keepRunning
     var otherApplicationPlayingAudio = GSPlayback.keepRunning
     var laptopOnBattery = GSPlayback.keepRunning
@@ -238,7 +240,7 @@ struct GlobalSettings: Codable, Equatable {
     var playbackPolicyConfiguration: PlaybackPolicyConfiguration {
         PlaybackPolicyConfiguration(
             otherApplicationFocused: otherApplicationFocused,
-            otherApplicationFullscreen: otherApplicationFullscreen,
+            otherApplicationFullscreenOrMaximized: otherApplicationFullscreen,
             otherApplicationPlayingAudio: otherApplicationPlayingAudio,
             laptopOnBattery: laptopOnBattery
         )

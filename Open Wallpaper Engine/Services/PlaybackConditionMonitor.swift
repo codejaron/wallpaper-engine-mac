@@ -15,7 +15,7 @@ final class PlaybackConditionMonitor {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var notificationObservers: [NSObjectProtocol] = []
     private var pollTimer: Timer?
-    private var previousFullscreen: Bool?
+    private var previousFullscreenOrMaximized: Bool?
     private var previousAudio: Bool?
     private var previousBattery: Bool?
     private var displayAsleep = false
@@ -41,7 +41,7 @@ final class PlaybackConditionMonitor {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refreshFullscreen() }
+                MainActor.assumeIsolated { self?.refreshFullscreenOrMaximized() }
             },
             workspaceCenter.addObserver(
                 forName: NSWorkspace.screensDidSleepNotification,
@@ -65,7 +65,7 @@ final class PlaybackConditionMonitor {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refreshFullscreen() }
+                MainActor.assumeIsolated { self?.refreshFullscreenOrMaximized() }
             },
             NotificationCenter.default.addObserver(
                 forName: .NSProcessInfoPowerStateDidChange,
@@ -78,7 +78,7 @@ final class PlaybackConditionMonitor {
 
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.refreshFullscreen()
+                self?.refreshFullscreenOrMaximized()
                 self?.refreshAudio()
                 self?.refreshBattery()
             }
@@ -86,7 +86,7 @@ final class PlaybackConditionMonitor {
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
 
-        refreshFullscreen()
+        refreshFullscreenOrMaximized()
         refreshAudio()
         refreshBattery()
         eventHandler(.displayAsleep(displayAsleep))
@@ -184,11 +184,11 @@ final class PlaybackConditionMonitor {
         eventHandler(.laptopOnBattery(value))
     }
 
-    private func refreshFullscreen() {
-        let value = Self.isOtherApplicationFullscreen()
-        guard previousFullscreen != value else { return }
-        previousFullscreen = value
-        eventHandler(.otherApplicationFullscreen(value))
+    private func refreshFullscreenOrMaximized() {
+        let value = Self.isOtherApplicationFullscreenOrMaximized()
+        guard previousFullscreenOrMaximized != value else { return }
+        previousFullscreenOrMaximized = value
+        eventHandler(.otherApplicationFullscreenOrMaximized(value))
     }
 
     private static func isRunningOnBattery() -> Bool {
@@ -209,39 +209,106 @@ final class PlaybackConditionMonitor {
         return false
     }
 
-    private static func isOtherApplicationFullscreen() -> Bool {
-        guard let application = NSWorkspace.shared.frontmostApplication,
-              application.bundleIdentifier != Bundle.main.bundleIdentifier,
-              application.bundleIdentifier != "com.apple.finder" else {
-            return false
-        }
+    private static func isOtherApplicationFullscreenOrMaximized() -> Bool {
         guard let rawWindows = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else { return false }
 
-        let displayBounds: [CGRect] = NSScreen.screens.compactMap { screen in
+        let displays: [PlaybackDisplayGeometry] = NSScreen.screens.compactMap { screen in
             guard let displayID = screen.deviceDescription[
                 NSDeviceDescriptionKey("NSScreenNumber")
             ] as? CGDirectDisplayID else { return nil }
-            return CGDisplayBounds(displayID)
+            return PlaybackDisplayGeometry(
+                screenFrame: screen.frame,
+                visibleFrame: screen.visibleFrame,
+                quartzFrame: CGDisplayBounds(displayID)
+            )
         }
-        let tolerance: CGFloat = 2
 
-        return rawWindows.contains { window in
-            guard (window[kCGWindowOwnerPID as String] as? pid_t) == application.processIdentifier,
+        let windows: [PlaybackWindowCandidate] = rawWindows.compactMap { window in
+            guard let ownerProcessID = window[kCGWindowOwnerPID as String] as? pid_t,
                   (window[kCGWindowLayer as String] as? Int) == 0,
                   let boundsDictionary = window[kCGWindowBounds as String] as? NSDictionary,
                   let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
                   (window[kCGWindowAlpha as String] as? Double ?? 1) > 0 else {
-                return false
+                return nil
             }
-            return displayBounds.contains { display in
-                abs(bounds.minX - display.minX) <= tolerance &&
-                    abs(bounds.minY - display.minY) <= tolerance &&
-                    abs(bounds.width - display.width) <= tolerance &&
-                    abs(bounds.height - display.height) <= tolerance
-            }
+            return PlaybackWindowCandidate(
+                ownerProcessID: ownerProcessID,
+                frame: bounds
+            )
         }
+        return PlaybackWindowGeometry.hasFullscreenOrMaximizedWindow(
+            windows,
+            on: displays,
+            excludingOwnerProcessIDs: [getpid()]
+        )
+    }
+}
+
+/// A display represented in Quartz coordinates. `NSScreen.visibleFrame` uses
+/// AppKit's bottom-left origin, so its menu-bar and Dock insets must be mapped
+/// onto the top-left Quartz frame before comparing it with CGWindow bounds.
+struct PlaybackDisplayGeometry: Equatable {
+    let fullFrame: CGRect
+    let usableFrame: CGRect
+
+    init(fullFrame: CGRect, usableFrame: CGRect) {
+        self.fullFrame = fullFrame
+        self.usableFrame = usableFrame
+    }
+
+    init(screenFrame: CGRect, visibleFrame: CGRect, quartzFrame: CGRect) {
+        let leftInset = visibleFrame.minX - screenFrame.minX
+        let topInset = screenFrame.maxY - visibleFrame.maxY
+        fullFrame = quartzFrame
+        usableFrame = CGRect(
+            x: quartzFrame.minX + leftInset,
+            y: quartzFrame.minY + topInset,
+            width: visibleFrame.width,
+            height: visibleFrame.height
+        )
+    }
+}
+
+struct PlaybackWindowCandidate: Equatable {
+    let ownerProcessID: pid_t
+    let frame: CGRect
+}
+
+enum PlaybackWindowGeometry {
+    static func hasFullscreenOrMaximizedWindow(
+        _ windows: [PlaybackWindowCandidate],
+        on displays: [PlaybackDisplayGeometry],
+        excludingOwnerProcessIDs: Set<pid_t>
+    ) -> Bool {
+        windows.contains { window in
+            !excludingOwnerProcessIDs.contains(window.ownerProcessID) &&
+                isFullscreenOrMaximized(window.frame, on: displays)
+        }
+    }
+
+    static func isFullscreenOrMaximized(
+        _ windowFrame: CGRect,
+        on displays: [PlaybackDisplayGeometry],
+        tolerance: CGFloat = 2
+    ) -> Bool {
+        guard windowFrame.width > 0, windowFrame.height > 0 else { return false }
+        return displays.contains { display in
+            framesMatch(windowFrame, display.fullFrame, tolerance: tolerance) ||
+                framesMatch(windowFrame, display.usableFrame, tolerance: tolerance)
+        }
+    }
+
+    private static func framesMatch(
+        _ windowFrame: CGRect,
+        _ targetFrame: CGRect,
+        tolerance: CGFloat
+    ) -> Bool {
+        abs(windowFrame.minX - targetFrame.minX) <= tolerance &&
+            abs(windowFrame.minY - targetFrame.minY) <= tolerance &&
+            abs(windowFrame.maxX - targetFrame.maxX) <= tolerance &&
+            abs(windowFrame.maxY - targetFrame.maxY) <= tolerance
     }
 }

@@ -13,6 +13,10 @@ enum GSPlayback: String, CaseIterable, Identifiable, Codable, Sendable {
 
     case keepRunning, mute, pause, stop
 
+    /// `stop` is the only policy that tears down the wallpaper runtime.
+    /// Pause and mute preserve the runtime so playback can resume in place.
+    var keepsRuntimeLoaded: Bool { self != .stop }
+
     fileprivate var policyPriority: Int {
         switch self {
         case .keepRunning: 0

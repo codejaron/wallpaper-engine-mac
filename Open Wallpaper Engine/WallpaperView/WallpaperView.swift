@@ -15,15 +15,17 @@ struct WallpaperView: View {
     var body: some View {
         let wallpaper = viewModel.wallpaper(for: screenId)
         Group {
-            switch wallpaper.project.type.lowercased() {
-            case "video":
-                VideoWallpaperView(wallpaperViewModel: viewModel, screenId: screenId)
-            case "scene":
-                SceneWallpaperView(wallpaperViewModel: viewModel, screenId: screenId)
-            case "web":
-                WebWallpaperView(wallpaperViewModel: viewModel, screenId: screenId)
-            default:
-                EmptyView()
+            if viewModel.playbackPolicyAction.keepsRuntimeLoaded {
+                switch wallpaper.project.type.lowercased() {
+                case "video":
+                    VideoWallpaperView(wallpaperViewModel: viewModel, screenId: screenId)
+                case "scene":
+                    SceneWallpaperView(wallpaperViewModel: viewModel, screenId: screenId)
+                case "web":
+                    WebWallpaperView(wallpaperViewModel: viewModel, screenId: screenId)
+                default:
+                    EmptyView()
+                }
             }
         }
         .onAppear {

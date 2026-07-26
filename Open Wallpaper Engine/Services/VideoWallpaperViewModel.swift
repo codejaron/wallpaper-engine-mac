@@ -14,16 +14,7 @@ class VideoWallpaperViewModel: ObservableObject {
     let screenId: String
     var currentWallpaper: WEWallpaper {
         didSet {
-            // Remove observer for old item before replacing
-            if let oldItem = self.player.currentItem {
-                NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: oldItem)
-            }
-            let newItem = AVPlayerItem(url: currentWallpaper.wallpaperDirectory.appending(path: currentWallpaper.project.file))
-            self.player.replaceCurrentItem(with: newItem)
-            NotificationCenter.default.addObserver(self, selector: #selector(playerDidFinishPlaying(_:)), name: .AVPlayerItemDidPlayToEndTime, object: newItem)
-            // Force-apply rate and volume — replaceCurrentItem resets player to paused
-            self.applyEffectiveRate()
-            self.applyEffectiveVolume()
+            loadCurrentWallpaper()
         }
     }
 
@@ -39,14 +30,13 @@ class VideoWallpaperViewModel: ObservableObject {
         }
     }
 
-    var player = AVPlayer()
+    let player = AVPlayer()
     private var cancellables = Set<AnyCancellable>()
 
     init(wallpaper currentWallpaper: WEWallpaper, screenId: String) {
         self.screenId = screenId
         self.currentWallpaper = currentWallpaper
-        self.player = AVPlayer(url: currentWallpaper.wallpaperDirectory.appending(path: currentWallpaper.project.file))
-        NotificationCenter.default.addObserver(self, selector: #selector(playerDidFinishPlaying(_:)), name: .AVPlayerItemDidPlayToEndTime, object: self.player.currentItem)
+        loadCurrentWallpaper()
 
         // Host conditions and user intent are already combined by the shared
         // WallpaperViewModel. This adapter must not create a second sleep state.
@@ -78,6 +68,42 @@ class VideoWallpaperViewModel: ObservableObject {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+    }
+
+    func prepareForDisplay() {
+        guard player.currentItem == nil else { return }
+        loadCurrentWallpaper()
+    }
+
+    func releasePlaybackResources() {
+        if let item = player.currentItem {
+            NotificationCenter.default.removeObserver(
+                self,
+                name: .AVPlayerItemDidPlayToEndTime,
+                object: item
+            )
+        }
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+    }
+
+    private func loadCurrentWallpaper() {
+        releasePlaybackResources()
+        let item = AVPlayerItem(
+            url: currentWallpaper.wallpaperDirectory.appending(
+                path: currentWallpaper.project.file
+            )
+        )
+        player.replaceCurrentItem(with: item)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(playerDidFinishPlaying(_:)),
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: item
+        )
+        // Replacing an item resets AVPlayer to paused and may reset volume.
+        applyEffectiveRate()
+        applyEffectiveVolume()
     }
 
     @objc private func playerDidFinishPlaying(_ notification: Notification) {

@@ -30,7 +30,7 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
 
     private weak var attachedWebView: WKWebView?
     private var policyPaused = false
-    private var appliedPaused: Bool?
+    private var mediaPlaybackSuspended = false
     private var appliedPolicyMuted: Bool?
     private var appliedPolicyVolume: Float?
     private var javascriptIssues: [String: String] = [:]
@@ -75,7 +75,7 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
     func attach(_ webView: WKWebView) {
         guard attachedWebView !== webView else { return }
         attachedWebView = webView
-        appliedPaused = nil
+        mediaPlaybackSuspended = false
         appliedPolicyMuted = nil
         appliedPolicyVolume = nil
         reconcileMediaPolicy(force: true)
@@ -93,7 +93,7 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
     func detach(_ webView: WKWebView) {
         guard attachedWebView === webView else { return }
         attachedWebView = nil
-        appliedPaused = nil
+        mediaPlaybackSuspended = false
         appliedPolicyMuted = nil
         appliedPolicyVolume = nil
     }
@@ -118,14 +118,22 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
         let muted = shouldMuteAudio
         let volume = min(max(AppDelegate.shared.wallpaperViewModel.effectivePlayVolume, 0), 1)
         let paused = policyPaused
-        guard force || appliedPaused != paused ||
-                appliedPolicyMuted != muted ||
+        if mediaPlaybackSuspended != paused {
+            mediaPlaybackSuspended = paused
+            // This public WebKit policy covers media playback, including
+            // attempts made after suspension, without destroying page state.
+            // WebKit does not expose a corresponding API for freezing all JS,
+            // timers, workers, CSS animation, or WebGL execution.
+            webView.setAllMediaPlaybackSuspended(
+                paused,
+                completionHandler: nil
+            )
+        }
+        guard force || appliedPolicyMuted != muted ||
                 appliedPolicyVolume != volume else { return }
-        appliedPaused = paused
         appliedPolicyMuted = muted
         appliedPolicyVolume = volume
         applyMediaPolicy(
-            policyPaused: paused,
             muted: muted,
             volume: volume,
             in: webView
@@ -139,16 +147,15 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         javascriptIssues.removeAll()
         mediaPolicyIssue = nil
-        appliedPaused = nil
         appliedPolicyMuted = nil
         appliedPolicyVolume = nil
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         attachedWebView = webView
-        // A navigation creates a new document and therefore drops all JS
-        // policy markers. Re-apply both policies explicitly for the new DOM.
-        appliedPaused = nil
+        // A navigation creates a new document and therefore drops the
+        // injected HTML-media audio state. WKWebView's media suspension is a
+        // view-level policy and remains paired independently of navigation.
         appliedPolicyMuted = nil
         appliedPolicyVolume = nil
         let javascriptStyle = "var css = '*{-webkit-touch-callout:none;-webkit-user-select:none}'; var head = document.head || document.getElementsByTagName('head')[0]; var style = document.createElement('style'); style.type = 'text/css'; style.appendChild(document.createTextNode(css)); head.appendChild(style);"
@@ -177,20 +184,17 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
     }
     
     private func applyMediaPolicy(
-        policyPaused: Bool,
         muted: Bool,
         volume: Float,
         in webView: WKWebView
     ) {
-        let paused = policyPaused ? "true" : "false"
         let mute = muted ? "true" : "false"
         let normalizedVolume = String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), volume)
         evaluatePolicyAsyncJavaScript(
-            "if (typeof window.__weSetMediaPolicy !== 'function') { throw new Error('media policy controller is not installed'); } await window.__weSetMediaPolicy({policyPaused:\(paused),muted:\(mute),volume:\(normalizedVolume)});",
+            "if (typeof window.__weSetMediaPolicy !== 'function') { throw new Error('media policy controller is not installed'); } await window.__weSetMediaPolicy({muted:\(mute),volume:\(normalizedVolume)});",
             operation: "apply media policy",
             in: webView,
             onFailure: { [weak self] in
-                self?.appliedPaused = nil
                 self?.appliedPolicyMuted = nil
                 self?.appliedPolicyVolume = nil
             }
@@ -312,11 +316,10 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
         }
     }
 
-    /// Injected at document start so policy covers media elements created by
-    /// wallpaper scripts after navigation. The controller keeps authored
-    /// volume/mute and pause intent separate from host policy, allowing a
-    /// host pause to restore only media that was playing before the policy
-    /// became active.
+    /// Injected at document start so audio policy covers media elements
+    /// created by wallpaper scripts after navigation. Pause is deliberately
+    /// handled by WKWebView's public media-suspension API; this controller
+    /// only layers host mute/volume over HTML media authored state.
     static func makeMediaPolicyUserScript() -> WKUserScript {
         WKUserScript(source: Self.mediaPolicyJavaScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
     }
@@ -372,53 +375,52 @@ window.__weWallpaperPropertyBridge=bridge;
     private static let mediaPolicyJavaScript = #"""
 (function(){
 if(window.__weMediaPolicyController){return;}
-const state={policyPaused:false,muted:false,volume:1};
+const state={muted:false,volume:1};
 const controller={state:state,lastError:null};
 const knownFrames=new WeakSet();
+const mediaStates=new WeakMap();
 const clamp=function(v){v=Number(v);return Number.isFinite(v)?Math.max(0,Math.min(1,v)):0;};
-const shouldPause=function(){return state.policyPaused;};
-const snapshot=function(){return {policyPaused:state.policyPaused,muted:state.muted,volume:state.volume};};
+const snapshot=function(){return {muted:state.muted,volume:state.volume};};
 function install(element){
-  if(!element||element.__weMediaState)return;
-  const authored={volume:clamp(element.volume),muted:!!element.muted,wasPlaying:false,applying:false,lastFactor:1};
-  element.__weMediaState=authored;
-  element.addEventListener('ended',function(){authored.wasPlaying=false;});
-  element.addEventListener('pause',function(){
-    if(!authored.applying&&shouldPause())authored.wasPlaying=false;
-  });
-  element.addEventListener('play',function(){
-    if(shouldPause()&&!authored.applying){authored.wasPlaying=true;authored.applying=true;try{element.pause();}finally{authored.applying=false;}}
-  });
+  if(!element||mediaStates.has(element))return;
+  const authored={
+    volume:clamp(element.volume),
+    muted:!!element.muted,
+    applying:false,
+    lastFactor:1,
+    appliedVolume:null,
+    appliedMuted:null
+  };
+  mediaStates.set(element,authored);
   element.addEventListener('volumechange',function(){
     if(authored.applying)return;
+    const currentVolume=clamp(element.volume);
+    const currentMuted=!!element.muted;
+    const volumeWasApplied=authored.appliedVolume!==null&&Math.abs(currentVolume-authored.appliedVolume)<0.000001;
+    const muteWasApplied=authored.appliedMuted!==null&&currentMuted===authored.appliedMuted;
+    if(volumeWasApplied&&muteWasApplied)return;
     const factor=authored.lastFactor;
-    if(factor>0)authored.volume=clamp(element.volume/factor);
-    else authored.volume=clamp(element.volume);
-    authored.muted=!!element.muted;
+    if(!volumeWasApplied)authored.volume=factor>0?clamp(currentVolume/factor):currentVolume;
+    if(!muteWasApplied)authored.muted=currentMuted;
+    apply(element).catch(report);
   });
 }
 
 function apply(element){
   install(element);
-  const authored=element.__weMediaState;
+  const authored=mediaStates.get(element);
   if(!authored)return Promise.resolve();
-  const pause=shouldPause();
-  if(pause){
-    if(!element.paused)authored.wasPlaying=true;
-    if(!element.paused){authored.applying=true;try{element.pause();}finally{authored.applying=false;}}
-  }
   const factor=state.muted?0:state.volume;
+  const appliedVolume=clamp(authored.volume*factor);
+  const appliedMuted=state.muted||authored.muted;
   authored.lastFactor=factor;
+  authored.appliedVolume=appliedVolume;
+  authored.appliedMuted=appliedMuted;
   authored.applying=true;
   try{
-    element.volume=clamp(authored.volume*factor);
-    element.muted=state.muted||authored.muted;
+    element.volume=appliedVolume;
+    element.muted=appliedMuted;
   }finally{authored.applying=false;}
-  if(!pause&&authored.wasPlaying){
-    authored.wasPlaying=false;
-    const result=element.play();
-    if(result&&typeof result.catch==='function')return result.catch(function(error){controller.lastError=String(error);throw error;});
-  }
   return Promise.resolve();
 }
 function all(){return Array.from(document.querySelectorAll('video,audio'));}
@@ -459,7 +461,6 @@ if(document.documentElement)startObserver();else document.addEventListener('DOMC
 controller.apply=function(){return Promise.all(all().map(apply));};
 function setState(next,propagate){
   if(!next||typeof next!=='object')throw new Error('invalid media policy state');
-  state.policyPaused=!!next.policyPaused;
   state.muted=!!next.muted;
   state.volume=clamp(next.volume);
   controller.lastError=null;
@@ -476,7 +477,7 @@ window.addEventListener('message',function(event){
   try{setState(data.state,true).catch(report);}catch(error){report(error);}
 });
 window.__weMediaPolicyController=controller;
-setState({policyPaused:false,muted:false,volume:1},false).catch(report);
+setState({muted:false,volume:1},false).catch(report);
 })()
 """#
 }

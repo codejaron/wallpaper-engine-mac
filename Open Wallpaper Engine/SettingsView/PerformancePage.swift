@@ -37,6 +37,15 @@ struct PerformancePage: SettingsPage {
                     Text("Mute").tag(GSPlayback.mute)
                     Text("Pause").tag(GSPlayback.pause)
                 }
+                if viewModel.settings.requiresSystemAudioCaptureForAudioRule {
+                    Label(
+                        "Enable System Audio Capture in General settings for this rule to work.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
                 
                 Picker("Laptop on battery", selection: $viewModel.settings.laptopOnBattery) {
                     Text("Keep Running").tag(GSPlayback.keepRunning)

@@ -243,6 +243,11 @@ struct GlobalSettings: Codable, Equatable {
             laptopOnBattery: laptopOnBattery
         )
     }
+
+    var requiresSystemAudioCaptureForAudioRule: Bool {
+        otherApplicationPlayingAudio != .keepRunning &&
+            !systemAudioCaptureEnabled
+    }
 }
 
 @MainActor
@@ -277,7 +282,6 @@ class GlobalSettingsViewModel: ObservableObject {
 
     private var playbackPolicyState = PlaybackPolicyState()
     private var appliedPlaybackPolicyAction = GSPlayback.keepRunning
-    private var stoppedWallpaperWindowIDs: Set<String>?
     private var hasStartedPlaybackPolicy = false
     
     init() {
@@ -385,15 +389,17 @@ class GlobalSettingsViewModel: ObservableObject {
         didActivateApplicationNotificationCancellable = nil
         didChangePlaybackPolicyConfigurationCancellable?.cancel()
         didChangePlaybackPolicyConfigurationCancellable = nil
-        if restorePlayback, appliedPlaybackPolicyAction == .stop {
-            restoreStoppedWindowVisibility()
-        }
-        stoppedWallpaperWindowIDs = nil
-        appliedPlaybackPolicyAction = .keepRunning
         playbackPolicyState = PlaybackPolicyState(
             configuration: settings.playbackPolicyConfiguration
         )
-        AppDelegate.shared.wallpaperViewModel.setPlaybackPolicyAction(.keepRunning)
+        if restorePlayback {
+            let wasStopped = appliedPlaybackPolicyAction == .stop
+            AppDelegate.shared.wallpaperViewModel.setPlaybackPolicyAction(.keepRunning)
+            appliedPlaybackPolicyAction = .keepRunning
+            if wasStopped {
+                scheduleWallpaperWindowRestoration()
+            }
+        }
         hasStartedPlaybackPolicy = false
     }
     
@@ -490,21 +496,6 @@ class GlobalSettingsViewModel: ObservableObject {
         updatePlaybackPolicy(.otherApplicationFocused(isOtherApplication))
     }
 
-    /// Re-captures the normal visibility of newly-created wallpaper windows
-    /// and reapplies `stop`. The windows are ordered front by AppDelegate
-    /// during a rebuild, so that visibility is the correct restoration state.
-    func wallpaperWindowsDidRebuild() {
-        guard playbackPolicyState.effectiveAction == .stop else {
-            return
-        }
-        stoppedWallpaperWindowIDs = Set(
-            AppDelegate.shared.wallpaperWindows.compactMap { id, window in
-                window.isVisible ? id : nil
-            }
-        )
-        applyPlaybackPolicyAction(.stop, force: true)
-    }
-
     /// Feeds an explicit host condition into the policy state machine.
     /// Platform detectors should call this on the application thread; no
     /// detector is synthesized when a condition has no data source yet.
@@ -518,49 +509,31 @@ class GlobalSettingsViewModel: ObservableObject {
         return transition
     }
 
-    private func captureStoppedWindowVisibility() {
-        stoppedWallpaperWindowIDs = Set(
-            AppDelegate.shared.wallpaperWindows.compactMap { id, window in
-                window.isVisible ? id : nil
-            }
-        )
-    }
-
-    private func restoreStoppedWindowVisibility() {
-        guard let stoppedWallpaperWindowIDs else { return }
-        for (id, window) in AppDelegate.shared.wallpaperWindows {
-            if stoppedWallpaperWindowIDs.contains(id) {
-                window.orderFront(nil)
-            } else {
-                window.orderOut(nil)
-            }
+    private func scheduleWallpaperWindowRestoration() {
+        // @Published invalidation is delivered synchronously, while SwiftUI
+        // mounts the replacement runtime on the following run-loop turn. Keep
+        // the wallpaper windows hidden until that mount has been requested.
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.appliedPlaybackPolicyAction != .stop else { return }
+            AppDelegate.shared.setWallpaperWindowsSuppressedForPlayback(false)
         }
     }
 
-    private func applyPlaybackPolicyAction(
-        _ action: GSPlayback,
-        force: Bool = false
-    ) {
+    private func applyPlaybackPolicyAction(_ action: GSPlayback) {
         let previousAction = appliedPlaybackPolicyAction
-        if action == previousAction && !force {
+        if action == previousAction {
             return
-        }
-
-        if action == .stop && previousAction != .stop {
-            captureStoppedWindowVisibility()
-        } else if previousAction == .stop && action != .stop {
-            restoreStoppedWindowVisibility()
-            stoppedWallpaperWindowIDs = nil
         }
 
         let wallpaperViewModel = AppDelegate.shared.wallpaperViewModel
         wallpaperViewModel.setPlaybackPolicyAction(action)
-        if action == .stop {
-            for window in AppDelegate.shared.wallpaperWindows.values {
-                window.orderOut(nil)
-            }
-        }
         appliedPlaybackPolicyAction = action
+        if action == .stop {
+            AppDelegate.shared.setWallpaperWindowsSuppressedForPlayback(true)
+        } else if previousAction == .stop {
+            scheduleWallpaperWindowRestoration()
+        }
     }
 
 }

@@ -721,6 +721,16 @@
         }
       }
     },
+    "Enable System Audio Capture in General settings for this rule to work." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要在“通用”设置中开启“系统音频捕获”，此规则才能生效。"
+          }
+        }
+      }
+    },
     "Enable this display to load and edit its Scene properties." : {
 
     },
@@ -735,6 +745,14 @@
       }
     },
     "Enables audio-reactive wallpaper effects and the Other Application Playing Audio rule." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启用音频响应式壁纸效果和“其他应用播放音频”规则。"
+          }
+        }
+      }
 
     },
     "English" : {
@@ -1045,8 +1063,8 @@
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "当笔记本连接电源时"
+            "state" : "translated",
+            "value" : "当笔记本使用电池时"
           }
         }
       }
@@ -2106,6 +2124,14 @@
       }
     },
     "System Audio Capture" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "系统音频捕获"
+          }
+        }
+      }
 
     },
     "Tags" : {

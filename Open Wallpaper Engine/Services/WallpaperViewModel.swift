@@ -269,7 +269,7 @@ class WallpaperViewModel: ObservableObject {
         }
     }
 
-    private(set) var playbackPolicyAction = GSPlayback.keepRunning
+    @Published private(set) var playbackPolicyAction = GSPlayback.keepRunning
     @Published private(set) var effectivePlayRate: Float = 1.0
     @Published private(set) var effectivePlayVolume: Float = 1.0
 

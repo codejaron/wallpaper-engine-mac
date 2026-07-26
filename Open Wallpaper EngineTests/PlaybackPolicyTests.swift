@@ -1,8 +1,36 @@
 import AppKit
+import SwiftUI
+import WebKit
 import XCTest
 @testable import Open_Wallpaper_Engine
 
 final class PlaybackPolicyTests: XCTestCase {
+    func testOnlyStopUnloadsTheWallpaperRuntime() {
+        XCTAssertTrue(GSPlayback.keepRunning.keepsRuntimeLoaded)
+        XCTAssertTrue(GSPlayback.mute.keepsRuntimeLoaded)
+        XCTAssertTrue(GSPlayback.pause.keepsRuntimeLoaded)
+        XCTAssertFalse(GSPlayback.stop.keepsRuntimeLoaded)
+    }
+
+    func testAudioPlaybackRuleRequiresSystemAudioCaptureOnlyWhenActive() {
+        var settings = GlobalSettings()
+
+        XCTAssertFalse(settings.requiresSystemAudioCaptureForAudioRule)
+
+        settings.otherApplicationPlayingAudio = .mute
+        XCTAssertTrue(settings.requiresSystemAudioCaptureForAudioRule)
+
+        settings.systemAudioCaptureEnabled = true
+        XCTAssertFalse(settings.requiresSystemAudioCaptureForAudioRule)
+
+        settings.systemAudioCaptureEnabled = false
+        settings.otherApplicationPlayingAudio = .pause
+        XCTAssertTrue(settings.requiresSystemAudioCaptureForAudioRule)
+
+        settings.otherApplicationPlayingAudio = .keepRunning
+        XCTAssertFalse(settings.requiresSystemAudioCaptureForAudioRule)
+    }
+
     func testLegacyDisplaySleepSettingDoesNotInvalidateOtherSettings() throws {
         let data = try XCTUnwrap(
             #"{"displayAsleep":"stop","otherApplicationFocused":"mute"}"#
@@ -59,6 +87,73 @@ final class PlaybackPolicyTests: XCTestCase {
 }
 
 @MainActor
+final class WallpaperWindowPlaybackSuppressionTests: XCTestCase {
+    func testWallpaperHostingDisablesContentDrivenWindowSizing() {
+        let window = WallpaperWindow()
+        window.setWallpaperContent(EmptyView())
+        guard let hostingView = window.contentView as? NSHostingView<EmptyView> else {
+            XCTFail("Wallpaper content was not installed in an NSHostingView")
+            return
+        }
+
+        XCTAssertEqual(hostingView.sizingOptions, [])
+    }
+
+    func testLeavingStopRestoresWindowWithoutUsingPriorVisibilityAsIntent() async {
+        let appDelegate = AppDelegate.shared
+        let previousWindows = appDelegate.wallpaperWindows
+        let previousAction = appDelegate.wallpaperViewModel.playbackPolicyAction
+        let previousSuppression = appDelegate.playbackSuppressesWallpaperWindows
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        let viewModel = GlobalSettingsViewModel()
+        defer {
+            viewModel.stopPlaybackPolicyMonitoring(restorePlayback: false)
+            window.close()
+            appDelegate.wallpaperWindows = previousWindows
+            appDelegate.wallpaperViewModel.setPlaybackPolicyAction(previousAction)
+            appDelegate.setWallpaperWindowsSuppressedForPlayback(
+                previousSuppression
+            )
+        }
+
+        appDelegate.wallpaperWindows = ["playback-suppression-test": window]
+        window.orderOut(nil)
+
+        let configuration = PlaybackPolicyConfiguration(
+            laptopOnBattery: .stop
+        )
+        viewModel.updatePlaybackPolicy(.configurationChanged(configuration))
+        viewModel.updatePlaybackPolicy(.laptopOnBattery(true))
+
+        XCTAssertEqual(
+            appDelegate.wallpaperViewModel.playbackPolicyAction,
+            .stop
+        )
+        XCTAssertFalse(window.isVisible)
+
+        viewModel.updatePlaybackPolicy(.laptopOnBattery(false))
+        let restorationScheduled = expectation(
+            description: "Wallpaper window restoration was scheduled"
+        )
+        DispatchQueue.main.async {
+            restorationScheduled.fulfill()
+        }
+        await fulfillment(of: [restorationScheduled], timeout: 1)
+
+        XCTAssertEqual(
+            appDelegate.wallpaperViewModel.playbackPolicyAction,
+            .keepRunning
+        )
+        XCTAssertTrue(window.isVisible)
+    }
+}
+
+@MainActor
 final class PlaybackConditionMonitorTests: XCTestCase {
     func testScreenWakeClearsTheDisplaySleepCondition() {
         var displaySleepEvents: [Bool] = []
@@ -81,5 +176,143 @@ final class PlaybackConditionMonitorTests: XCTestCase {
         )
 
         XCTAssertEqual(displaySleepEvents, [true, false])
+    }
+}
+
+@MainActor
+final class RuntimeResourceLifecycleTests: XCTestCase {
+    func testVideoPlayerReleasesAndRecreatesItsCurrentItem() {
+        let viewModel = VideoWallpaperViewModel(
+            wallpaper: WallpaperViewModel.defaultWallpaper,
+            screenId: "resource-lifecycle-test"
+        )
+        XCTAssertNotNil(viewModel.player.currentItem)
+
+        viewModel.releasePlaybackResources()
+        XCTAssertNil(viewModel.player.currentItem)
+
+        viewModel.prepareForDisplay()
+        XCTAssertNotNil(viewModel.player.currentItem)
+        viewModel.releasePlaybackResources()
+    }
+}
+
+@MainActor
+final class WebMediaPolicyTests: XCTestCase {
+    func testHTMLMediaMuteRestoresPageAuthoredAudioState() async throws {
+        let configuration = WKWebViewConfiguration()
+        configuration.userContentController.addUserScript(
+            WebWallpaperViewModel.makeMediaPolicyUserScript()
+        )
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let navigationExpectation = expectation(description: "Web page loaded")
+        let navigationObserver = WebNavigationObserver(
+            expectation: navigationExpectation
+        )
+        webView.navigationDelegate = navigationObserver
+        webView.loadHTMLString(
+            "<html><body><video id='media'></video></body></html>",
+            baseURL: nil
+        )
+
+        await fulfillment(of: [navigationExpectation], timeout: 5)
+        if let navigationError = navigationObserver.error {
+            throw navigationError
+        }
+
+        let result = try await callJavaScript(
+            #"""
+            const media=document.getElementById('media');
+            await window.__weSetMediaPolicy({muted:false,volume:1});
+            media.volume=0.8;
+            media.muted=false;
+            media.dispatchEvent(new Event('volumechange'));
+            await window.__weSetMediaPolicy({muted:true,volume:0});
+            const initiallyMuted={volume:media.volume,muted:media.muted};
+            media.volume=0.6;
+            media.muted=false;
+            media.dispatchEvent(new Event('volumechange'));
+            const policyReapplied={volume:media.volume,muted:media.muted};
+            await window.__weSetMediaPolicy({muted:false,volume:1});
+            return {
+              initiallyMuted:initiallyMuted,
+              policyReapplied:policyReapplied,
+              restored:{volume:media.volume,muted:media.muted}
+            };
+            """#,
+            in: webView
+        )
+        let output = try XCTUnwrap(result as? [String: Any])
+        let initiallyMuted = try XCTUnwrap(
+            output["initiallyMuted"] as? [String: Any]
+        )
+        let policyReapplied = try XCTUnwrap(
+            output["policyReapplied"] as? [String: Any]
+        )
+        let restored = try XCTUnwrap(output["restored"] as? [String: Any])
+
+        XCTAssertEqual(initiallyMuted["volume"] as? Double, 0)
+        XCTAssertEqual(initiallyMuted["muted"] as? Bool, true)
+        XCTAssertEqual(policyReapplied["volume"] as? Double, 0)
+        XCTAssertEqual(policyReapplied["muted"] as? Bool, true)
+        XCTAssertEqual(
+            try XCTUnwrap(restored["volume"] as? Double),
+            0.6,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(restored["muted"] as? Bool, false)
+    }
+
+    private func callJavaScript(
+        _ script: String,
+        in webView: WKWebView
+    ) async throws -> Any? {
+        try await withCheckedThrowingContinuation { continuation in
+            webView.callAsyncJavaScript(
+                script,
+                arguments: [:],
+                in: nil,
+                in: .page
+            ) { result in
+                switch result {
+                case .success(let value):
+                    continuation.resume(returning: value)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+private final class WebNavigationObserver: NSObject, WKNavigationDelegate {
+    let expectation: XCTestExpectation
+    private(set) var error: Error?
+
+    init(expectation: XCTestExpectation) {
+        self.expectation = expectation
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        expectation.fulfill()
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFail navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        self.error = error
+        expectation.fulfill()
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        self.error = error
+        expectation.fulfill()
     }
 }

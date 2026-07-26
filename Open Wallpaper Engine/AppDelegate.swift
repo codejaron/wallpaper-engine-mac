@@ -60,6 +60,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var mainWindowController: MainWindowController!
     
     var wallpaperWindows: [String: NSWindow] = [:]
+    private(set) var playbackSuppressesWallpaperWindows = false
     
     var contentViewModel = ContentViewModel()
     var wallpaperViewModel = WallpaperViewModel()
@@ -116,10 +117,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         saveCurrentWallpaper()
         AppDelegate.shared.setPlacehoderWallpaper(with: wallpaperViewModel.currentWallpaper)
 
-        // 显示桌面壁纸
-        for (_, window) in self.wallpaperWindows {
-            window.orderFront(nil)
-        }
+        reconcileWallpaperWindowVisibility()
         
         if globalSettingsViewModel.isFirstLaunch {
             self.mainWindowController.window.center()
@@ -129,7 +127,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Apply the real frontmost-application condition after wallpaper
         // windows have reached their intended initial visibility.
         globalSettingsViewModel.activateApplicationDidChange()
-        globalSettingsViewModel.wallpaperWindowsDidRebuild()
     }
     
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -214,6 +211,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
 // MARK: Set Wallpaper Windows - One per screen
+    func setWallpaperWindowsSuppressedForPlayback(_ suppressed: Bool) {
+        playbackSuppressesWallpaperWindows = suppressed
+        reconcileWallpaperWindowVisibility()
+    }
+
+    func reconcileWallpaperWindowVisibility() {
+        for window in wallpaperWindows.values {
+            if playbackSuppressesWallpaperWindows {
+                window.orderOut(nil)
+            } else {
+                window.orderFront(nil)
+            }
+        }
+    }
+
     func setWallpaperWindows() {
         updateSceneAudioMainScreen()
         for screen in NSScreen.screens {
@@ -232,7 +244,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.canBecomeVisibleWithoutLogin = true
             window.isReleasedWhenClosed = false
             window.ignoresMouseEvents = true
-            window.contentView = NSHostingView(rootView:
+            window.setWallpaperContent(
                 WallpaperView(viewModel: self.wallpaperViewModel, screenId: screenId)
             )
             wallpaperWindows[screenId] = window
@@ -245,8 +257,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for (_, window) in wallpaperWindows { window.close() }
         wallpaperWindows.removeAll()
         setWallpaperWindows()
-        for (_, window) in wallpaperWindows { window.orderFront(nil) }
-        globalSettingsViewModel.wallpaperWindowsDidRebuild()
+        reconcileWallpaperWindowVisibility()
     }
 
     /// Called when monitors connect/disconnect — auto-enables newly connected screens.
@@ -431,6 +442,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 class WallpaperWindow: NSWindow {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+
+    func setWallpaperContent<Content: View>(_ rootView: Content) {
+        let hostingView = NSHostingView(rootView: rootView)
+        // Screen geometry owns the wallpaper window size. SwiftUI can
+        // become empty during Stop, but must not collapse the window.
+        hostingView.sizingOptions = []
+        contentView = hostingView
+    }
 }
 
 enum SettingsToolbarIdentifiers {

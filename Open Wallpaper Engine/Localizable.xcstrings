@@ -1,6 +1,9 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "" : {
+
+    },
     "_approved" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -118,9 +121,6 @@
       }
     },
     "%@" : {
-
-    },
-    "%@: invalid or missing runtime value" : {
 
     },
     "%lld" : {
@@ -753,7 +753,6 @@
           }
         }
       }
-
     },
     "English" : {
       "localizations" : {
@@ -1037,6 +1036,12 @@
       }
     },
     "Internal" : {
+
+    },
+    "Invalid or missing runtime value" : {
+
+    },
+    "Invalid property markup: %@" : {
 
     },
     "Keep Running" : {
@@ -1445,16 +1450,6 @@
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "当焦点转移到其他应用时"
-          }
-        }
-      }
-    },
-    "When Another App Window Is Fullscreen or Maximized:" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "存在全屏或铺满桌面的其他应用窗口时"
           }
         }
       }
@@ -2132,7 +2127,6 @@
           }
         }
       }
-
     },
     "Tags" : {
       "localizations" : {
@@ -2480,6 +2474,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Open Wallpaper Engine 里的新东西"
+          }
+        }
+      }
+    },
+    "When Another App Window Is Fullscreen or Maximized:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "存在全屏或铺满桌面的其他应用窗口时"
           }
         }
       }

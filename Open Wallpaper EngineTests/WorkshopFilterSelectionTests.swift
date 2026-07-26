@@ -5,6 +5,177 @@ import UniformTypeIdentifiers
 import XCTest
 @testable import Open_Wallpaper_Engine
 
+final class FilterResultsSystemImageTests: XCTestCase {
+    func testShowOnlyOptionsNeverUseAnEmptySystemImageName() {
+        let hasOnlyValidImageNames = FRShowOnly.allOptions.allSatisfy { option in
+            let imageName: String? = option.1
+            return imageName == nil || imageName?.isEmpty == false
+        }
+
+        XCTAssertTrue(hasOnlyValidImageNames)
+    }
+}
+
+final class ScenePropertyContentParserTests: XCTestCase {
+    func testTextPropertyUsesMarkupInsteadOfItsNonStringRuntimeValue() throws {
+        let property = ScenePropertyDefinition(
+            key: "display",
+            text: "<center><a href='https://example.com/creator'>"
+                + "<img src='https://images.example/banner.gif' width='105%' alt='Banner'>"
+                + "</a></center><h4>Hello<br>World</h4>",
+            kind: .text,
+            index: 0,
+            order: 0,
+            minimum: nil,
+            maximum: nil,
+            step: nil,
+            precision: nil,
+            fraction: nil,
+            isReadOnly: true,
+            options: [],
+            defaultValue: .boolean(false)
+        )
+        let content = try ScenePropertyContentParser().parse(property.text)
+
+        XCTAssertEqual(content.blocks, [
+            .image(ScenePropertyImageBlock(
+                url: URL(string: "https://images.example/banner.gif")!,
+                link: URL(string: "https://example.com/creator")!,
+                altText: "Banner",
+                widthFraction: 1
+            )),
+            .text(ScenePropertyTextBlock(
+                runs: [ScenePropertyTextRun(
+                    text: "Hello\nWorld",
+                    style: [],
+                    link: nil
+                )],
+                headingLevel: 4,
+                alignment: .leading
+            )),
+        ])
+    }
+
+    func testDropsActiveMarkupAndDoesNotLoadNonHTTPSImages() throws {
+        let content = try ScenePropertyContentParser().parse(
+            "<script>leak()</script><iframe src='https://tracker.example'></iframe>"
+                + "<b>Safe</b><img src='http://tracker.example/pixel.gif' alt='Blocked image'>"
+        )
+
+        XCTAssertEqual(content.plainText, "SafeBlocked image")
+        XCTAssertFalse(content.blocks.contains { block in
+            if case .image = block { return true }
+            return false
+        })
+    }
+
+    func testRejectsOversizedAndDeeplyNestedMarkup() {
+        let sizeLimitedParser = ScenePropertyContentParser(maximumMarkupBytes: 4)
+        XCTAssertThrowsError(try sizeLimitedParser.parse("12345")) { error in
+            XCTAssertEqual(
+                error as? ScenePropertyContentParsingError,
+                .markupTooLarge(maximumBytes: 4)
+            )
+        }
+
+        let depthLimitedParser = ScenePropertyContentParser(maximumNestingDepth: 2)
+        XCTAssertThrowsError(
+            try depthLimitedParser.parse("<div><div><div>Text</div></div></div>")
+        ) { error in
+            XCTAssertEqual(
+                error as? ScenePropertyContentParsingError,
+                .nestingTooDeep(maximumDepth: 2)
+            )
+        }
+    }
+}
+
+final class RemoteImagePolicyTests: XCTestCase {
+    func testRejectsNonHTTPSURLs() {
+        let policy = RemoteImagePolicy.default
+
+        XCTAssertThrowsError(try policy.validate(
+            url: URL(string: "http://tracker.example/image.png")!
+        )) { error in
+            XCTAssertEqual(error as? RemoteImageLoadingError, .insecureURL)
+        }
+    }
+
+    func testRejectsLocalAndPrivateNetworkURLs() {
+        let policy = RemoteImagePolicy.default
+        let blockedURLs = [
+            "https://localhost/image.png",
+            "https://preview.local/image.png",
+            "https://127.0.0.1/image.png",
+            "https://10.0.0.1/image.png",
+            "https://192.168.1.1/image.png",
+            "https://[::1]/image.png",
+            "https://[fd00::1]/image.png",
+        ]
+
+        for source in blockedURLs {
+            XCTAssertThrowsError(try policy.validate(url: XCTUnwrap(URL(string: source)))) {
+                error in
+                XCTAssertEqual(error as? RemoteImageLoadingError, .unsafeHost)
+            }
+        }
+        XCTAssertNoThrow(try policy.validate(
+            url: XCTUnwrap(URL(string: "https://images.example/image.gif"))
+        ))
+    }
+
+    func testRejectsNonRasterImageFormats() throws {
+        XCTAssertThrowsError(try RemoteImagePolicy.default.decode(pdfData())) { error in
+            XCTAssertEqual(
+                error as? RemoteImageLoadingError,
+                .unsupportedImageFormat("com.adobe.pdf")
+            )
+        }
+    }
+
+    func testRejectsImagesBeyondPixelLimits() throws {
+        let policy = RemoteImagePolicy(
+            maximumDownloadBytes: 1_000_000,
+            maximumDimension: 10,
+            maximumPixels: 100,
+            maximumFrames: 10,
+            maximumTotalPixels: 1_000
+        )
+
+        XCTAssertThrowsError(try policy.decode(
+            pngData(width: 20, height: 10, color: .red)
+        )) { error in
+            XCTAssertEqual(
+                error as? RemoteImageLoadingError,
+                .imageTooLarge(maximumDimension: 10, maximumPixels: 100)
+            )
+        }
+    }
+
+    func testCacheCostUsesDecodedPixelsInsteadOfCompressedBytes() throws {
+        let decoded = try RemoteImagePolicy.default.decode(
+            pngData(width: 20, height: 10, color: .red)
+        )
+
+        XCTAssertEqual(decoded.cacheCost, 20 * 10 * 4)
+    }
+
+    @MainActor
+    func testLoaderRejectsInsecureURLBeforeCallingNetworkClient() async {
+        let dataLoader = StubRemoteImageDataLoader(responses: [])
+        let loader = RemoteImageLoader(
+            dataLoader: dataLoader,
+            cache: RemoteImageCache(countLimit: 1)
+        )
+
+        await loader.load(url: URL(string: "http://tracker.example/image.png")!)
+
+        XCTAssertEqual(loader.errorMessage, RemoteImageLoadingError.insecureURL.localizedDescription)
+        let requestCount = await dataLoader.requestCount
+        XCTAssertEqual(requestCount, 0)
+    }
+}
+
 @MainActor
 final class GifImageLayoutTests: XCTestCase {
     func testResizableImageUsesTheSwiftUIAspectRatioConstraint() throws {
@@ -157,12 +328,12 @@ final class WorkshopPreviewImageLoaderTests: XCTestCase {
     private let url = URL(string: "https://example.com/preview")!
 
     func testLoadsAndDecodesPreviewImage() async throws {
-        let dataLoader = StubWorkshopPreviewDataLoader(responses: [
+        let dataLoader = StubRemoteImageDataLoader(responses: [
             .success(try pngData(width: 20, height: 10, color: .red)),
         ])
-        let loader = WorkshopPreviewImageLoader(
+        let loader = RemoteImageLoader(
             dataLoader: dataLoader,
-            cache: WorkshopPreviewImageCache(countLimit: 10)
+            cache: RemoteImageCache(countLimit: 10)
         )
 
         await loader.load(url: url)
@@ -174,13 +345,13 @@ final class WorkshopPreviewImageLoaderTests: XCTestCase {
     }
 
     func testFailureIsVisibleAndRetryLoadsFreshData() async throws {
-        let dataLoader = StubWorkshopPreviewDataLoader(responses: [
+        let dataLoader = StubRemoteImageDataLoader(responses: [
             .failure(.unavailable),
             .success(try pngData(width: 20, height: 10, color: .blue)),
         ])
-        let loader = WorkshopPreviewImageLoader(
+        let loader = RemoteImageLoader(
             dataLoader: dataLoader,
-            cache: WorkshopPreviewImageCache(countLimit: 10)
+            cache: RemoteImageCache(countLimit: 10)
         )
 
         await loader.load(url: url)
@@ -195,12 +366,12 @@ final class WorkshopPreviewImageLoaderTests: XCTestCase {
     }
 
     func testDecodedImagesAreSharedThroughTheCache() async throws {
-        let dataLoader = StubWorkshopPreviewDataLoader(responses: [
+        let dataLoader = StubRemoteImageDataLoader(responses: [
             .success(try pngData(width: 20, height: 10, color: .green)),
         ])
-        let cache = WorkshopPreviewImageCache(countLimit: 10)
-        let firstLoader = WorkshopPreviewImageLoader(dataLoader: dataLoader, cache: cache)
-        let secondLoader = WorkshopPreviewImageLoader(dataLoader: dataLoader, cache: cache)
+        let cache = RemoteImageCache(countLimit: 10)
+        let firstLoader = RemoteImageLoader(dataLoader: dataLoader, cache: cache)
+        let secondLoader = RemoteImageLoader(dataLoader: dataLoader, cache: cache)
 
         await firstLoader.load(url: url)
         await secondLoader.load(url: url)
@@ -212,12 +383,12 @@ final class WorkshopPreviewImageLoaderTests: XCTestCase {
     }
 
     func testAnimatedGIFKeepsAllFramesAndUsesAnAnimatingImageView() async throws {
-        let dataLoader = StubWorkshopPreviewDataLoader(responses: [
+        let dataLoader = StubRemoteImageDataLoader(responses: [
             .success(try animatedGIFData()),
         ])
-        let loader = WorkshopPreviewImageLoader(
+        let loader = RemoteImageLoader(
             dataLoader: dataLoader,
-            cache: WorkshopPreviewImageCache(countLimit: 10)
+            cache: RemoteImageCache(countLimit: 10)
         )
 
         await loader.load(url: url)
@@ -385,7 +556,7 @@ private enum PreviewStubError: LocalizedError {
     }
 }
 
-private actor StubWorkshopPreviewDataLoader: WorkshopPreviewDataLoading {
+private actor StubRemoteImageDataLoader: RemoteImageDataLoading {
     enum Response {
         case success(Data)
         case failure(PreviewStubError)
@@ -414,6 +585,23 @@ private actor StubWorkshopPreviewDataLoader: WorkshopPreviewDataLoading {
 private func pngData(width: Int, height: Int, color: NSColor) throws -> Data {
     let representation = try bitmapRepresentation(width: width, height: height, color: color)
     return try XCTUnwrap(representation.representation(using: .png, properties: [:]))
+}
+
+private func pdfData() throws -> Data {
+    let output = NSMutableData()
+    let consumer = try XCTUnwrap(CGDataConsumer(data: output))
+    var mediaBox = CGRect(x: 0, y: 0, width: 10, height: 10)
+    let context = try XCTUnwrap(CGContext(
+        consumer: consumer,
+        mediaBox: &mediaBox,
+        nil
+    ))
+    context.beginPDFPage(nil)
+    context.setFillColor(NSColor.red.cgColor)
+    context.fill(mediaBox)
+    context.endPDFPage()
+    context.closePDF()
+    return output as Data
 }
 
 private func animatedGIFData() throws -> Data {

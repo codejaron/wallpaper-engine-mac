@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F90000000000000000000001 /* ScenePropertyContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000000000000000000002 /* ScenePropertyContent.swift */; };
+		F90000000000000000000003 /* RemoteImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000000000000000000004 /* RemoteImage.swift */; };
+		F90000000000000000000005 /* SwiftSoup-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = F90000000000000000000006 /* SwiftSoup-LICENSE.txt */; };
+		F90000000000000000000007 /* SwiftSoup in Frameworks */ = {isa = PBXBuildFile; productRef = F90000000000000000000009 /* SwiftSoup */; };
 		5EC47E912A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EC47E902A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift */; };
 		FA1000000000000000000001 /* SteamCmdServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000002 /* SteamCmdServiceTests.swift */; };
 		F70000000000000000000001 /* PlaybackPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000000000000000000002 /* PlaybackPolicyTests.swift */; };
@@ -92,6 +96,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		F90000000000000000000002 /* ScenePropertyContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScenePropertyContent.swift; sourceTree = "<group>"; };
+		F90000000000000000000004 /* RemoteImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteImage.swift; sourceTree = "<group>"; };
+		F90000000000000000000006 /* SwiftSoup-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "SwiftSoup-LICENSE.txt"; sourceTree = "<group>"; };
 		5E0700E52A859FAD00ADFE2E /* WallpaperNotFound.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = WallpaperNotFound.mp4; sourceTree = "<group>"; };
 		5E1670732A88EBEF00D1B199 /* change-signing-certificate.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "change-signing-certificate.png"; sourceTree = "<group>"; };
 		5E1670742A88ED8400D1B199 /* import-menu.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "import-menu.png"; sourceTree = "<group>"; };
@@ -189,6 +196,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F90000000000000000000007 /* SwiftSoup in Frameworks */,
 				D30000000000000000000001 /* SceneAudio in Frameworks */,
 				D10000000000000000000001 /* SceneRuntimeBridge in Frameworks */,
 			);
@@ -216,6 +224,7 @@
 				5EDF1E152A93B4B6006617EA /* WallpaperDiscover.swift */,
 				5E66A0E72A8BA95600EE79D6 /* WallpaperPreview.swift */,
 				D20000000000000000000003 /* ScenePropertyControls.swift */,
+				F90000000000000000000002 /* ScenePropertyContent.swift */,
 				5E66A0DC2A8ADF7C00EE79D6 /* ExplorerTopBar.swift */,
 				5EB4DB872A980532000A1FEA /* ExplorerItem.swift */,
 				5E66A0E02A8BA18D00EE79D6 /* GifImage.swift */,
@@ -309,6 +318,7 @@
 		5E98F6CC2A826ED500C12E34 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				F90000000000000000000006 /* SwiftSoup-LICENSE.txt */,
 				5E7A89BF2AAB9D4E00192EB0 /* maxwell-cat.gif */,
 				5E0700E52A859FAD00ADFE2E /* WallpaperNotFound.mp4 */,
 				5EC47E7D2A2DB2E700120CCC /* Assets.xcassets */,
@@ -396,6 +406,7 @@
 		5EDF1E122A93B026006617EA /* GlobalComponents */ = {
 			isa = PBXGroup;
 			children = (
+				F90000000000000000000004 /* RemoteImage.swift */,
 				5EDF1E132A93B06B006617EA /* WorkingInProgress.swift */,
 			);
 			path = GlobalComponents;
@@ -439,6 +450,7 @@
 			);
 			name = "Open Wallpaper Engine";
 			packageProductDependencies = (
+				F90000000000000000000009 /* SwiftSoup */,
 				D30000000000000000000002 /* SceneAudio */,
 				D10000000000000000000003 /* SceneRuntimeBridge */,
 			);
@@ -494,6 +506,7 @@
 			);
 			mainGroup = 5EC47E6D2A2DB2E600120CCC;
 			packageReferences = (
+				F90000000000000000000008 /* XCRemoteSwiftPackageReference "SwiftSoup" */,
 				D10000000000000000000002 /* XCLocalSwiftPackageReference "SceneRuntime" */,
 			);
 			productRefGroup = 5EC47E772A2DB2E600120CCC /* Products */;
@@ -518,6 +531,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F90000000000000000000005 /* SwiftSoup-LICENSE.txt in Resources */,
 				D1000000000000000000000B /* LICENSE in Resources */,
 				D10000000000000000000007 /* SceneRuntime NOTICE in Resources */,
 				D10000000000000000000008 /* LZ4.txt in Resources */,
@@ -551,6 +565,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F90000000000000000000003 /* RemoteImage.swift in Sources */,
+				F90000000000000000000001 /* ScenePropertyContent.swift in Sources */,
 				5E8C82032A9E15D0009E291B /* ExplorerItemMenu.swift in Sources */,
 				5E66A0EA2A8BAA5400EE79D6 /* ExplorerGlobalMenu.swift in Sources */,
 				5E51A43C2AA33F5500E46E99 /* GlobalSettingsService.swift in Sources */,
@@ -896,7 +912,23 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		F90000000000000000000008 /* XCRemoteSwiftPackageReference "SwiftSoup" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/scinfu/SwiftSoup.git";
+			requirement = {
+				kind = exactVersion;
+				version = 2.9.6;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
+		F90000000000000000000009 /* SwiftSoup */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F90000000000000000000008 /* XCRemoteSwiftPackageReference "SwiftSoup" */;
+			productName = SwiftSoup;
+		};
 		D10000000000000000000003 /* SceneRuntimeBridge */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = D10000000000000000000002 /* XCLocalSwiftPackageReference "SceneRuntime" */;

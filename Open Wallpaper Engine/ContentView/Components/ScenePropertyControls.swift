@@ -16,7 +16,7 @@ struct ScenePropertyControls: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        LazyVStack(alignment: .leading, spacing: 12) {
             if let inputError {
                 Label(inputError, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
@@ -74,23 +74,20 @@ struct ScenePropertyControls: View {
         switch property.kind {
         case .group:
             VStack(alignment: .leading, spacing: 4) {
-                Text(property.text).font(.headline)
+                ScenePropertyContentView(property.text)
+                    .font(.headline)
                 Divider()
             }
         case .text:
-            HStack(alignment: .top) {
-                Text(property.text)
-                Spacer()
-                Text(stringValue(for: property) ?? "Missing runtime text value")
-                    .foregroundStyle(stringValue(for: property) == nil ? .red : .secondary)
-                    .multilineTextAlignment(.trailing)
-            }
+            ScenePropertyContentView(property.text)
         case .boolean:
             if let value = booleanValue(for: property) {
-                Toggle(property.text, isOn: Binding(
+                Toggle(isOn: Binding(
                     get: { booleanValue(for: property) ?? value },
                     set: { set(.boolean($0), for: property) }
-                ))
+                )) {
+                    ScenePropertyContentView(property.text, fillsWidth: false)
+                }
                 .disabled(property.isReadOnly)
             } else {
                 invalidValue(property)
@@ -102,17 +99,19 @@ struct ScenePropertyControls: View {
                !property.options.isEmpty,
                property.options.contains(where: { $0.value == value }) {
                 HStack {
-                    Text(property.text)
+                    ScenePropertyContentView(property.text, fillsWidth: false)
                     Spacer()
-                    Picker(property.text, selection: Binding(
+                    Picker("", selection: Binding(
                         get: { stringValue(for: property) ?? value },
                         set: { set(.string($0), for: property) }
                     )) {
                         ForEach(property.options) { option in
-                            Text(option.label).tag(option.value)
+                            Text(ScenePropertyContentResolver.plainText(option.label))
+                                .tag(option.value)
                         }
                     }
                     .labelsHidden()
+                    .accessibilityLabel(ScenePropertyContentResolver.plainText(property.text))
                     .frame(maxWidth: 150)
                     .disabled(property.isReadOnly)
                 }
@@ -123,17 +122,21 @@ struct ScenePropertyControls: View {
             colorPicker(property)
         case .textInput:
             if let value = stringValue(for: property) {
-                TextField(property.text, text: Binding(
-                    get: { stringValue(for: property) ?? value },
-                    set: { set(.string($0), for: property) }
-                ))
-                .disabled(property.isReadOnly)
+                VStack(alignment: .leading, spacing: 4) {
+                    ScenePropertyContentView(property.text)
+                    TextField("", text: Binding(
+                        get: { stringValue(for: property) ?? value },
+                        set: { set(.string($0), for: property) }
+                    ))
+                    .accessibilityLabel(ScenePropertyContentResolver.plainText(property.text))
+                    .disabled(property.isReadOnly)
+                }
             } else {
                 invalidValue(property)
             }
         case .sceneTexture, .file, .directory, .userShortcut:
             VStack(alignment: .leading, spacing: 2) {
-                Text(property.text)
+                ScenePropertyContentView(property.text)
                 Text("This Scene property type is visible but is not safely editable yet.")
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -152,7 +155,7 @@ struct ScenePropertyControls: View {
            property.step.map({ $0.isFinite && $0 > 0 }) ?? true {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text(property.text)
+                    ScenePropertyContentView(property.text, fillsWidth: false)
                     Spacer()
                     Text(formatted(value, precision: property.precision))
                         .monospacedDigit()
@@ -166,7 +169,7 @@ struct ScenePropertyControls: View {
                         case .number:
                             set(.number(newValue), for: property)
                         default:
-                            inputError = "\(property.text) no longer has a numeric runtime value."
+                            inputError = "Scene property '\(property.key)' no longer has a numeric runtime value."
                         }
                     }
                 )
@@ -191,7 +194,7 @@ struct ScenePropertyControls: View {
     private func colorPicker(_ property: ScenePropertyDefinition) -> some View {
         if let string = stringValue(for: property),
            let color = SceneRuntimeColor(string: string) {
-            ColorPicker(property.text, selection: Binding(
+            ColorPicker(selection: Binding(
                 get: {
                     guard let current = stringValue(for: property),
                           let parsed = SceneRuntimeColor(string: current) else {
@@ -211,7 +214,10 @@ struct ScenePropertyControls: View {
                     let encoded = converted.encoded
                     set(.string(encoded), for: property)
                 }
-            ), supportsOpacity: color.componentCount == 4)
+            ), supportsOpacity: color.componentCount == 4) {
+                ScenePropertyContentView(property.text, fillsWidth: false)
+            }
+            .accessibilityLabel(ScenePropertyContentResolver.plainText(property.text))
             .disabled(property.isReadOnly)
         } else {
             invalidValue(property)
@@ -255,10 +261,14 @@ struct ScenePropertyControls: View {
     }
 
     private func invalidValue(_ property: ScenePropertyDefinition) -> some View {
-        Label(
-            "\(property.text): invalid or missing runtime value",
-            systemImage: "exclamationmark.triangle.fill"
-        )
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+            VStack(alignment: .leading, spacing: 2) {
+                ScenePropertyContentView(property.text)
+                Text("Invalid or missing runtime value")
+                    .font(.caption)
+            }
+        }
         .foregroundStyle(.red)
         .fixedSize(horizontal: false, vertical: true)
     }

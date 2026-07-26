@@ -406,156 +406,17 @@ private struct WorkshopResults: View {
 
 // MARK: - Workshop Item Card
 
-protocol WorkshopPreviewDataLoading {
-    func data(from url: URL) async throws -> Data
-}
-
-struct URLSessionWorkshopPreviewDataLoader: WorkshopPreviewDataLoading {
-    func data(from url: URL) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(from: url)
-
-        guard let response = response as? HTTPURLResponse else {
-            throw WorkshopPreviewLoadingError.invalidResponse
-        }
-        guard (200..<300).contains(response.statusCode) else {
-            throw WorkshopPreviewLoadingError.httpStatus(response.statusCode)
-        }
-        guard !data.isEmpty else {
-            throw WorkshopPreviewLoadingError.emptyData
-        }
-        return data
-    }
-}
-
-enum WorkshopPreviewLoadingError: LocalizedError {
-    case missingURL
-    case invalidResponse
-    case httpStatus(Int)
-    case emptyData
-    case invalidImageData
-
-    var errorDescription: String? {
-        switch self {
-        case .missingURL:
-            return "This item does not provide a preview URL."
-        case .invalidResponse:
-            return "The preview server returned an invalid response."
-        case .httpStatus(let statusCode):
-            return "The preview server returned HTTP \(statusCode)."
-        case .emptyData:
-            return "The preview response was empty."
-        case .invalidImageData:
-            return "The preview data is not a supported image."
-        }
-    }
-}
-
-final class WorkshopPreviewImageCache {
-    static let shared = WorkshopPreviewImageCache()
-
-    private let images = NSCache<NSURL, NSImage>()
-
-    init(countLimit: Int = 200) {
-        images.countLimit = countLimit
-    }
-
-    func image(for url: URL) -> NSImage? {
-        images.object(forKey: url as NSURL)
-    }
-
-    func insert(_ image: NSImage, for url: URL) {
-        images.setObject(image, forKey: url as NSURL)
-    }
-
-    func removeImage(for url: URL) {
-        images.removeObject(forKey: url as NSURL)
-    }
-}
-
-@MainActor
-final class WorkshopPreviewImageLoader: ObservableObject {
-    enum State {
-        case idle
-        case loading
-        case loaded(NSImage)
-        case failed(String)
-    }
-
-    @Published private(set) var state: State = .idle
-
-    private let dataLoader: WorkshopPreviewDataLoading
-    private let cache: WorkshopPreviewImageCache
-    private var currentURL: URL?
-
-    init(
-        dataLoader: WorkshopPreviewDataLoading = URLSessionWorkshopPreviewDataLoader(),
-        cache: WorkshopPreviewImageCache = .shared
-    ) {
-        self.dataLoader = dataLoader
-        self.cache = cache
-    }
-
-    var image: NSImage? {
-        guard case .loaded(let image) = state else { return nil }
-        return image
-    }
-
-    var errorMessage: String? {
-        guard case .failed(let message) = state else { return nil }
-        return message
-    }
-
-    func load(url: URL?, ignoringCache: Bool = false) async {
-        currentURL = url
-
-        guard let url else {
-            state = .failed(WorkshopPreviewLoadingError.missingURL.localizedDescription)
-            return
-        }
-
-        if ignoringCache {
-            cache.removeImage(for: url)
-        } else if let cachedImage = cache.image(for: url) {
-            state = .loaded(cachedImage)
-            return
-        }
-
-        state = .loading
-
-        do {
-            let data = try await dataLoader.data(from: url)
-            try Task.checkCancellation()
-            guard currentURL == url else { return }
-            guard let image = NSImage(data: data), image.isValid else {
-                throw WorkshopPreviewLoadingError.invalidImageData
-            }
-
-            cache.insert(image, for: url)
-            state = .loaded(image)
-        } catch is CancellationError {
-            return
-        } catch {
-            guard currentURL == url else { return }
-            state = .failed(error.localizedDescription)
-        }
-    }
-
-    func retry() async {
-        await load(url: currentURL, ignoringCache: true)
-    }
-}
-
 struct WorkshopItemPreview: View {
     let url: URL?
-    @StateObject private var imageLoader: WorkshopPreviewImageLoader
+    @StateObject private var imageLoader: RemoteImageLoader
 
     init(
         url: URL?,
-        dataLoader: WorkshopPreviewDataLoading = URLSessionWorkshopPreviewDataLoader(),
-        cache: WorkshopPreviewImageCache = .shared
+        dataLoader: any RemoteImageDataLoading = RestrictedRemoteImageDataLoader.shared,
+        cache: RemoteImageCache = .shared
     ) {
         self.url = url
-        _imageLoader = StateObject(wrappedValue: WorkshopPreviewImageLoader(
+        _imageLoader = StateObject(wrappedValue: RemoteImageLoader(
             dataLoader: dataLoader,
             cache: cache
         ))

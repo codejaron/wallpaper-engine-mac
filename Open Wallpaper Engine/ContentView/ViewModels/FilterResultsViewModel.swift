@@ -16,12 +16,12 @@ protocol FilterResultsModel: OptionSet where Element == Self, RawValue == Int {
 struct FRShowOnly: OptionSet {
     let rawValue: Int
     
-    static let allOptions = [
+    static let allOptions: [(title: String, systemImage: String?)] = [
         ("Approved", "trophy.fill"),
         ("My Favourites", "heart.fill"),
         ("Mobile Compatible", "iphone.gen3"),
-        ("Audio Responsive", ""),
-        ("Customizable", "")
+        ("Audio Responsive", nil),
+        ("Customizable", nil)
     ]
     
     static let approved             = FRShowOnly(rawValue: 1 << 0)

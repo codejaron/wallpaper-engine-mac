@@ -5,9 +5,13 @@
 #include <glslang/Public/ShaderLang.h>
 #include <spirv_glsl.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <limits>
+#include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -16,6 +20,8 @@ namespace we::scene {
 namespace {
 
 constexpr std::size_t maximumShaderSourceBytes = 16 * 1024 * 1024;
+constexpr EShMessages wallpaperEngineShaderMessages =
+    static_cast<EShMessages>(EShMsgDefault | EShMsgHlslCompatibleGlsl);
 
 const TBuiltInResource builtInResources = {
     .maxLights = 32,
@@ -239,6 +245,472 @@ std::string programLog(glslang::TProgram& program) {
     return result.empty() ? "glslang returned no diagnostic" : result;
 }
 
+std::string activeShaderSource(
+    std::string_view source,
+    std::string_view sourceName,
+    EShLanguage stage,
+    ShaderCompilePhase phase
+) {
+    glslang::TShader shader(stage);
+    ShaderSourceBinding binding(source, sourceName);
+    configureShader(shader, stage, binding);
+    glslang::TShader::ForbidIncluder includer;
+    std::string result;
+    if (!shader.preprocess(
+            &builtInResources,
+            100,
+            ENoProfile,
+            false,
+            false,
+            wallpaperEngineShaderMessages,
+            &result,
+            includer)) {
+        throw ShaderCompileError(
+            phase,
+            std::string(sourceName) + " shader preprocessing failed: " +
+                shaderLog(shader)
+        );
+    }
+    if (result.empty()) {
+        throw ShaderCompileError(
+            phase,
+            std::string(sourceName) + " shader preprocessing produced empty source"
+        );
+    }
+    return result;
+}
+
+struct ShaderToken final {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    bool identifier = false;
+};
+
+std::vector<ShaderToken> shaderTokens(std::string_view source) {
+    std::vector<ShaderToken> result;
+    for (std::size_t index = 0; index < source.size();) {
+        const unsigned char current =
+            static_cast<unsigned char>(source[index]);
+        if (std::isspace(current) != 0) {
+            ++index;
+            continue;
+        }
+        if (source[index] == '/' && index + 1 < source.size()) {
+            if (source[index + 1] == '/') {
+                index += 2;
+                while (index < source.size() && source[index] != '\n') {
+                    ++index;
+                }
+                continue;
+            }
+            if (source[index + 1] == '*') {
+                index += 2;
+                while (index + 1 < source.size() &&
+                       !(source[index] == '*' && source[index + 1] == '/')) {
+                    ++index;
+                }
+                if (index + 1 >= source.size()) {
+                    throw ShaderCompileError(
+                        ShaderCompilePhase::input,
+                        "Unterminated block comment in active shader source"
+                    );
+                }
+                index += 2;
+                continue;
+            }
+        }
+        if (source[index] == '"' || source[index] == '\'') {
+            const char quote = source[index++];
+            while (index < source.size()) {
+                if (source[index] == '\\' && index + 1 < source.size()) {
+                    index += 2;
+                    continue;
+                }
+                if (source[index++] == quote) break;
+            }
+            continue;
+        }
+        const bool identifier = std::isalpha(current) != 0 ||
+            source[index] == '_';
+        if (identifier) {
+            const std::size_t begin = index++;
+            while (index < source.size()) {
+                const unsigned char value =
+                    static_cast<unsigned char>(source[index]);
+                if (std::isalnum(value) == 0 && source[index] != '_') break;
+                ++index;
+            }
+            result.push_back({begin, index, true});
+            continue;
+        }
+        const std::size_t begin = index++;
+        if (index < source.size()) {
+            const std::string_view pair = source.substr(begin, 2);
+            if (pair == "==" || pair == "!=" || pair == "<=" ||
+                pair == ">=" || pair == "+=" || pair == "-=" ||
+                pair == "*=" || pair == "/=" || pair == "&&" ||
+                pair == "||" || pair == "++" || pair == "--" ||
+                pair == "<<" || pair == ">>") {
+                ++index;
+            }
+        }
+        result.push_back({begin, index, false});
+    }
+    return result;
+}
+
+bool tokenEquals(
+    std::string_view source,
+    const ShaderToken& token,
+    std::string_view expected
+) {
+    return source.substr(token.begin, token.end - token.begin) == expected;
+}
+
+struct SourceRange final {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+};
+
+std::optional<std::size_t> firstFunctionDefinition(
+    std::string_view source,
+    const std::vector<ShaderToken>& tokens
+) {
+    int braces = 0;
+    std::size_t statementBegin = 0;
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        if (tokenEquals(source, tokens[index], "{")) {
+            if (braces == 0 && index > 0 &&
+                tokenEquals(source, tokens[index - 1], ")")) {
+                return tokens[statementBegin].begin;
+            }
+            ++braces;
+        } else if (tokenEquals(source, tokens[index], "}")) {
+            --braces;
+            if (braces == 0) statementBegin = index + 1;
+        } else if (braces == 0 &&
+                   tokenEquals(source, tokens[index], ";")) {
+            statementBegin = index + 1;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string hoistLateUniformDeclarations(
+    std::string source,
+    std::string_view sourceName,
+    ShaderCompilePhase phase
+) {
+    const std::vector<ShaderToken> tokens = shaderTokens(source);
+    const std::optional<std::size_t> firstFunction =
+        firstFunctionDefinition(source, tokens);
+    if (!firstFunction.has_value()) return source;
+
+    std::vector<SourceRange> lateUniforms;
+    int braces = 0;
+    std::size_t statementBegin = 0;
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        if (tokenEquals(source, tokens[index], "{")) {
+            ++braces;
+            continue;
+        }
+        if (tokenEquals(source, tokens[index], "}")) {
+            --braces;
+            if (braces == 0) statementBegin = index + 1;
+            continue;
+        }
+        if (braces != 0) continue;
+        if (tokenEquals(source, tokens[index], ";")) {
+            statementBegin = index + 1;
+            continue;
+        }
+        if (!tokenEquals(source, tokens[index], "uniform") ||
+            tokens[index].begin < *firstFunction) {
+            continue;
+        }
+
+        std::size_t beginIndex = index;
+        if (statementBegin < index &&
+            tokenEquals(source, tokens[statementBegin], "layout")) {
+            beginIndex = statementBegin;
+        }
+
+        int declarationBraces = 0;
+        int declarationParentheses = 0;
+        int declarationBrackets = 0;
+        std::size_t endIndex = index + 1;
+        for (; endIndex < tokens.size(); ++endIndex) {
+            if (tokenEquals(source, tokens[endIndex], "{")) {
+                ++declarationBraces;
+            } else if (tokenEquals(source, tokens[endIndex], "}")) {
+                --declarationBraces;
+            } else if (tokenEquals(source, tokens[endIndex], "(")) {
+                ++declarationParentheses;
+            } else if (tokenEquals(source, tokens[endIndex], ")")) {
+                --declarationParentheses;
+            } else if (tokenEquals(source, tokens[endIndex], "[")) {
+                ++declarationBrackets;
+            } else if (tokenEquals(source, tokens[endIndex], "]")) {
+                --declarationBrackets;
+            } else if (declarationBraces == 0 &&
+                       declarationParentheses == 0 &&
+                       declarationBrackets == 0 &&
+                       tokenEquals(source, tokens[endIndex], ";")) {
+                break;
+            }
+        }
+        if (endIndex == tokens.size()) {
+            throw ShaderCompileError(
+                phase,
+                std::string(sourceName) +
+                    " shader has a global uniform declaration without a "
+                    "terminating semicolon"
+            );
+        }
+        lateUniforms.push_back({
+            .begin = tokens[beginIndex].begin,
+            .end = tokens[endIndex].end,
+        });
+        index = endIndex;
+        statementBegin = endIndex + 1;
+    }
+    if (lateUniforms.empty()) return source;
+
+    std::string declarations;
+    for (const SourceRange& range : lateUniforms) {
+        declarations.append(source, range.begin, range.end - range.begin);
+        declarations.push_back('\n');
+    }
+    for (auto range = lateUniforms.rbegin(); range != lateUniforms.rend();
+         ++range) {
+        source.replace(range->begin, range->end - range->begin, "\n");
+    }
+    source.insert(*firstFunction, declarations);
+    return source;
+}
+
+struct VaryingDeclaration final {
+    std::string name;
+    int width = 0;
+    std::size_t typeBegin = 0;
+    std::size_t typeEnd = 0;
+};
+
+std::map<std::string, VaryingDeclaration> varyingDeclarations(
+    std::string_view source,
+    const std::vector<ShaderToken>& tokens,
+    std::string_view qualifier,
+    std::string_view sourceName,
+    ShaderCompilePhase phase
+) {
+    std::map<std::string, VaryingDeclaration> result;
+    int braces = 0;
+    int parentheses = 0;
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        if (tokenEquals(source, tokens[index], "{")) {
+            ++braces;
+            continue;
+        }
+        if (tokenEquals(source, tokens[index], "}")) {
+            --braces;
+            continue;
+        }
+        if (tokenEquals(source, tokens[index], "(")) {
+            ++parentheses;
+            continue;
+        }
+        if (tokenEquals(source, tokens[index], ")")) {
+            --parentheses;
+            continue;
+        }
+        if (braces != 0 || parentheses != 0 ||
+            !tokenEquals(source, tokens[index], qualifier)) {
+            continue;
+        }
+        std::size_t typeIndex = index + 1;
+        while (typeIndex < tokens.size() &&
+               (tokenEquals(source, tokens[typeIndex], "lowp") ||
+                tokenEquals(source, tokens[typeIndex], "mediump") ||
+                tokenEquals(source, tokens[typeIndex], "highp"))) {
+            ++typeIndex;
+        }
+        if (typeIndex + 2 >= tokens.size()) continue;
+        const std::string_view type = source.substr(
+            tokens[typeIndex].begin,
+            tokens[typeIndex].end - tokens[typeIndex].begin
+        );
+        const int width = type == "vec2" ? 2 : type == "vec3" ? 3
+            : type == "vec4" ? 4 : 0;
+        if (width == 0 || !tokens[typeIndex + 1].identifier ||
+            !tokenEquals(source, tokens[typeIndex + 2], ";")) {
+            continue;
+        }
+        VaryingDeclaration declaration{
+            .name = std::string(source.substr(
+                tokens[typeIndex + 1].begin,
+                tokens[typeIndex + 1].end - tokens[typeIndex + 1].begin
+            )),
+            .width = width,
+            .typeBegin = tokens[typeIndex].begin,
+            .typeEnd = tokens[typeIndex].end,
+        };
+        const auto [existing, inserted] = result.emplace(
+            declaration.name, declaration
+        );
+        if (!inserted && existing->second.width != width) {
+            throw ShaderCompileError(
+                phase,
+                std::string(sourceName) + " shader declares active varying '" +
+                    declaration.name + "' with multiple vector widths"
+            );
+        }
+    }
+    return result;
+}
+
+struct SourceReplacement final {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    std::string value;
+};
+
+std::string trim(std::string_view value) {
+    std::size_t first = 0;
+    while (first < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[first])) != 0) {
+        ++first;
+    }
+    std::size_t last = value.size();
+    while (last > first &&
+           std::isspace(static_cast<unsigned char>(value[last - 1])) != 0) {
+        --last;
+    }
+    return std::string(value.substr(first, last - first));
+}
+
+std::string expandedVaryingExpression(
+    std::string_view expression,
+    int sourceWidth,
+    int targetWidth
+) {
+    std::string result = "vec" + std::to_string(targetWidth) + "(";
+    result += trim(expression);
+    if (sourceWidth == 2 && targetWidth >= 3) result += ", 0.0";
+    if (targetWidth == 4) result += ", 1.0";
+    result += ")";
+    return result;
+}
+
+std::string applyLinkedVaryingSemantics(
+    std::string vertex,
+    const std::string& fragment,
+    std::string_view vertexName,
+    std::string_view fragmentName
+) {
+    const std::vector<ShaderToken> vertexTokens = shaderTokens(vertex);
+    const std::vector<ShaderToken> fragmentTokens = shaderTokens(fragment);
+    const auto vertexVaryings = varyingDeclarations(
+        vertex,
+        vertexTokens,
+        "out",
+        vertexName,
+        ShaderCompilePhase::vertexParse
+    );
+    const auto fragmentVaryings = varyingDeclarations(
+        fragment,
+        fragmentTokens,
+        "in",
+        fragmentName,
+        ShaderCompilePhase::fragmentParse
+    );
+    std::vector<SourceReplacement> replacements;
+    for (const auto& [name, consumer] : fragmentVaryings) {
+        const auto producer = vertexVaryings.find(name);
+        if (producer == vertexVaryings.end() ||
+            producer->second.width == consumer.width) {
+            continue;
+        }
+        replacements.push_back({
+            .begin = producer->second.typeBegin,
+            .end = producer->second.typeEnd,
+            .value = "vec" + std::to_string(consumer.width),
+        });
+        if (producer->second.width >= consumer.width) continue;
+
+        for (std::size_t index = 0; index + 2 < vertexTokens.size(); ++index) {
+            if (!vertexTokens[index].identifier ||
+                !tokenEquals(vertex, vertexTokens[index], name) ||
+                !tokenEquals(vertex, vertexTokens[index + 1], "=")) {
+                continue;
+            }
+            int parentheses = 0;
+            int brackets = 0;
+            std::size_t endIndex = index + 2;
+            for (; endIndex < vertexTokens.size(); ++endIndex) {
+                if (tokenEquals(vertex, vertexTokens[endIndex], "(")) {
+                    ++parentheses;
+                } else if (tokenEquals(vertex, vertexTokens[endIndex], ")")) {
+                    --parentheses;
+                } else if (tokenEquals(vertex, vertexTokens[endIndex], "[")) {
+                    ++brackets;
+                } else if (tokenEquals(vertex, vertexTokens[endIndex], "]")) {
+                    --brackets;
+                } else if (parentheses == 0 && brackets == 0 &&
+                           tokenEquals(vertex, vertexTokens[endIndex], ";")) {
+                    break;
+                }
+            }
+            if (endIndex == vertexTokens.size()) {
+                throw ShaderCompileError(
+                    ShaderCompilePhase::vertexParse,
+                    std::string(vertexName) +
+                        " shader assignment to linked varying '" + name +
+                        "' has no terminating semicolon"
+                );
+            }
+            replacements.push_back({
+                .begin = vertexTokens[index + 2].begin,
+                .end = vertexTokens[endIndex].begin,
+                .value = expandedVaryingExpression(
+                    std::string_view(vertex).substr(
+                        vertexTokens[index + 2].begin,
+                        vertexTokens[endIndex].begin -
+                            vertexTokens[index + 2].begin
+                    ),
+                    producer->second.width,
+                    consumer.width
+                ),
+            });
+            index = endIndex;
+        }
+    }
+    std::sort(
+        replacements.begin(), replacements.end(),
+        [](const SourceReplacement& lhs, const SourceReplacement& rhs) {
+            return lhs.begin > rhs.begin;
+        }
+    );
+    std::size_t previousBegin = vertex.size();
+    for (const SourceReplacement& replacement : replacements) {
+        if (replacement.end > previousBegin ||
+            replacement.begin > replacement.end ||
+            replacement.end > vertex.size()) {
+            throw ShaderCompileError(
+                ShaderCompilePhase::vertexParse,
+                std::string(vertexName) +
+                    " shader linked varying semantic rewrites overlap"
+            );
+        }
+        vertex.replace(
+            replacement.begin,
+            replacement.end - replacement.begin,
+            replacement.value
+        );
+        previousBegin = replacement.begin;
+    }
+    return vertex;
+}
+
 std::string crossCompile(
     const glslang::TIntermediate& intermediate,
     std::string_view stageName
@@ -304,10 +776,39 @@ TranslatedShaderPair ShaderCompiler::translate(
     validateSource(fragmentSource, fragmentName);
     ensureGlslangInitialized();
 
+    std::string activeVertex = activeShaderSource(
+        vertexSource,
+        vertexName,
+        EShLangVertex,
+        ShaderCompilePhase::vertexParse
+    );
+    std::string activeFragment = activeShaderSource(
+        fragmentSource,
+        fragmentName,
+        EShLangFragment,
+        ShaderCompilePhase::fragmentParse
+    );
+    activeVertex = hoistLateUniformDeclarations(
+        std::move(activeVertex),
+        vertexName,
+        ShaderCompilePhase::vertexParse
+    );
+    activeFragment = hoistLateUniformDeclarations(
+        std::move(activeFragment),
+        fragmentName,
+        ShaderCompilePhase::fragmentParse
+    );
+    activeVertex = applyLinkedVaryingSemantics(
+        std::move(activeVertex),
+        activeFragment,
+        vertexName,
+        fragmentName
+    );
+
     glslang::TShader vertexShader(EShLangVertex);
     glslang::TShader fragmentShader(EShLangFragment);
-    ShaderSourceBinding vertexBinding(vertexSource, vertexName);
-    ShaderSourceBinding fragmentBinding(fragmentSource, fragmentName);
+    ShaderSourceBinding vertexBinding(activeVertex, vertexName);
+    ShaderSourceBinding fragmentBinding(activeFragment, fragmentName);
     configureShader(
         vertexShader,
         EShLangVertex,
@@ -319,14 +820,22 @@ TranslatedShaderPair ShaderCompiler::translate(
         fragmentBinding
     );
 
-    if (!vertexShader.parse(&builtInResources, 100, false, EShMsgDefault)) {
+    if (!vertexShader.parse(
+            &builtInResources,
+            100,
+            false,
+            wallpaperEngineShaderMessages)) {
         throw ShaderCompileError(
             ShaderCompilePhase::vertexParse,
             std::string(vertexName) + " shader parsing failed: " +
                 shaderLog(vertexShader)
         );
     }
-    if (!fragmentShader.parse(&builtInResources, 100, false, EShMsgDefault)) {
+    if (!fragmentShader.parse(
+            &builtInResources,
+            100,
+            false,
+            wallpaperEngineShaderMessages)) {
         throw ShaderCompileError(
             ShaderCompilePhase::fragmentParse,
             std::string(fragmentName) + " shader parsing failed: " +
@@ -337,7 +846,7 @@ TranslatedShaderPair ShaderCompiler::translate(
     glslang::TProgram program;
     program.addShader(&vertexShader);
     program.addShader(&fragmentShader);
-    if (!program.link(EShMsgDefault)) {
+    if (!program.link(wallpaperEngineShaderMessages)) {
         throw ShaderCompileError(
             ShaderCompilePhase::link,
             "shader program linking failed: " + programLog(program)

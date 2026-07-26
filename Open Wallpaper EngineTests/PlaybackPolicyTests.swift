@@ -5,6 +5,94 @@ import XCTest
 @testable import Open_Wallpaper_Engine
 
 final class PlaybackPolicyTests: XCTestCase {
+    @MainActor
+    func testSceneMediaProviderAdvancesOnlyTheChangedEventRevision() throws {
+        let provider = SceneMediaSnapshotProvider()
+        let content: (
+            Double, SceneMediaPlaybackState, SceneMediaThumbnailRGBA8?
+        ) -> SceneMediaContent = { position, playback, thumbnail in
+            SceneMediaContent(
+                playbackState: playback,
+                title: "Track",
+                artist: "Artist",
+                contentType: "music",
+                albumTitle: "Album",
+                subTitle: "",
+                albumArtist: "Artist",
+                genres: "",
+                position: position,
+                duration: 120,
+                thumbnail: thumbnail,
+                primaryColor: .black,
+                secondaryColor: .black,
+                tertiaryColor: .black,
+                textColor: .black,
+                highContrastColor: .black
+            )
+        }
+
+        try provider.publish(content(1, .playing, nil))
+        let initialSnapshot = provider.snapshot
+        guard case .available(let initial, _) = provider.snapshot else {
+            return XCTFail("Expected an available media snapshot")
+        }
+        XCTAssertEqual(
+            initial,
+            SceneMediaRevisions(
+                status: 1,
+                metadata: 1,
+                playback: 1,
+                timeline: 1,
+                thumbnail: 1
+            )
+        )
+
+        try provider.publish(content(2, .playing, nil))
+        let timelineSnapshot = provider.snapshot
+        guard case .available(let timelineOnly, _) = provider.snapshot else {
+            return XCTFail("Expected an available media snapshot")
+        }
+        XCTAssertEqual(timelineOnly.status, initial.status)
+        XCTAssertEqual(timelineOnly.metadata, initial.metadata)
+        XCTAssertEqual(timelineOnly.playback, initial.playback)
+        XCTAssertEqual(timelineOnly.timeline, initial.timeline + 1)
+        XCTAssertEqual(timelineOnly.thumbnail, initial.thumbnail)
+        XCTAssertFalse(
+            timelineSnapshot.hasThumbnailUpdate(since: initialSnapshot)
+        )
+
+        let cover = SceneMediaThumbnailRGBA8(
+            width: 1,
+            height: 1,
+            bytesPerRow: 4,
+            pixels: Data([0, 255, 0, 255])
+        )
+        try provider.publish(content(2, .playing, cover))
+        let thumbnailSnapshot = provider.snapshot
+        guard case .available(let thumbnailOnly, _) = provider.snapshot else {
+            return XCTFail("Expected an available media snapshot")
+        }
+        XCTAssertEqual(thumbnailOnly.timeline, timelineOnly.timeline)
+        XCTAssertEqual(thumbnailOnly.thumbnail, timelineOnly.thumbnail + 1)
+        XCTAssertTrue(
+            thumbnailSnapshot.hasThumbnailUpdate(since: timelineSnapshot)
+        )
+
+        try provider.markUnavailable()
+        guard case .unavailable(let unavailable) = provider.snapshot else {
+            return XCTFail("Expected an unavailable media snapshot")
+        }
+        XCTAssertEqual(unavailable.status, thumbnailOnly.status + 1)
+        XCTAssertEqual(unavailable.metadata, thumbnailOnly.metadata)
+        XCTAssertEqual(unavailable.playback, thumbnailOnly.playback)
+        XCTAssertEqual(unavailable.timeline, thumbnailOnly.timeline)
+        XCTAssertEqual(unavailable.thumbnail, thumbnailOnly.thumbnail)
+        XCTAssertFalse(
+            provider.snapshot.hasThumbnailUpdate(since: thumbnailSnapshot),
+            "Losing media availability must not clear an unchanged cover"
+        )
+    }
+
     func testOnlyStopUnloadsTheWallpaperRuntime() {
         XCTAssertTrue(GSPlayback.keepRunning.keepsRuntimeLoaded)
         XCTAssertTrue(GSPlayback.mute.keepsRuntimeLoaded)

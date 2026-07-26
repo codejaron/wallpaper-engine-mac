@@ -74,8 +74,11 @@ struct ObjectTransform {
 };
 
 struct SceneGraphNodeSnapshot {
+    // Immutable resource data lives on the SceneModel object at this index.
+    // Multiple runtime instances may reference the same source object.
     std::size_t objectIndex = 0;
     int id = 0;
+    bool dynamic = false;
     std::optional<int> parent;
     bool disablePropagation = false;
     EvaluatedValue origin;
@@ -85,6 +88,7 @@ struct SceneGraphNodeSnapshot {
     ObjectTransform localTransform;
     ObjectTransform worldTransform;
     bool isVisible = true;
+    std::map<std::string, RuntimeValue> layerProperties;
 };
 
 struct SceneGraphSnapshot {
@@ -100,9 +104,8 @@ struct SceneGraphSnapshot {
     // it never reaches back into QuickJS or a mutable registry.
     std::vector<script::ScriptTextureAnimationSnapshot> textureAnimations;
     std::vector<script::ScriptSoundSnapshot> sounds;
-    // Both orders contain indices into nodes/source scene objects. Keeping
-    // indices rather than copied objects gives FrameGraph one authoritative
-    // path back to SceneModel.
+    // Both orders contain indices into nodes. Each node then selects its
+    // immutable source object through objectIndex.
     std::vector<std::size_t> initializationOrder;
     std::vector<std::size_t> renderOrder;
 

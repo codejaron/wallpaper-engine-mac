@@ -9,6 +9,7 @@
 namespace we::scene {
 
 enum class PuppetModelVersion {
+    mdlv0013,
     mdlv0021,
     mdlv0023,
 };
@@ -27,9 +28,9 @@ struct PuppetMesh final {
 
 class PuppetMeshParser final {
 public:
-    // Parses the static MDLV mesh block used by Wallpaper Engine's Linux
-    // renderer. The returned mesh owns all decoded data and is safe to share
-    // between frame plans and GL preparation.
+    // Parses a static Wallpaper Engine MDLV mesh block. The returned mesh owns
+    // all decoded data and is safe to share between frame plans and GL
+    // preparation.
     [[nodiscard]] static PuppetMesh parse(
         std::span<const std::uint8_t> bytes,
         std::string source

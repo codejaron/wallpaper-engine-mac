@@ -143,6 +143,11 @@ public:
             std::uint32_t bytesPerRow,
             std::span<const std::uint8_t> coverage
         );
+        [[nodiscard]] GLuint uploadRGBA8Texture(
+            std::uint32_t width,
+            std::uint32_t height,
+            std::span<const std::uint8_t> pixels
+        );
         void destroyTexture(GLuint& texture) noexcept;
 
         void readRGBA8(

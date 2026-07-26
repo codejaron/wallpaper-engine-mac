@@ -362,7 +362,7 @@ TIntermTyped* TIntermediate::addUnaryMath(TOperator op, TIntermTyped* child,
 
     switch (op) {
     case EOpLogicalNot:
-        if (getSource() == EShSourceHlsl) {
+        if (usesHlslTypeSemantics()) {
             break; // HLSL can promote logical not
         }
 
@@ -732,7 +732,7 @@ TIntermediate::addPairConversion(TOperator op, TIntermTyped* node0, TIntermTyped
     case EOpLogicalAnd:
     case EOpLogicalOr:
     case EOpLogicalXor:
-        if (getSource() == EShSourceHlsl)
+        if (usesHlslTypeSemantics())
             promoteTo = std::make_tuple(EbtBool, EbtBool);
         else
             return std::make_tuple(node0, node1);
@@ -743,7 +743,7 @@ TIntermediate::addPairConversion(TOperator op, TIntermTyped* node0, TIntermTyped
     // HLSL can promote bools to ints to make this work.
     case EOpLeftShift:
     case EOpRightShift:
-        if (getSource() == EShSourceHlsl) {
+        if (usesHlslTypeSemantics()) {
             TBasicType node0BasicType = node0->getBasicType();
             if (node0BasicType == EbtBool)
                 node0BasicType = EbtInt;
@@ -930,7 +930,8 @@ TIntermTyped* TIntermediate::addConversion(TOperator op, const TType& type, TInt
     case EOpLeftShiftAssign:
     case EOpRightShiftAssign:
     {
-        if (!(getSource() == EShSourceHlsl && node->getType().getBasicType() == EbtBool)) {
+        if (!(usesHlslTypeSemantics() &&
+              node->getType().getBasicType() == EbtBool)) {
             if (isTypeInt(type.getBasicType()) && isTypeInt(node->getBasicType()))
                 return node;
             else
@@ -1002,14 +1003,8 @@ TIntermTyped* TIntermediate::addConversion(TOperator op, const TType& type, TInt
 //
 TIntermTyped* TIntermediate::addUniShapeConversion(TOperator op, const TType& type, TIntermTyped* node)
 {
-    // some source languages don't do this
-    switch (getSource()) {
-    case EShSourceHlsl:
-        break;
-    case EShSourceGlsl:
-    default:
+    if (!usesHlslTypeSemantics())
         return node;
-    }
 
     // some operations don't do this
     switch (op) {
@@ -1055,14 +1050,8 @@ TIntermTyped* TIntermediate::addUniShapeConversion(TOperator op, const TType& ty
 //
 void TIntermediate::addBiShapeConversion(TOperator op, TIntermTyped*& lhsNode, TIntermTyped*& rhsNode)
 {
-    // some source languages don't do this
-    switch (getSource()) {
-    case EShSourceHlsl:
-        break;
-    case EShSourceGlsl:
-    default:
+    if (!usesHlslTypeSemantics())
         return;
-    }
 
     // some operations don't do this
     // 'break' will mean attempt bidirectional conversion
@@ -1160,7 +1149,7 @@ TIntermTyped* TIntermediate::addShapeConversion(const TType& type, TIntermTyped*
     // The new node that handles the conversion
     TOperator constructorOp = mapTypeToConstructorOp(type);
 
-    if (getSource() == EShSourceHlsl) {
+    if (usesHlslTypeSemantics()) {
         // HLSL rules for scalar, vector and matrix conversions:
         // 1) scalar can become anything, initializing every component with its value
         // 2) vector and matrix can become scalar, first element is used (warning: truncation)
@@ -1277,7 +1266,7 @@ bool TIntermediate::isIntegralConversion(TBasicType from, TBasicType to) const
     case EbtInt:
         switch(to) {
         case EbtUint:
-            return version >= 400 || getSource() == EShSourceHlsl;
+            return version >= 400 || usesHlslTypeSemantics();
         case EbtInt64:
         case EbtUint64:
             return true;
@@ -1412,7 +1401,7 @@ bool TIntermediate::canImplicitlyPromote(TBasicType from, TBasicType to, TOperat
 
     // TODO: Move more policies into language-specific handlers.
     // Some languages allow more general (or potentially, more specific) conversions under some conditions.
-    if (getSource() == EShSourceHlsl) {
+    if (usesHlslTypeSemantics()) {
         const bool fromConvertable = (from == EbtFloat || from == EbtDouble || from == EbtInt || from == EbtUint || from == EbtBool);
         const bool toConvertable = (to == EbtFloat || to == EbtDouble || to == EbtInt || to == EbtUint || to == EbtBool);
 
@@ -1443,7 +1432,7 @@ bool TIntermediate::canImplicitlyPromote(TBasicType from, TBasicType to, TOperat
         }
     }
 
-    if (getSource() == EShSourceHlsl) {
+    if (usesHlslTypeSemantics()) {
         // HLSL
         if (from == EbtBool && (to == EbtInt || to == EbtUint || to == EbtFloat))
             return true;
@@ -1522,16 +1511,17 @@ bool TIntermediate::canImplicitlyPromote(TBasicType from, TBasicType to, TOperat
                 return numericFeatures.contains(TNumericFeatures::gpu_shader_int16);
             case EbtFloat16:
                 return numericFeatures.contains(TNumericFeatures::gpu_shader_half_float) ||
-                    getSource() == EShSourceHlsl;
+                    usesHlslTypeSemantics();
             default:
                  return false;
             }
         case EbtUint:
             switch (from) {
             case EbtInt:
-                return version >= 400 || getSource() == EShSourceHlsl || IsRequestedExtension(E_GL_ARB_gpu_shader5);
+                return version >= 400 || usesHlslTypeSemantics() ||
+                    IsRequestedExtension(E_GL_ARB_gpu_shader5);
             case EbtBool:
-                return getSource() == EShSourceHlsl;
+                return usesHlslTypeSemantics();
             case EbtFloat:
             case EbtDouble:
                 return op == EOpAssign || op == EOpAdd || op == EOpSub || op == EOpMul || op == EOpDiv || op == EOpMod || op == EOpMulAssign;
@@ -1544,7 +1534,7 @@ bool TIntermediate::canImplicitlyPromote(TBasicType from, TBasicType to, TOperat
         case EbtInt:
             switch (from) {
             case EbtBool:
-                return getSource() == EShSourceHlsl;
+                return usesHlslTypeSemantics();
             case EbtFloat:
             case EbtDouble:
                 return op == EOpAssign || op == EOpAdd || op == EOpSub || op == EOpMul || op == EOpDiv || op == EOpMod || op == EOpMulAssign;
@@ -1725,7 +1715,7 @@ std::tuple<TBasicType, TBasicType> TIntermediate::getConversionDestinationType(T
         version == 110)
         return std::make_tuple(res0, res1);
 
-    if (getSource() == EShSourceHlsl) {
+    if (usesHlslTypeSemantics()) {
         if (canImplicitlyPromote(type1, type0, op)) {
             res0 = type0;
             res1 = type0;
@@ -3071,7 +3061,7 @@ bool TIntermediate::promoteUnary(TIntermUnary& node)
         // taking a single argument, which generally don't participate in
         // operator-based type promotion (type conversion will occur later).
         // For now, scalar argument cases are relying on the setType() call below.
-        if (getSource() == EShSourceHlsl)
+        if (usesHlslTypeSemantics())
             break;
 
         // GLSL only allows integer arguments for the cases identified above in the
@@ -3147,7 +3137,7 @@ bool TIntermediate::promoteBinary(TIntermBinary& node)
 
     // HLSL implicitly promotes bool -> int for numeric operations.
     // (Implicit conversions to make the operands match each other's types were already done.)
-    if (getSource() == EShSourceHlsl &&
+    if (usesHlslTypeSemantics() &&
         (left->getBasicType() == EbtBool || right->getBasicType() == EbtBool)) {
         switch (op) {
         case EOpLessThan:
@@ -3203,7 +3193,7 @@ bool TIntermediate::promoteBinary(TIntermBinary& node)
 
     case EOpEqual:
     case EOpNotEqual:
-        if (getSource() == EShSourceHlsl) {
+        if (usesHlslTypeSemantics()) {
             const int resultWidth = std::max(left->getVectorSize(), right->getVectorSize());
 
             // In HLSL, == or != on vectors means component-wise comparison.
@@ -3249,7 +3239,7 @@ bool TIntermediate::promoteBinary(TIntermBinary& node)
     case EOpAndAssign:
     case EOpInclusiveOrAssign:
     case EOpExclusiveOrAssign:
-        if (getSource() == EShSourceHlsl)
+        if (usesHlslTypeSemantics())
             break;
 
         // Check for the same types, this should be allowed 100%
@@ -3576,7 +3566,7 @@ bool TIntermediate::promoteAggregate(TIntermAggregate& node)
     const int numArgs = static_cast<int>(args.size());
 
     // Presently, only hlsl does intrinsic promotions.
-    if (getSource() != EShSourceHlsl)
+    if (!usesHlslTypeSemantics())
         return true;
 
     // set of opcodes that can be promoted in this manner.

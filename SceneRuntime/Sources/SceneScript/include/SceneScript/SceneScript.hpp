@@ -93,11 +93,15 @@ enum class ScriptMediaPlaybackState : std::int32_t {
 };
 
 struct ScriptMediaSnapshot final {
-    // The host increments revision whenever any media field changes.  A
-    // script instance dispatches a revision at most once, which prevents
-    // callbacks from firing on every render tick when the snapshot is
-    // unchanged.
-    std::uint64_t revision = 0;
+    // Media sources update independently. Keeping one revision for the whole
+    // snapshot makes a timeline tick spuriously retrigger metadata, playback,
+    // and thumbnail callbacks. Each revision identifies the immutable fields
+    // consumed by the corresponding official SceneScript event.
+    std::uint64_t statusRevision = 0;
+    std::uint64_t metadataRevision = 0;
+    std::uint64_t playbackRevision = 0;
+    std::uint64_t timelineRevision = 0;
+    std::uint64_t thumbnailRevision = 0;
     bool available = false;
     ScriptMediaPlaybackState playbackState = ScriptMediaPlaybackState::stopped;
     std::string title;
@@ -229,7 +233,13 @@ struct ScriptLayerDescriptor final {
     int id = 0;
     std::string name;
     ScriptLayerType type = ScriptLayerType::image;
+    std::size_t sourceObjectIndex = 0;
+    std::optional<int> parent;
+    bool disablePropagation = false;
+    bool dynamic = false;
     std::map<std::string, RuntimeValue> properties;
+    std::map<std::string, TimelineAnimation> propertyAnimations;
+    Value initialConfig;
     // Image layers expose getTextureAnimation() for their primary albedo
     // texture. Production descriptors provide the stable asset identity and
     // resolve metadata lazily; test hosts may provide immutable metadata
@@ -237,6 +247,18 @@ struct ScriptLayerDescriptor final {
     std::optional<std::string> textureAssetIdentity;
     std::optional<ScriptTextureAnimationMetadata> textureAnimation;
     bool soundStartsAutomatically = false;
+};
+
+struct ScriptTimelineAnimationSnapshot final {
+    int layerId = 0;
+    std::string property;
+    std::string name;
+    double fps = 0.0;
+    double frameCount = 0.0;
+    double durationSeconds = 0.0;
+    double frame = 0.0;
+    double rate = 1.0;
+    bool playing = false;
 };
 
 enum class ScriptPropertyObjectType : std::int32_t {
@@ -336,6 +358,18 @@ public:
         int id,
         std::string_view property
     ) const;
+    [[nodiscard]] std::optional<Value> initialLayerConfig(int id) const;
+    [[nodiscard]] std::optional<ScriptLayerDescriptor> initialLayerDescriptor(
+        int id
+    ) const;
+    [[nodiscard]] ScriptLayerDescriptor createLayer(
+        int templateId,
+        std::map<std::string, RuntimeValue> propertyOverrides
+    );
+    [[nodiscard]] bool destroyLayer(int id);
+    [[nodiscard]] std::size_t layerCount() const;
+    [[nodiscard]] std::optional<std::size_t> layerIndex(int id) const;
+    [[nodiscard]] bool sortLayer(int id, std::size_t index);
 
     // A setter is a real host write. Unknown layers/properties are rejected
     // explicitly instead of manufacturing an empty/fake layer object.
@@ -365,6 +399,24 @@ public:
     void stopTextureAnimation(int id);
     void setTextureAnimationFrame(int id, std::size_t frame);
     void joinTextureAnimation(int id);
+
+    [[nodiscard]] ScriptTimelineAnimationSnapshot timelineAnimationSnapshot(
+        int id,
+        std::string_view name
+    );
+    void setTimelineAnimationRate(
+        int id,
+        std::string_view name,
+        double rate
+    );
+    void playTimelineAnimation(int id, std::string_view name);
+    void pauseTimelineAnimation(int id, std::string_view name);
+    void stopTimelineAnimation(int id, std::string_view name);
+    void setTimelineAnimationFrame(
+        int id,
+        std::string_view name,
+        double frame
+    );
 
     [[nodiscard]] ScriptSoundSnapshot soundSnapshot(int id) const;
     [[nodiscard]] std::vector<ScriptSoundSnapshot> soundSnapshots() const;

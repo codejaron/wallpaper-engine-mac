@@ -7,6 +7,7 @@
 #include <SceneCore/Texture.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -21,8 +22,13 @@
 namespace we::scene {
 
 FrameResourceRef frameAssetTextureResource(std::string_view name) {
-    std::string path = "materials/";
-    path += name;
+    std::string path;
+    if (name.starts_with("materials/")) {
+        path = name;
+    } else {
+        path = "materials/";
+        path += name;
+    }
     if (!name.ends_with(".tex")) {
         path += ".tex";
     }
@@ -35,8 +41,18 @@ FrameResourceRef frameAssetTextureResource(std::string_view name) {
 
 namespace {
 
+FrameResourceRef frameHostTextureResource(std::string_view name) {
+    return {
+        .kind = FrameResourceKind::hostTexture,
+        .id = std::string(name),
+        .logicalName = std::string(name),
+    };
+}
+
 using FramebufferMap = std::map<std::string, FrameResourceRef>;
 constexpr int wallpaperTextureSlotCount = 8;
+constexpr int linuxBloomLegacyObjectId = -1;
+constexpr int bloomRuntimeObjectId = std::numeric_limits<int>::min();
 
 FramePlanIssueSeverity defaultIssueSeverity(FramePlanIssueCode code) noexcept {
     switch (code) {
@@ -464,6 +480,7 @@ struct ImageContext {
     const SceneGraphNodeSnapshot* node = nullptr;
     FrameResourceRef currentMain;
     FrameResourceRef currentSub;
+    FramebufferMap localFramebuffers;
 };
 
 struct PlanCheckpoint {
@@ -595,6 +612,7 @@ public:
         plan_.clearColor.alpha = 1.0;
 
         collectUnsupportedObjects();
+        collectDependencyObjectIds();
         registerImageCompositeResources();
         planRenderableObjects();
         planBloomObject();
@@ -612,6 +630,47 @@ private:
         script::ScriptPropertyOwner owner = {}
     ) {
         if (!owner.layerId && objectId) owner.layerId = objectId;
+        if (evaluationFrame_ && objectId &&
+            owner.type == script::ScriptPropertyOwnerType::none) {
+            const SceneGraphNodeSnapshot* node = graphSnapshot_.node(*objectId);
+            if (node != nullptr && node->dynamic) {
+                const std::string prefix = objectPointer(node->objectIndex) + '/';
+                if (pointer.starts_with(prefix)) {
+                    std::string property = pointer.substr(prefix.size());
+                    constexpr std::string_view particleOverride =
+                        "particle/instanceoverride/";
+                    if (property.starts_with(particleOverride)) {
+                        property.erase(0, particleOverride.size());
+                    }
+                    if (property.find('/') == std::string::npos) {
+                        const auto fold = [](std::string_view name) {
+                            std::string result;
+                            result.reserve(name.size());
+                            for (const unsigned char character : name) {
+                                result.push_back(static_cast<char>(
+                                    std::tolower(character)
+                                ));
+                            }
+                            return result;
+                        };
+                        const std::string folded = fold(property);
+                        const auto found = std::find_if(
+                            node->layerProperties.begin(),
+                            node->layerProperties.end(),
+                            [&](const auto& entry) {
+                                return fold(entry.first) == folded;
+                            }
+                        );
+                        if (found != node->layerProperties.end()) {
+                            return {
+                                .value = found->second,
+                                .source = DynamicValueSource::literal,
+                            };
+                        }
+                    }
+                }
+            }
+        }
         EvaluatedValue result;
         if (evaluationFrame_) {
             result = evaluationFrame_->evaluate(value, pointer, owner);
@@ -649,15 +708,7 @@ private:
                 severity
             );
             if (objectId) {
-                const auto node = std::find_if(
-                    graphSnapshot_.nodes.begin(), graphSnapshot_.nodes.end(),
-                    [&](const SceneGraphNodeSnapshot& candidate) {
-                        return candidate.id == *objectId;
-                    }
-                );
-                if (node != graphSnapshot_.nodes.end()) {
-                    skippedObjectIndexes_.emplace(node->objectIndex);
-                }
+                skippedObjectIds_.emplace(*objectId);
             }
         }
         return result;
@@ -793,7 +844,8 @@ private:
         const auto existing = std::find_if(
             plan_.issues.begin(), plan_.issues.end(),
             [&](const FramePlanIssue& issue) {
-                return issue.code == code && issue.jsonPointer == pointer;
+                return issue.code == code && issue.objectId == objectId &&
+                    issue.jsonPointer == pointer;
             }
         );
         if (existing != plan_.issues.end()) {
@@ -860,7 +912,7 @@ private:
         int objectId,
         const std::exception& error
     ) {
-        skippedObjectIndexes_.emplace(objectIndex);
+        skippedObjectIds_.emplace(objectId);
         addPlanningIssue(
             FramePlanIssueCode::objectPlanningFailed,
             objectId,
@@ -876,13 +928,13 @@ private:
         int objectId,
         Callback&& callback
     ) {
-        if (skippedObjectIndexes_.contains(objectIndex)) {
+        if (skippedObjectIds_.contains(objectId)) {
             return;
         }
         const PlanCheckpoint before = checkpoint();
         try {
             callback();
-            if (skippedObjectIndexes_.contains(objectIndex)) {
+            if (skippedObjectIds_.contains(objectId)) {
                 rollback(before);
             }
         } catch (const std::bad_alloc&) {
@@ -896,8 +948,8 @@ private:
 
     void collectUnsupportedObjects() {
         const auto& objects = model_->project().scene.objects;
-        for (std::size_t index = 0; index < objects.size(); ++index) {
-            const SceneObject& object = objects[index];
+        for (const SceneGraphNodeSnapshot& node : graphSnapshot_.nodes) {
+            const SceneObject& object = objects.at(node.objectIndex);
             bool perspective = false;
             if (const auto* image = std::get_if<ImageObject>(&object.data)) {
                 perspective = image->perspective;
@@ -907,8 +959,8 @@ private:
             if (perspective) {
                 addIssue(
                     FramePlanIssueCode::perspectiveProjectionUnavailable,
-                    object.base.id,
-                    objectPointer(index, "perspective"),
+                    node.id,
+                    objectPointer(node.objectIndex, "perspective"),
                     "Perspective projection is not implemented for this layer; the Linux runtime ignores this flag"
                 );
             }
@@ -916,13 +968,11 @@ private:
                 if (text->limitRows || text->limitWidth || text->limitUseEllipsis) {
                     addIssue(
                         FramePlanIssueCode::textRenderingUnavailable,
-                        object.base.id, objectPointer(index),
+                        node.id, objectPointer(node.objectIndex),
                         "Text row limiting, width limiting, and ellipsis layout are ignored to match the Linux runtime"
                     );
                 }
             }
-        }
-        for (const SceneGraphNodeSnapshot& node : graphSnapshot_.nodes) {
             for (const auto* value : {&node.origin, &node.scale, &node.angles, &node.visible}) {
                 if (value->source == DynamicValueSource::scriptInitial ||
                     value->source == DynamicValueSource::scriptUnavailable) {
@@ -939,7 +989,7 @@ private:
                             : FramePlanIssueSeverity::warning
                     );
                     if (unavailable) {
-                        skippedObjectIndexes_.emplace(node.objectIndex);
+                        skippedObjectIds_.emplace(node.id);
                     }
                     break;
                 }
@@ -981,7 +1031,71 @@ private:
                 "Texture references an unknown framebuffer '" + key + "'"
             );
         }
+        if (name == "$mediaThumbnail" ||
+            name == "$mediaPreviousThumbnail") {
+            return frameHostTextureResource(name);
+        }
         return frameAssetTextureResource(name);
+    }
+
+    [[nodiscard]] FrameResourceRef resolveUserTexture(
+        const TextureSlot& slot,
+        const FramebufferMap& localFramebuffers,
+        std::string pointer
+    ) const {
+        if (!slot.name || slot.name->empty()) {
+            frameError(
+                *model_, SceneModelErrorCode::invalidValue,
+                std::move(pointer),
+                "User texture binding must name a property or texture"
+            );
+        }
+        const std::string& name = *slot.name;
+        const auto metadataType = [&]() -> std::optional<std::string> {
+            if (!slot.metadata) return std::nullopt;
+            const auto type = slot.metadata->find("type");
+            if (type == slot.metadata->end()) return std::nullopt;
+            if (const auto* value = std::get_if<std::string>(
+                    &type->second.storage)) {
+                return *value;
+            }
+            return std::nullopt;
+        }();
+        const auto property = model_->project().properties.find(name);
+        const bool propertyBinding = property != model_->project().properties.end() ||
+            metadataType == "scenetexture" ||
+            metadataType == "usershortcut" || metadataType == "file";
+        if (!propertyBinding) {
+            // Linux accepts string entries in usertextures as ordinary texture
+            // providers. Object entries with a user-property type take the
+            // Windows host-binding path above.
+            return resolveTexture(name, localFramebuffers, std::move(pointer));
+        }
+
+        std::string selectedAsset;
+        if (property != model_->project().properties.end() &&
+            property->second.type == PropertyType::sceneTexture) {
+            const auto selected = graphSnapshot_.propertyValues.find(name);
+            if (selected != graphSnapshot_.propertyValues.end()) {
+                if (const auto* value = std::get_if<std::string>(
+                        &selected->second.storage)) {
+                    selectedAsset = *value;
+                } else {
+                    frameError(
+                        *model_, SceneModelErrorCode::typeMismatch,
+                        std::move(pointer),
+                        "Scene-texture property '" + name +
+                            "' must resolve to a string asset name"
+                    );
+                }
+            }
+        }
+        return {
+            .kind = FrameResourceKind::userPropertyTexture,
+            .id = "user-property:" + name,
+            .logicalName = name,
+            .resolvedAssetName = std::move(selectedAsset),
+        };
     }
 
     [[nodiscard]] std::optional<FrameResourceRef> primarySource(
@@ -1007,11 +1121,8 @@ private:
             image.model->material->passes.front(), image, true
         );
         const auto textures = namedSlots(pass.textures);
-        const auto userTextures = namedSlots(pass.userTextures);
         std::optional<std::string> name;
-        if (const auto user = userTextures.find(0); user != userTextures.end()) {
-            name = user->second;
-        } else if (const auto base = textures.find(0); base != textures.end()) {
+        if (const auto base = textures.find(0); base != textures.end()) {
             name = base->second;
         }
         if (!name) {
@@ -1146,8 +1257,27 @@ private:
         }
     }
 
+    void collectDependencyObjectIds() {
+        std::set<int> graphObjectIds;
+        for (const SceneGraphNodeSnapshot& node : graphSnapshot_.nodes) {
+            graphObjectIds.insert(node.id);
+        }
+        const auto& objects = model_->project().scene.objects;
+        for (const SceneGraphNodeSnapshot& node : graphSnapshot_.nodes) {
+            const SceneObject& sourceObject = objects.at(node.objectIndex);
+            for (const ObjectDependency& dependency :
+                 sourceObject.base.dependencies) {
+                if (dependency.id == sourceObject.base.id) continue;
+                if (graphObjectIds.contains(dependency.id)) {
+                    dependencyObjectIds_.insert(dependency.id);
+                }
+            }
+        }
+    }
+
     [[nodiscard]] std::optional<ImageContext> createImageContext(
         std::size_t objectIndex,
+        std::size_t nodeIndex,
         std::optional<std::size_t>& retainedFramebufferCount
     ) {
         const auto& objects = model_->project().scene.objects;
@@ -1155,7 +1285,7 @@ private:
         if (image == nullptr) {
             return std::nullopt;
         }
-            const SceneGraphNodeSnapshot& node = graphSnapshot_.nodes.at(objectIndex);
+            const SceneGraphNodeSnapshot& node = graphSnapshot_.nodes.at(nodeIndex);
             const std::optional<FrameResourceRef> source = primarySource(
                 *image, objectIndex, node.id
             );
@@ -1171,6 +1301,8 @@ private:
             );
             const FrameResourceRef resourceA = imageCompositeResource(node.id, 'a');
             const FrameResourceRef resourceB = imageCompositeResource(node.id, 'b');
+            sceneFramebuffers_.insert_or_assign(resourceA.logicalName, resourceA);
+            sceneFramebuffers_.insert_or_assign(resourceB.logicalName, resourceB);
             const FramebufferDescriptor compositeA = createFramebuffer(
                 resourceA.id, resourceA.logicalName, FramebufferFormat::rgba8,
                 width, height, 1.0, true
@@ -1262,14 +1394,16 @@ private:
     }
 
     [[nodiscard]] std::optional<std::size_t> createTextDescriptor(
-        std::size_t objectIndex
+        std::size_t objectIndex,
+        std::size_t nodeIndex
     ) {
         const auto& objects = model_->project().scene.objects;
         const auto* text = std::get_if<TextObject>(&objects.at(objectIndex).data);
-        if (text == nullptr || skippedObjectIndexes_.contains(objectIndex)) {
+        if (text == nullptr) {
             return std::nullopt;
         }
-            const SceneGraphNodeSnapshot& node = graphSnapshot_.nodes.at(objectIndex);
+            const SceneGraphNodeSnapshot& node = graphSnapshot_.nodes.at(nodeIndex);
+            if (skippedObjectIds_.contains(node.id)) return std::nullopt;
             const std::string base = objectPointer(objectIndex);
             const double pointSize = numberValue(
                 *model_, evaluate(text->pointSize, base + "/pointsize", node.id),
@@ -2090,45 +2224,79 @@ private:
         }, operation);
     }
 
-    [[nodiscard]] std::map<int, FrameResourceRef> particleTextures(
+    [[nodiscard]] std::pair<
+        FrameResourceRef,
+        std::map<int, FrameTextureBinding>
+    > particleTextures(
         const MaterialPass& pass,
         std::size_t objectIndex
     ) const {
         const std::string pointer = objectPointer(objectIndex, "particle") +
             "/material/passes/0";
-        std::map<int, std::string> names;
-        for (std::size_t index = 0; index < pass.textures.size(); ++index) {
-            const TextureSlot& slot = pass.textures[index];
-            if (!slot.name) continue;
-            names.insert_or_assign(static_cast<int>(index), *slot.name);
-        }
         // CParticle::detectTexture obtains the particle source from the
-        // ordinary material texture map.  User textures are still passed to
-        // the particle shader, but may not replace that primary source.
-        if (!names.contains(0) || names.at(0).empty()) {
+        // ordinary material texture map. User textures participate in the
+        // pass provider chain, but may not replace this simulation/atlas
+        // source.
+        if (pass.textures.empty() || !pass.textures.front().name ||
+            pass.textures.front().name->empty()) {
             frameError(
                 *model_, SceneModelErrorCode::missingField,
                 pointer + "/textures/0",
                 "Particle material requires a texture in slot zero"
             );
         }
-        for (std::size_t index = 0; index < pass.userTextures.size(); ++index) {
-            const TextureSlot& slot = pass.userTextures[index];
-            if (!slot.name || index == 0) continue;
-            names.insert_or_assign(static_cast<int>(index), *slot.name);
-        }
-        std::map<int, FrameResourceRef> result;
-        for (const auto& [index, name] : names) {
-            result.emplace(
-                index,
-                resolveTexture(
-                    name,
-                    {},
-                    pointer + "/textures/" + std::to_string(index)
-                )
-            );
-        }
-        return result;
+        FrameResourceRef primary = resolveTexture(
+            *pass.textures.front().name,
+            {},
+            pointer + "/textures/0"
+        );
+
+        std::map<int, FrameTextureBinding> bindings;
+        const auto append = [&bindings, &pointer, this](
+            const TextureSlots& slots,
+            FrameTextureCandidateSource source,
+            bool userTexture
+        ) {
+            for (std::size_t index = 0; index < slots.size(); ++index) {
+                const TextureSlot& slot = slots[index];
+                if (!slot.name || slot.name->empty()) continue;
+                FrameResourceRef resource = userTexture
+                    ? resolveUserTexture(
+                          slot,
+                          {},
+                          pointer + "/usertextures/" +
+                              std::to_string(index)
+                      )
+                    : resolveTexture(
+                          *slot.name,
+                          {},
+                          pointer + "/textures/" +
+                              std::to_string(index)
+                      );
+                bindings[static_cast<int>(index)].candidates.push_back({
+                    .source = source,
+                    .resource = std::move(resource),
+                });
+            }
+        };
+        append(
+            pass.textures,
+            FrameTextureCandidateSource::materialTexture,
+            false
+        );
+        append(
+            pass.userTextures,
+            FrameTextureCandidateSource::materialUserTexture,
+            true
+        );
+        // Linux's CParticle adds a final `previous` bind for slot zero so the
+        // particle's ordinary primary texture wins over shader defaults and
+        // user providers while all other slots retain their full chain.
+        bindings[0].candidates.push_back({
+            .source = FrameTextureCandidateSource::bind,
+            .resource = primary,
+        });
+        return {std::move(primary), std::move(bindings)};
     }
 
     [[nodiscard]] static bool particleTrailRenderer(
@@ -2199,14 +2367,16 @@ private:
     }
 
     [[nodiscard]] std::optional<std::size_t> createParticleDescriptor(
-        std::size_t objectIndex
+        std::size_t objectIndex,
+        std::size_t nodeIndex
     ) {
         const auto& objects = model_->project().scene.objects;
         const auto* object = std::get_if<ParticleObject>(&objects.at(objectIndex).data);
-        if (object == nullptr || skippedObjectIndexes_.contains(objectIndex)) {
+        if (object == nullptr) {
             return std::nullopt;
         }
-            const SceneGraphNodeSnapshot& node = graphSnapshot_.nodes.at(objectIndex);
+            const SceneGraphNodeSnapshot& node = graphSnapshot_.nodes.at(nodeIndex);
+            if (skippedObjectIds_.contains(node.id)) return std::nullopt;
             const std::string pointer = objectPointer(objectIndex, "particle");
             if (!object->definition || !object->definition->material) {
                 frameError(
@@ -2242,10 +2412,7 @@ private:
             const ComboMap combos = resolvedParticleCombos(
                 pass.combos, renderer.kind
             );
-            const std::map<int, FrameResourceRef> textures = particleTextures(
-                pass, objectIndex
-            );
-            const FrameResourceRef texture0 = textures.at(0);
+            auto [texture0, textures] = particleTextures(pass, objectIndex);
             if (texture0.kind != FrameResourceKind::assetTexture) {
                 frameError(
                     *model_, SceneModelErrorCode::unsupportedObject,
@@ -2373,13 +2540,17 @@ private:
             return descriptorIndex;
     }
 
-    void createSoundDescriptor(std::size_t objectIndex) {
+    void createSoundDescriptor(
+        std::size_t objectIndex,
+        std::size_t nodeIndex
+    ) {
         const auto& objects = model_->project().scene.objects;
         const auto* sound = std::get_if<SoundObject>(&objects.at(objectIndex).data);
-        if (sound == nullptr || skippedObjectIndexes_.contains(objectIndex)) {
+        if (sound == nullptr) {
             return;
         }
-            const SceneGraphNodeSnapshot& node = graphSnapshot_.nodes.at(objectIndex);
+            const SceneGraphNodeSnapshot& node = graphSnapshot_.nodes.at(nodeIndex);
+            if (skippedObjectIds_.contains(node.id)) return;
             const std::string base = objectPointer(objectIndex);
             const double volume = numberValue(
                 *model_, evaluate(sound->volume, base + "/volume", node.id),
@@ -2432,7 +2603,7 @@ private:
         std::size_t effectIndex,
         const Effect& effect
     ) {
-        FramebufferMap result;
+        FramebufferMap result = imageContext.localFramebuffers;
         const FrameImageDescriptor& image = plan_.images.at(imageContext.planImageIndex);
         std::map<std::string, std::size_t> finalDefinitionIndexes;
         for (std::size_t index = 0; index < effect.framebuffers.size(); ++index) {
@@ -2467,7 +2638,7 @@ private:
                         std::to_string(index) + "/uvs"
                 )
             );
-            result.emplace(definition.name, framebuffer.resource);
+            result.insert_or_assign(definition.name, framebuffer.resource);
         }
         return result;
     }
@@ -2556,6 +2727,7 @@ private:
                 .fragmentShaderPath = paths.fragment,
                 .materialObjectId = materialObjectId,
                 .constantPointerPrefix = materialPointer + "/constants",
+                .localFramebuffers = imageContext.localFramebuffers,
             });
         }
 
@@ -2924,41 +3096,79 @@ private:
         return result;
     }
 
-    [[nodiscard]] std::map<int, FrameResourceRef> resolvePassTextures(
+    [[nodiscard]] std::map<int, FrameTextureBinding> resolvePassTextures(
         const PendingRender& pending,
         const FrameResourceRef& input,
         const std::optional<FrameResourceRef>& previous,
         const FramebufferMap& localFramebuffers,
         std::string pointer
     ) const {
-        std::map<int, std::string> names = namedSlots(pending.material.textures);
-        const auto merge = [&names](const TextureSlots& slots) {
-            for (const auto& [index, value] : namedSlots(slots)) {
-                names.insert_or_assign(index, value);
+        std::map<int, FrameTextureBinding> result;
+        const auto append = [&result, &localFramebuffers, &pointer, this](
+            const TextureSlots& slots,
+            FrameTextureCandidateSource source,
+            bool userTexture
+        ) {
+            for (std::size_t index = 0; index < slots.size(); ++index) {
+                const TextureSlot& slot = slots[index];
+                if (!slot.name || slot.name->empty()) continue;
+                FrameResourceRef resource = userTexture
+                    ? resolveUserTexture(
+                          slot,
+                          localFramebuffers,
+                          pointer + "/" + std::to_string(index)
+                      )
+                    : resolveTexture(
+                          *slot.name,
+                          localFramebuffers,
+                          pointer + "/" + std::to_string(index)
+                      );
+                result[static_cast<int>(index)].candidates.push_back({
+                    .source = source,
+                    .resource = std::move(resource),
+                });
             }
         };
-        merge(pending.material.userTextures);
+        append(
+            pending.material.textures,
+            FrameTextureCandidateSource::materialTexture,
+            false
+        );
+        append(
+            pending.material.userTextures,
+            FrameTextureCandidateSource::materialUserTexture,
+            true
+        );
         if (pending.overridePass != nullptr) {
-            merge(pending.overridePass->textures);
-            merge(pending.overridePass->userTextures);
-        }
-
-        std::map<int, FrameResourceRef> result;
-        for (const auto& [index, name] : names) {
-            result.emplace(index, resolveTexture(name, localFramebuffers, pointer));
+            append(
+                pending.overridePass->textures,
+                FrameTextureCandidateSource::overrideTexture,
+                false
+            );
+            append(
+                pending.overridePass->userTextures,
+                FrameTextureCandidateSource::overrideUserTexture,
+                true
+            );
         }
         for (const auto& [index, name] : pending.binds) {
+            FrameResourceRef resource;
             if (name == "previous") {
-                result.insert_or_assign(index, previous.value_or(input));
+                resource = previous.value_or(input);
             } else {
-                result.insert_or_assign(
-                    index, resolveTexture(name, localFramebuffers, pointer)
+                resource = resolveTexture(
+                    name, localFramebuffers,
+                    pointer + "/bind/" + std::to_string(index)
                 );
             }
+            result[index].candidates.push_back({
+                .source = FrameTextureCandidateSource::bind,
+                .resource = std::move(resource),
+            });
         }
-        if (!result.contains(0)) {
-            result.emplace(0, input);
-        }
+        // Slot zero always has the renderable input as an explicit final
+        // fallback, even when no authored/default candidates exist.
+        result.try_emplace(0);
         return result;
     }
 
@@ -3006,17 +3216,21 @@ private:
         return result;
     }
 
-    void planImageObject(std::size_t objectIndex, int objectId) {
+    void planImageObject(
+        std::size_t objectIndex,
+        std::size_t nodeIndex,
+        int objectId
+    ) {
         const PlanCheckpoint before = checkpoint();
         std::optional<std::size_t> retainedFramebufferCount;
         try {
             const std::optional<ImageContext> context = createImageContext(
-                objectIndex, retainedFramebufferCount
+                objectIndex, nodeIndex, retainedFramebufferCount
             );
-            if (context && !skippedObjectIndexes_.contains(objectIndex)) {
+            if (context && !skippedObjectIds_.contains(objectId)) {
                 scheduleImage(*context);
             }
-            if (skippedObjectIndexes_.contains(objectIndex)) {
+            if (skippedObjectIds_.contains(objectId)) {
                 rollback(before, retainedFramebufferCount);
             }
         } catch (const std::bad_alloc&) {
@@ -3030,21 +3244,23 @@ private:
 
     void planRenderableObjects() {
         const auto& objects = model_->project().scene.objects;
-        for (const std::size_t objectIndex : graphSnapshot_.renderOrder) {
+        for (const std::size_t nodeIndex : graphSnapshot_.renderOrder) {
+            const SceneGraphNodeSnapshot& node = graphSnapshot_.nodes.at(nodeIndex);
+            const std::size_t objectIndex = node.objectIndex;
             const SceneObject& object = objects.at(objectIndex);
             if (std::holds_alternative<ImageObject>(object.data)) {
-                planImageObject(objectIndex, object.base.id);
+                planImageObject(objectIndex, nodeIndex, node.id);
                 continue;
             }
             isolateObjectPlanning(
                 objectIndex,
-                object.base.id,
+                node.id,
                 [&] {
                     if (std::holds_alternative<TextObject>(object.data)) {
                         const std::optional<std::size_t> descriptor =
-                            createTextDescriptor(objectIndex);
+                            createTextDescriptor(objectIndex, nodeIndex);
                         if (descriptor &&
-                            !skippedObjectIndexes_.contains(objectIndex) &&
+                            !skippedObjectIds_.contains(node.id) &&
                             plan_.texts.at(*descriptor).visible) {
                             plan_.operations.emplace_back(FrameTextCommand{
                                 .textIndex = *descriptor,
@@ -3058,9 +3274,9 @@ private:
                         return;
                     }
                     const std::optional<std::size_t> descriptor =
-                        createParticleDescriptor(objectIndex);
+                        createParticleDescriptor(objectIndex, nodeIndex);
                     if (!descriptor ||
-                        skippedObjectIndexes_.contains(objectIndex) ||
+                        skippedObjectIds_.contains(node.id) ||
                         !plan_.particles.at(*descriptor).visible) {
                         return;
                     }
@@ -3101,8 +3317,12 @@ private:
         const PlanCheckpoint before = checkpoint();
         const std::size_t syntheticIndex = model_->project().scene.objects.size();
         try {
-            const FrameResourceRef compositeA = imageCompositeResource(-1, 'a');
-            const FrameResourceRef compositeB = imageCompositeResource(-1, 'b');
+            const FrameResourceRef compositeA = imageCompositeResource(
+                bloomRuntimeObjectId, 'a'
+            );
+            const FrameResourceRef compositeB = imageCompositeResource(
+                bloomRuntimeObjectId, 'b'
+            );
             sceneFramebuffers_.emplace(compositeA.logicalName, compositeA);
             sceneFramebuffers_.emplace(compositeB.logicalName, compositeB);
             const FramebufferDescriptor descriptorA = createFramebuffer(
@@ -3171,7 +3391,7 @@ private:
                 thresholdNumber
             ]() {
                 EffectPassOverride result;
-                result.id = -1;
+                result.id = bloomRuntimeObjectId;
                 result.constants.emplace(
                     "bloomstrength",
                     dynamicLiteral(RuntimeValue::floating(strengthNumber))
@@ -3201,7 +3421,7 @@ private:
             const double bloomOriginY = static_cast<double>(plan_.height / 2);
             SceneGraphNodeSnapshot node;
             node.objectIndex = syntheticIndex;
-            node.id = -1;
+            node.id = bloomRuntimeObjectId;
             node.origin = evaluatedLiteral(RuntimeValue::vector({
                 bloomOriginX,
                 bloomOriginY,
@@ -3222,7 +3442,7 @@ private:
             const std::size_t imageIndex = plan_.images.size();
             plan_.images.push_back({
                 .objectIndex = syntheticIndex,
-                .objectId = -1,
+                .objectId = bloomRuntimeObjectId,
                 .visible = true,
                 .solid = false,
                 .passthrough = false,
@@ -3250,6 +3470,12 @@ private:
                 .node = &node,
                 .currentMain = descriptorA.resource,
                 .currentSub = descriptorB.resource,
+                .localFramebuffers = {{
+                    imageCompositeResource(
+                        linuxBloomLegacyObjectId, 'a'
+                    ).logicalName,
+                    descriptorA.resource,
+                }},
             });
         } catch (const std::bad_alloc&) {
             rollback(before);
@@ -3258,7 +3484,7 @@ private:
             rollback(before);
             addIssue(
                 FramePlanIssueCode::objectPlanningFailed,
-                -1,
+                bloomRuntimeObjectId,
                 "/general/bloom",
                 std::string("Bloom post-process planning failed: ") + error.what(),
                 FramePlanIssueSeverity::frameFatal
@@ -3268,17 +3494,18 @@ private:
 
     void planSoundObjects() {
         const auto& objects = model_->project().scene.objects;
-        for (std::size_t objectIndex = 0;
-             objectIndex < objects.size(); ++objectIndex) {
+        for (const std::size_t nodeIndex : graphSnapshot_.renderOrder) {
+            const SceneGraphNodeSnapshot& node = graphSnapshot_.nodes.at(nodeIndex);
+            const std::size_t objectIndex = node.objectIndex;
             const SceneObject& object = objects[objectIndex];
             if (!std::holds_alternative<SoundObject>(object.data)) {
                 continue;
             }
             isolateObjectPlanning(
                 objectIndex,
-                object.base.id,
+                node.id,
                 [&] {
-                    createSoundDescriptor(objectIndex);
+                    createSoundDescriptor(objectIndex, nodeIndex);
                 }
             );
         }
@@ -3349,7 +3576,9 @@ private:
 
     void scheduleImage(ImageContext context) {
         FrameImageDescriptor& image = plan_.images.at(context.planImageIndex);
-        if (!image.visible) {
+        const bool offscreenDependency =
+            !image.visible && dependencyObjectIds_.contains(image.objectId);
+        if (!image.visible && !offscreenDependency) {
             return;
         }
         std::vector<PendingOperation> pending = pendingOperations(context);
@@ -3357,7 +3586,8 @@ private:
             return;
         }
         const std::size_t basePassCount = context.image->model->material->passes.size();
-        if (image.passthrough && pending.size() <= basePassCount) {
+        if (image.passthrough && !offscreenDependency &&
+            pending.size() <= basePassCount) {
             // Passthrough layers are effect containers over the scene content
             // accumulated so far. With no visible effect they are a no-op;
             // replaying their base material would blend the background into
@@ -3392,7 +3622,8 @@ private:
                     }
                     drawTo = *render->target;
                 }
-                const bool finalPass = !writesToTarget && isLastDraw(pendingIndex);
+                const bool finalPass =
+                    image.visible && !writesToTarget && isLastDraw(pendingIndex);
                 const FrameResourceRef destination = finalPass ? plan_.output : drawTo;
                 const std::optional<FrameResourceRef> previous =
                     inTargetEffectSequence ? effectInput : std::nullopt;
@@ -3657,11 +3888,17 @@ private:
                         if (value.previousInput) {
                             read(*value.previousInput, basePointer + "/previousInput");
                         }
-                        for (const auto& [slot, resource] : value.textures) {
-                            read(
-                                resource,
-                                basePointer + "/textures/" + std::to_string(slot)
-                            );
+                        for (const auto& [slot, binding] : value.textures) {
+                            for (std::size_t candidateIndex = 0;
+                                 candidateIndex < binding.candidates.size();
+                                 ++candidateIndex) {
+                                read(
+                                    binding.candidates[candidateIndex].resource,
+                                    basePointer + "/textures/" +
+                                        std::to_string(slot) + "/candidates/" +
+                                        std::to_string(candidateIndex)
+                                );
+                            }
                         }
                         if (value.destination.kind == FrameResourceKind::framebuffer &&
                             operationReads.contains(value.destination.id)) {
@@ -3706,12 +3943,18 @@ private:
                             return combo != descriptor.combos.end() &&
                                 combo->second != 0;
                         }();
-                        for (const auto& [slot, resource] : descriptor.textures) {
-                            read(
-                                resource,
-                                basePointer + "/textures/" +
-                                    std::to_string(slot)
-                            );
+                        for (const auto& [slot, binding] : descriptor.textures) {
+                            for (std::size_t candidateIndex = 0;
+                                 candidateIndex < binding.candidates.size();
+                                 ++candidateIndex) {
+                                read(
+                                    binding.candidates[candidateIndex].resource,
+                                    basePointer + "/textures/" +
+                                        std::to_string(slot) +
+                                        "/candidates/" +
+                                        std::to_string(candidateIndex)
+                                );
+                            }
                         }
                         if (value.destination.kind == FrameResourceKind::framebuffer &&
                             operationReads.contains(value.destination.id) &&
@@ -3747,7 +3990,8 @@ private:
     const std::map<std::string, EvaluatedValue>* scriptedValues_ = nullptr;
     FramePlan plan_;
     FramebufferMap sceneFramebuffers_;
-    std::set<std::size_t> skippedObjectIndexes_;
+    std::set<int> dependencyObjectIds_;
+    std::set<int> skippedObjectIds_;
 };
 
 }  // namespace

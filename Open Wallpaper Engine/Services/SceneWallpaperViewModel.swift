@@ -284,10 +284,17 @@ final class SceneRuntimeSession {
         }
 
         var bridgeSnapshot: WESceneMediaSnapshot
+        let thumbnail: SceneMediaThumbnailRGBA8?
+        let thumbnailRevision = snapshot.revisions.thumbnail
         switch snapshot {
-        case .unavailable(let revision):
+        case .unavailable(let revisions):
+            thumbnail = nil
             bridgeSnapshot = WESceneMediaSnapshot(
-                revision: revision,
+                status_revision: revisions.status,
+                metadata_revision: revisions.metadata,
+                playback_revision: revisions.playback,
+                timeline_revision: revisions.timeline,
+                thumbnail_revision: revisions.thumbnail,
                 available: 0,
                 playback_state: WE_SCENE_MEDIA_STOPPED,
                 title: nil,
@@ -306,7 +313,8 @@ final class SceneRuntimeSession {
                 text_color: (0, 0, 0),
                 high_contrast_color: (0, 0, 0)
             )
-        case .available(let revision, let content):
+        case .available(let revisions, let content):
+            thumbnail = content.thumbnail
             let playbackState: WESceneMediaPlaybackState
             switch content.playbackState {
             case .stopped: playbackState = WE_SCENE_MEDIA_STOPPED
@@ -314,7 +322,11 @@ final class SceneRuntimeSession {
             case .paused: playbackState = WE_SCENE_MEDIA_PAUSED
             }
             bridgeSnapshot = WESceneMediaSnapshot(
-                revision: revision,
+                status_revision: revisions.status,
+                metadata_revision: revisions.metadata,
+                playback_revision: revisions.playback,
+                timeline_revision: revisions.timeline,
+                thumbnail_revision: revisions.thumbnail,
                 available: 1,
                 playback_state: playbackState,
                 title: try copiedCString(content.title),
@@ -355,11 +367,49 @@ final class SceneRuntimeSession {
             )
         }
 
+        if snapshot.hasThumbnailUpdate(since: lastMediaSnapshot) {
+            try applyMediaThumbnail(
+                thumbnail,
+                revision: thumbnailRevision,
+                to: executor
+            )
+        }
         var error: WESceneRuntimeErrorRef?
         guard we_scene_frame_executor_set_media_snapshot(
             executor, &bridgeSnapshot, &error
         ) == 1 else {
             throw bridgeError("Updating Scene media snapshot", error)
+        }
+    }
+
+    private func applyMediaThumbnail(
+        _ thumbnail: SceneMediaThumbnailRGBA8?,
+        revision: UInt64,
+        to executor: WESceneFrameExecutorRef
+    ) throws {
+        var error: WESceneRuntimeErrorRef?
+        let result: Int32
+        if let thumbnail {
+            result = thumbnail.pixels.withUnsafeBytes { storage in
+                var bridgeThumbnail = WESceneMediaThumbnailRGBA8(
+                    revision: revision,
+                    width: thumbnail.width,
+                    height: thumbnail.height,
+                    bytes_per_row: thumbnail.bytesPerRow,
+                    pixels: storage.bindMemory(to: UInt8.self).baseAddress,
+                    pixel_length: storage.count
+                )
+                return we_scene_frame_executor_set_media_thumbnail_rgba8(
+                    executor, &bridgeThumbnail, &error
+                )
+            }
+        } else {
+            result = we_scene_frame_executor_clear_media_thumbnail(
+                executor, revision, &error
+            )
+        }
+        guard result == 1 else {
+            throw bridgeError("Updating Scene media thumbnail", error)
         }
     }
 

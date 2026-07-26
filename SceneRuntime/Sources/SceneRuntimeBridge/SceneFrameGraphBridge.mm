@@ -54,6 +54,10 @@ WESceneFrameResourceKind resourceKind(FrameResourceKind kind) noexcept {
             return WE_SCENE_FRAME_RESOURCE_ASSET_TEXTURE;
         case FrameResourceKind::framebuffer:
             return WE_SCENE_FRAME_RESOURCE_FRAMEBUFFER;
+        case FrameResourceKind::userPropertyTexture:
+            return WE_SCENE_FRAME_RESOURCE_USER_PROPERTY_TEXTURE;
+        case FrameResourceKind::hostTexture:
+            return WE_SCENE_FRAME_RESOURCE_HOST_TEXTURE;
     }
     std::terminate();
 }
@@ -815,7 +819,14 @@ extern "C" int we_scene_frame_plan_texture_binding_info(
     std::advance(iterator, static_cast<std::ptrdiff_t>(binding_index));
     *out_info = {};
     out_info->slot = iterator->first;
-    resourceInfo(iterator->second, out_info->resource);
+    if (iterator->second.candidates.empty()) {
+        resourceInfo(render->input, out_info->resource);
+    } else {
+        resourceInfo(
+            iterator->second.candidates.back().resource,
+            out_info->resource
+        );
+    }
     return 1;
 }
 

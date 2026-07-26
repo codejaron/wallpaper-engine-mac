@@ -541,7 +541,7 @@ private final class SceneOpenGLView: NSOpenGLView {
     private var systemAudioCaptureEnabled = false
     private var isAudibleOwner = false
     private var mediaSnapshot: SceneMediaProviderSnapshot =
-        .unavailable(revision: 0)
+        .unavailable(revisions: .zero)
     private var runtimeSeconds = 0.0
     private var previousTimestamp: TimeInterval?
     private var previousSpanRuntimeSeconds: Double?

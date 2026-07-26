@@ -2,6 +2,7 @@
 
 #include <SceneCore/FormatError.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -16,11 +17,22 @@ namespace {
 
 constexpr std::size_t magicSize = 9;
 constexpr std::size_t meshHeaderSize = sizeof(std::uint32_t) * 2;
-constexpr std::size_t vertexStride = 80;
-constexpr std::size_t positionOffset = 0;
-constexpr std::size_t uvOffset = 72;
 constexpr std::size_t indexLengthSize = sizeof(std::uint32_t);
 constexpr std::size_t triangleIndexBytes = sizeof(std::uint16_t) * 3;
+
+struct PuppetModelLayout final {
+    std::string_view magic;
+    PuppetModelVersion version;
+    std::size_t vertexStride;
+    std::size_t positionOffset;
+    std::size_t uvOffset;
+};
+
+constexpr std::array puppetModelLayouts{
+    PuppetModelLayout{"MDLV0013", PuppetModelVersion::mdlv0013, 52, 0, 44},
+    PuppetModelLayout{"MDLV0021", PuppetModelVersion::mdlv0021, 80, 0, 72},
+    PuppetModelLayout{"MDLV0023", PuppetModelVersion::mdlv0023, 80, 0, 72},
+};
 
 [[nodiscard]] bool hasBytes(
     std::size_t offset,
@@ -84,17 +96,19 @@ PuppetMesh PuppetMeshParser::parse(
         }
         return true;
     };
-    PuppetModelVersion version;
-    if (magicMatches("MDLV0021")) {
-        version = PuppetModelVersion::mdlv0021;
-    } else if (magicMatches("MDLV0023")) {
-        version = PuppetModelVersion::mdlv0023;
-    } else {
+    const PuppetModelLayout* layout = nullptr;
+    for (const PuppetModelLayout& candidate : puppetModelLayouts) {
+        if (magicMatches(candidate.magic)) {
+            layout = &candidate;
+            break;
+        }
+    }
+    if (!layout) {
         fail(
             FormatErrorCode::unsupportedFormat,
             source,
             0,
-            "Unsupported puppet model header; expected MDLV0021 or MDLV0023"
+            "Unsupported puppet model header; expected MDLV0013, MDLV0021, or MDLV0023"
         );
     }
 
@@ -123,7 +137,7 @@ PuppetMesh PuppetMeshParser::parse(
          hasBytes(offset, meshHeaderSize + indexLengthSize, limit);
          ++offset) {
         const std::uint32_t vertexBytes = readUInt32(bytes, offset + 4);
-        if (vertexBytes == 0 || vertexBytes % vertexStride != 0) {
+        if (vertexBytes == 0 || vertexBytes % layout->vertexStride != 0) {
             continue;
         }
         const std::size_t verticesOffset = offset + meshHeaderSize;
@@ -162,7 +176,7 @@ PuppetMesh PuppetMeshParser::parse(
     }
 
     const Candidate selected = *candidate;
-    const std::size_t vertexCount = selected.vertexBytes / vertexStride;
+    const std::size_t vertexCount = selected.vertexBytes / layout->vertexStride;
     const std::size_t indexCount = selected.indexBytes / sizeof(std::uint16_t);
     if (vertexCount == 0 || indexCount == 0 ||
         vertexCount > std::numeric_limits<std::uint16_t>::max() + std::size_t{1}) {
@@ -179,7 +193,7 @@ PuppetMesh PuppetMeshParser::parse(
         indexLengthSize;
     PuppetMesh result{
         .source = std::move(source),
-        .version = version,
+        .version = layout->version,
         .vertices = {},
         .indices = {},
     };
@@ -187,12 +201,19 @@ PuppetMesh PuppetMeshParser::parse(
     result.indices.reserve(indexCount);
 
     for (std::size_t index = 0; index < vertexCount; ++index) {
-        const std::size_t vertexOffset = verticesOffset + index * vertexStride;
-        const float x = readFloat32(bytes, vertexOffset + positionOffset);
-        const float y = readFloat32(bytes, vertexOffset + positionOffset + 4);
-        const float z = readFloat32(bytes, vertexOffset + positionOffset + 8);
-        const float u = readFloat32(bytes, vertexOffset + uvOffset);
-        const float v = readFloat32(bytes, vertexOffset + uvOffset + 4);
+        const std::size_t vertexOffset =
+            verticesOffset + index * layout->vertexStride;
+        const float x = readFloat32(
+            bytes, vertexOffset + layout->positionOffset
+        );
+        const float y = readFloat32(
+            bytes, vertexOffset + layout->positionOffset + 4
+        );
+        const float z = readFloat32(
+            bytes, vertexOffset + layout->positionOffset + 8
+        );
+        const float u = readFloat32(bytes, vertexOffset + layout->uvOffset);
+        const float v = readFloat32(bytes, vertexOffset + layout->uvOffset + 4);
         if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
             !std::isfinite(u) || !std::isfinite(v)) {
             fail(

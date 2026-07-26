@@ -701,7 +701,11 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         }
     }
 
-    private func passthroughDocuments(effectVisible: Bool) -> [String: Any] {
+    private func passthroughDocuments(
+        effectVisible: Bool,
+        layerVisible: Bool = true,
+        includeCompositeConsumer: Bool = false
+    ) -> [String: Any] {
         let project: [String: Any] = [
             "file": "scene.json",
             "general": ["properties": [String: Any]()],
@@ -709,6 +713,42 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
             "type": "scene",
             "version": 2,
         ]
+        var objects: [[String: Any]] = [
+            [
+                "id": 1,
+                "image": "models/background.json",
+                "name": "Background",
+                "origin": "8 8 0",
+                "size": "16 16",
+                "visible": true,
+            ],
+            [
+                "dependencies": [1],
+                "effects": [[
+                    "file": "effects/passthrough/effect.json",
+                    "id": 20,
+                    "passes": [[:]],
+                    "visible": effectVisible,
+                ]],
+                "id": 2,
+                "image": "models/passthrough.json",
+                "name": "Passthrough",
+                "origin": "8 8 0",
+                "size": "16 16",
+                "visible": layerVisible,
+            ],
+        ]
+        if includeCompositeConsumer {
+            objects.append([
+                "dependencies": [2],
+                "id": 3,
+                "image": "models/consumer.json",
+                "name": "Composite consumer",
+                "origin": "8 8 0",
+                "size": "16 16",
+                "visible": true,
+            ])
+        }
         let scene: [String: Any] = [
             "camera": [
                 "center": "0 0 -1", "eye": "0 0 0", "up": "0 1 0",
@@ -717,31 +757,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
                 "clearcolor": "0 0 0 0",
                 "orthogonalprojection": ["height": 16, "width": 16],
             ],
-            "objects": [
-                [
-                    "id": 1,
-                    "image": "models/background.json",
-                    "name": "Background",
-                    "origin": "8 8 0",
-                    "size": "16 16",
-                    "visible": true,
-                ],
-                [
-                    "dependencies": [1],
-                    "effects": [[
-                        "file": "effects/passthrough/effect.json",
-                        "id": 20,
-                        "passes": [[:]],
-                        "visible": effectVisible,
-                    ]],
-                    "id": 2,
-                    "image": "models/passthrough.json",
-                    "name": "Passthrough",
-                    "origin": "8 8 0",
-                    "size": "16 16",
-                    "visible": true,
-                ],
-            ],
+            "objects": objects,
             "version": 1,
         ]
         return [
@@ -751,6 +767,12 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
             ],
             "materials/background.json": [
                 "passes": [["shader": "background", "textures": ["background"]]],
+            ],
+            "materials/consumer.json": [
+                "passes": [[
+                    "shader": "consumer",
+                    "textures": ["_rt_imageLayerComposite_2_a"],
+                ]],
             ],
             "materials/effect.json": [
                 "passes": [["shader": "effect"]],
@@ -765,6 +787,9 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
             "models/background.json": [
                 "material": "materials/background.json",
             ],
+            "models/consumer.json": [
+                "material": "materials/consumer.json",
+            ],
             "models/passthrough.json": [
                 "material": "materials/passthrough.json",
                 "passthrough": true,
@@ -774,9 +799,15 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         ]
     }
 
-    private func loadPassthrough(effectVisible: Bool) throws -> LoadedFrameGraph {
+    private func loadPassthrough(
+        effectVisible: Bool,
+        layerVisible: Bool = true,
+        includeCompositeConsumer: Bool = false
+    ) throws -> LoadedFrameGraph {
         let fixture = try makeFixture(passthroughDocuments(
-            effectVisible: effectVisible
+            effectVisible: effectVisible,
+            layerVisible: layerVisible,
+            includeCompositeConsumer: includeCompositeConsumer
         ))
         do {
             return try load(
@@ -794,7 +825,8 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         producerWritesComposite: Bool,
         producerHasPrimaryTexture: Bool = true,
         consumerReadsCompositeB: Bool = false,
-        producerMaterialOutsideShaderNamespace: Bool = false
+        producerMaterialOutsideShaderNamespace: Bool = false,
+        producerVisible: Bool = true
     ) -> [String: Any] {
         let project: [String: Any] = [
             "file": "scene.json",
@@ -827,7 +859,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
                     "name": "Producer",
                     "origin": "8 8 0",
                     "size": "16 16",
-                    "visible": true,
+                    "visible": producerVisible,
                 ],
             ],
             "version": 1,
@@ -864,14 +896,16 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         producerWritesComposite: Bool,
         producerHasPrimaryTexture: Bool = true,
         consumerReadsCompositeB: Bool = false,
-        producerMaterialOutsideShaderNamespace: Bool = false
+        producerMaterialOutsideShaderNamespace: Bool = false,
+        producerVisible: Bool = true
     ) throws -> LoadedFrameGraph {
         let fixture = try makeFixture(forwardCompositeDocuments(
             producerWritesComposite: producerWritesComposite,
             producerHasPrimaryTexture: producerHasPrimaryTexture,
             consumerReadsCompositeB: consumerReadsCompositeB,
             producerMaterialOutsideShaderNamespace:
-                producerMaterialOutsideShaderNamespace
+                producerMaterialOutsideShaderNamespace,
+            producerVisible: producerVisible
         ))
         do {
             return try load(
@@ -1419,6 +1453,379 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         )
         XCTAssertEqual(descriptors[0].world_transform.origin.y, 100, accuracy: 0.000_001)
         XCTAssertEqual(descriptors[1].visible, 0)
+    }
+
+    func testTemplateLayerCloneAndTimelineAnimationFlowIntoFrameGraph() throws {
+        var documents = syntheticDocuments()
+        var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
+        let objects = try XCTUnwrap(scene["objects"] as? [[String: Any]])
+
+        var controller = objects[0]
+        controller["effects"] = []
+        controller["name"] = "Controller"
+        controller["origin"] = [
+            "value": "200 100 0",
+            "script": """
+            let clone;
+
+            export function init(value) {
+                const template = thisScene.getLayer('Template');
+                const config = thisScene.getInitialLayerConfig(template);
+                config.origin.value = new Vec3(40, 50, 0);
+                clone = thisScene.createLayer(config);
+                const animation = clone.getAnimation('origin');
+                if (animation.fps !== 10 || animation.frameCount !== 10 ||
+                    animation.duration !== 1 || animation.rate !== 1 ||
+                    animation.isPlaying()) {
+                    throw new Error('timeline metadata or initial state mismatch');
+                }
+                animation.rate = 2;
+                animation.setFrame(2);
+                animation.pause();
+                if (animation.rate !== 2 || animation.getFrame() !== 2 ||
+                    animation.isPlaying()) {
+                    throw new Error('timeline pause or positioning mismatch');
+                }
+                animation.stop();
+                if (animation.getFrame() !== 0 || animation.isPlaying()) {
+                    throw new Error('timeline stop mismatch');
+                }
+                animation.rate = 1;
+                animation.play();
+                return value;
+            }
+
+            export function update(value) {
+                if (thisScene.getLayerCount() !== 3 ||
+                    thisScene.getLayerIndex(clone) !== 2) {
+                    throw new Error('dynamic layer topology is stale');
+                }
+                const animation = clone.getAnimation('origin');
+                thisLayer.scale = new Vec3(
+                    animation.getFrame(),
+                    clone.alpha,
+                    1
+                );
+                return value;
+            }
+            """,
+        ]
+
+        var template = controller
+        template["id"] = 8
+        template["name"] = "Template"
+        template["origin"] = [
+            "animation": [
+                "c0": [
+                    ["frame": 0, "value": 0],
+                    ["frame": 10, "value": 100],
+                ],
+                "c1": [
+                    ["frame": 0, "value": 0],
+                    ["frame": 10, "value": 0],
+                ],
+                "c2": [
+                    ["frame": 0, "value": 0],
+                    ["frame": 10, "value": 0],
+                ],
+                "options": [
+                    "children": [["key": "alpha"]],
+                    "fps": 10,
+                    "length": 10,
+                    "mode": "single",
+                    "startpaused": true,
+                ],
+                "relative": true,
+            ],
+            "value": "10 20 0",
+        ]
+        template["alpha"] = [
+            "animation": [
+                "c0": [
+                    ["frame": 0, "value": 0],
+                    ["frame": 10, "value": 1],
+                ],
+                "options": [
+                    "fps": 10,
+                    "length": 10,
+                    "mode": "single",
+                    "parent": ["key": "origin"],
+                ],
+            ],
+            "value": 1.0,
+        ]
+        template["visible"] = false
+        scene["objects"] = [controller, template]
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        let initial = try createPlan(
+            loaded.frameGraph,
+            runtime: 0,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(initial) }
+        let initialImages = try images(initial)
+        XCTAssertEqual(initialImages.count, 3)
+        let initialClone = try XCTUnwrap(initialImages.first { $0.object_id < 0 })
+        XCTAssertEqual(initialClone.visible, 1)
+        XCTAssertEqual(initialClone.world_transform.origin.x, 40, accuracy: 0.000_001)
+        XCTAssertEqual(initialClone.world_transform.origin.y, 50, accuracy: 0.000_001)
+
+        let animated = try createPlan(
+            loaded.frameGraph,
+            runtime: 0.5,
+            frameTime: 0.5
+        )
+        defer { we_scene_frame_plan_destroy(animated) }
+        let animatedImages = try images(animated)
+        let animatedClone = try XCTUnwrap(
+            animatedImages.first { $0.object_id == initialClone.object_id }
+        )
+        XCTAssertEqual(animatedClone.visible, 1)
+        XCTAssertEqual(animatedClone.world_transform.origin.x, 90, accuracy: 0.000_001)
+        XCTAssertEqual(animatedClone.world_transform.origin.y, 50, accuracy: 0.000_001)
+
+        let animatedController = try XCTUnwrap(
+            animatedImages.first { $0.object_id == 7 }
+        )
+        XCTAssertEqual(
+            animatedController.world_transform.scale.x,
+            5,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            animatedController.world_transform.scale.y,
+            0.5,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testDynamicLayerSortAndDeferredDestroyUpdateTheNextFrameTopology() throws {
+        var documents = syntheticDocuments()
+        var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
+        let objects = try XCTUnwrap(scene["objects"] as? [[String: Any]])
+
+        var controller = objects[0]
+        controller["effects"] = []
+        controller["name"] = "Controller"
+        controller["origin"] = [
+            "value": "200 100 0",
+            "script": """
+            let clone;
+            let firstUpdate = true;
+
+            export function init(value) {
+                const config = thisScene.getInitialLayerConfig('Template');
+                clone = thisScene.createLayer(config);
+                if (!thisScene.sortLayer(clone, 0) ||
+                    thisScene.getLayerIndex(clone) !== 0 ||
+                    !thisScene.destroyLayer(clone) ||
+                    thisScene.destroyLayer(clone)) {
+                    throw new Error('dynamic layer lifecycle mutation failed');
+                }
+                return value;
+            }
+
+            export function update(value) {
+                const expectedCount = firstUpdate ? 3 : 2;
+                if (thisScene.getLayerCount() !== expectedCount) {
+                    throw new Error('deferred dynamic layer topology mismatch');
+                }
+                firstUpdate = false;
+                return value;
+            }
+            """,
+        ]
+
+        var template = controller
+        template["id"] = 8
+        template["name"] = "Template"
+        template["origin"] = "40 50 0"
+        scene["objects"] = [controller, template]
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        let first = try createPlan(
+            loaded.frameGraph,
+            runtime: 0,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(first) }
+        let firstImages = try images(first)
+        XCTAssertEqual(firstImages.count, 3)
+        XCTAssertLessThan(firstImages[0].object_id, 0)
+
+        let second = try createPlan(
+            loaded.frameGraph,
+            runtime: 1,
+            frameTime: 1
+        )
+        defer { we_scene_frame_plan_destroy(second) }
+        XCTAssertEqual(try images(second).count, 2)
+    }
+
+    func testDynamicLayerPlanningFailureDoesNotSkipSiblingInstancesOfTemplate() throws {
+        var documents = syntheticDocuments()
+        var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
+        let objects = try XCTUnwrap(scene["objects"] as? [[String: Any]])
+
+        var controller = objects[0]
+        controller["effects"] = []
+        controller["origin"] = [
+            "value": "200 100 0",
+            "script": """
+            export function init(value) {
+                const config = thisScene.getInitialLayerConfig('Text template');
+                config.pointsize = 0;
+                config.text = 'invalid clone';
+                thisScene.createLayer(config);
+                config.pointsize = 20;
+                config.text = 'valid clone';
+                thisScene.createLayer(config);
+                return value;
+            }
+            """,
+        ]
+
+        let template: [String: Any] = [
+            "id": 8,
+            "name": "Text template",
+            "origin": "100 50 0",
+            "pointsize": 20,
+            "size": "200 40",
+            "text": "template",
+            "visible": true,
+        ]
+        scene["objects"] = [controller, template]
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        let plan = try createPlan(
+            loaded.frameGraph,
+            runtime: 0,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        let descriptors = try texts(plan)
+        XCTAssertEqual(descriptors.map { string($0.text) }, ["template", "valid clone"])
+        XCTAssertEqual(descriptors.map(\.object_id), [8, -2])
+        XCTAssertFalse(try operations(plan).contains { $0.object_id == -1 })
+        let issue = try XCTUnwrap(try issues(plan).first {
+            $0.code == WE_SCENE_FRAME_ISSUE_OBJECT_PLANNING_FAILED
+        })
+        XCTAssertEqual(issue.object_id, -1)
+        XCTAssertEqual(issue.severity, WE_SCENE_FRAME_ISSUE_SKIP_OBJECT)
+    }
+
+    func testUnsupportedObjectDiagnosticsUseEveryRuntimeLayerIdentity() throws {
+        var documents = syntheticDocuments()
+        var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
+        let objects = try XCTUnwrap(scene["objects"] as? [[String: Any]])
+
+        var controller = objects[0]
+        controller["effects"] = []
+        controller["origin"] = [
+            "value": "200 100 0",
+            "script": """
+            export function init(value) {
+                const config = thisScene.getInitialLayerConfig('Perspective template');
+                thisScene.createLayer(config);
+                return value;
+            }
+            """,
+        ]
+
+        var template = controller
+        template["id"] = 8
+        template["name"] = "Perspective template"
+        template["origin"] = "100 50 0"
+        template["perspective"] = true
+        scene["objects"] = [controller, template]
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        let plan = try createPlan(
+            loaded.frameGraph,
+            runtime: 0,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        let perspectiveIssues = try issues(plan).filter {
+            $0.code == WE_SCENE_FRAME_ISSUE_PERSPECTIVE_PROJECTION_UNAVAILABLE
+        }
+        XCTAssertEqual(Set(perspectiveIssues.map(\.object_id)), Set([8, -1]))
+    }
+
+    func testArbitraryDynamicLayerConfigurationFailsExplicitly() throws {
+        var documents = syntheticDocuments()
+        var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
+        var objects = try XCTUnwrap(scene["objects"] as? [[String: Any]])
+        objects[0]["origin"] = [
+            "value": "200 100 0",
+            "script": """
+            export function init(value) {
+                thisScene.createLayer({
+                    origin: new Vec3(10, 20, 0),
+                    visible: true
+                });
+                return value;
+            }
+            """,
+        ]
+        scene["objects"] = objects
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        XCTAssertThrowsError(
+            try createPlan(
+                loaded.frameGraph,
+                runtime: 0,
+                frameTime: 1.0 / 60.0
+            )
+        ) { error in
+            guard case let TestFailure.plan(message) = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertTrue(message.contains("arbitrary layer construction is unsupported"))
+        }
     }
 
     func testEffectVisibilityScriptReceivesTypedThisObjectAndOwningLayer() throws {
@@ -2401,6 +2808,50 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(try operations(plan).first?.kind, WE_SCENE_FRAME_OPERATION_CLEAR)
     }
 
+    func testUserTextureDoesNotReplaceTheRenderablePrimarySource() throws {
+        var documents = syntheticDocuments()
+        var project = documents["project.json"] as! [String: Any]
+        var general = project["general"] as! [String: Any]
+        var properties = general["properties"] as! [String: Any]
+        properties["selected_texture"] = [
+            "text": "Texture",
+            "type": "scenetexture",
+            "value": "alternate",
+        ]
+        general["properties"] = properties
+        project["general"] = general
+        documents["project.json"] = project
+
+        var material = documents["materials/base.json"] as! [String: Any]
+        var passes = material["passes"] as! [[String: Any]]
+        passes[0]["usertextures"] = [[
+            "name": "selected_texture",
+            "type": "scenetexture",
+        ]]
+        material["passes"] = passes
+        documents["materials/base.json"] = material
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+        let plan = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        let image = try XCTUnwrap(try images(plan).first)
+        XCTAssertEqual(string(image.source.id), "materials/base.tex")
+        XCTAssertEqual(
+            image.source.kind,
+            WE_SCENE_FRAME_RESOURCE_ASSET_TEXTURE
+        )
+
+        let binding = try XCTUnwrap(try textures(plan, operation: 0)[0])
+        XCTAssertEqual(binding, "user-property:selected_texture")
+    }
+
     func testPassthroughCapturesSceneBeforeApplyingVisibleEffect() throws {
         let loaded = try loadPassthrough(effectVisible: true)
         defer { destroy(loaded) }
@@ -2498,6 +2949,38 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         }
     }
 
+    func testHiddenPassthroughDependencyCapturesSceneIntoComposite() throws {
+        let loaded = try loadPassthrough(
+            effectVisible: false,
+            layerVisible: false,
+            includeCompositeConsumer: true
+        )
+        defer { destroy(loaded) }
+        let plan = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        XCTAssertEqual(try planInfo(plan).is_executable, 1)
+        let scheduled = try operations(plan)
+        XCTAssertEqual(scheduled.map(\.object_id), [1, 2, 3])
+        guard scheduled.count == 3 else { return }
+        XCTAssertEqual(
+            scheduled[1].geometry,
+            WE_SCENE_FRAME_GEOMETRY_PASSTHROUGH_CAPTURE
+        )
+        XCTAssertEqual(
+            string(scheduled[1].input.logical_name),
+            "_rt_FullFrameBuffer"
+        )
+        XCTAssertEqual(
+            string(scheduled[1].destination.logical_name),
+            "_rt_imageLayerComposite_2_a"
+        )
+        XCTAssertEqual(
+            string(scheduled[2].input.id),
+            string(scheduled[1].destination.id)
+        )
+    }
+
     func testForwardCompositeDependencySchedulesProducerWriteBeforeConsumer() throws {
         let loaded = try loadForwardComposite(producerWritesComposite: true)
         defer { destroy(loaded) }
@@ -2528,6 +3011,41 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
             string(consumer.source.id),
             "The producer must define its composite before the consumer reads it"
         )
+    }
+
+    func testEvaluatedHiddenDependencyRendersOffscreenBeforeConsumer() throws {
+        let loaded = try loadForwardComposite(
+            producerWritesComposite: false,
+            producerVisible: false
+        )
+        defer { destroy(loaded) }
+        let plan = try createPlan(
+            loaded.frameGraph,
+            runtime: 1,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        XCTAssertEqual(try planInfo(plan).is_executable, 1)
+        let producer = try XCTUnwrap(try images(plan).first {
+            $0.object_id == 2
+        })
+        XCTAssertEqual(producer.visible, 0)
+
+        let scheduled = try operations(plan)
+        XCTAssertEqual(scheduled.map(\.object_id), [2, 1])
+        guard scheduled.count == 2 else { return }
+        XCTAssertEqual(
+            string(scheduled[0].destination.id),
+            "object:2:_rt_imageLayerComposite_2_a"
+        )
+        XCTAssertEqual(
+            string(scheduled[1].input.id),
+            string(scheduled[0].destination.id)
+        )
+        XCTAssertFalse(try issues(plan).contains {
+            $0.code == WE_SCENE_FRAME_ISSUE_FRAMEBUFFER_READ_BEFORE_WRITE
+        })
     }
 
     func testSinglePassForwardCompositeProducerIsNotRedrawnForConsumer() throws {
@@ -2656,6 +3174,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
     }
 
     func testLinuxBloomTogglePlansTheFourPassPostProcessWithExactBindings() throws {
+        let bloomObjectId = Int32.min
         let loaded = try loadLinuxCompatibility(
             bloomEnabled: false,
             dynamicBloom: true
@@ -2667,7 +3186,9 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         let disabledInfo = try planInfo(disabled)
         XCTAssertEqual(disabledInfo.is_executable, 1)
         XCTAssertEqual(disabledInfo.image_count, 1)
-        XCTAssertFalse(try operations(disabled).contains { $0.object_id == -1 })
+        XCTAssertFalse(try operations(disabled).contains {
+            $0.object_id == bloomObjectId
+        })
 
         let disabledFramebuffers = Dictionary(
             uniqueKeysWithValues: try framebuffers(disabled).map {
@@ -2687,15 +3208,20 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         let enabled = try createPlan(loaded.frameGraph)
         defer { we_scene_frame_plan_destroy(enabled) }
         let enabledInfo = try planInfo(enabled)
-        XCTAssertEqual(enabledInfo.is_executable, 1)
-        XCTAssertEqual(enabledInfo.image_count, 2)
-        XCTAssertEqual(enabledInfo.issue_count, 0)
+        let enabledIssueDescriptions = try issues(enabled).map {
+            "\($0.code.rawValue): \(string($0.message))"
+        }
+        let enabledDiagnostics = enabledIssueDescriptions.joined(separator: " | ")
+        XCTAssertEqual(enabledInfo.is_executable, 1, enabledDiagnostics)
+        XCTAssertEqual(enabledInfo.image_count, 2, enabledDiagnostics)
+        XCTAssertEqual(enabledInfo.issue_count, 0, enabledDiagnostics)
 
         let allOperations = try operations(enabled)
         let bloomOperationIndices = allOperations.indices.filter {
-            allOperations[$0].object_id == -1
+            allOperations[$0].object_id == bloomObjectId
         }
-        XCTAssertEqual(bloomOperationIndices.count, 5)
+        XCTAssertEqual(bloomOperationIndices.count, 5, enabledDiagnostics)
+        guard bloomOperationIndices.count == 5 else { return }
         let bloomOperations = bloomOperationIndices.map { allOperations[$0] }
         XCTAssertTrue(bloomOperations.allSatisfy {
             $0.kind == WE_SCENE_FRAME_OPERATION_RENDER
@@ -2703,7 +3229,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(
             bloomOperations.map { string($0.destination.logical_name) },
             [
-                "_rt_imageLayerComposite_-1_a",
+                "_rt_imageLayerComposite_-2147483648_a",
                 "_rt_4FrameBuffer",
                 "_rt_8FrameBuffer",
                 "_rt_Bloom",
@@ -2738,7 +3264,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(horizontalTextures[0], "scene:_rt_8FrameBuffer")
         XCTAssertEqual(
             combineTextures[0],
-            "object:-1:_rt_imageLayerComposite_-1_a"
+            "object:-2147483648:_rt_imageLayerComposite_-2147483648_a"
         )
         XCTAssertEqual(combineTextures[1], "scene:_rt_Bloom")
 
@@ -2771,8 +3297,61 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         defer { we_scene_frame_plan_destroy(disabledAgain) }
         XCTAssertEqual(try planInfo(disabledAgain).image_count, 1)
         XCTAssertFalse(try operations(disabledAgain).contains {
-            $0.object_id == -1
+            $0.object_id == bloomObjectId
         })
+    }
+
+    func testDynamicLayerAndBloomUseDisjointRuntimeIdentities() throws {
+        var documents = linuxCompatibilityDocuments(bloomEnabled: true)
+        var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
+        var objects = try XCTUnwrap(scene["objects"] as? [[String: Any]])
+        objects[0]["origin"] = [
+            "value": "8 4 0",
+            "script": """
+            export function init(value) {
+                const config = thisScene.getInitialLayerConfig(thisLayer);
+                thisScene.createLayer(config);
+                return value;
+            }
+            """,
+        ]
+        scene["objects"] = objects
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        let plan = try createPlan(
+            loaded.frameGraph,
+            runtime: 0,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        let info = try planInfo(plan)
+        let diagnostics = try issues(plan).map {
+            "\($0.code.rawValue): \(string($0.message))"
+        }.joined(separator: " | ")
+        XCTAssertEqual(info.is_executable, 1, diagnostics)
+        XCTAssertTrue(try images(plan).contains { $0.object_id == -1 })
+        let allOperations = try operations(plan)
+        let bloomOperationIndices = allOperations.indices.filter {
+            allOperations[$0].object_id == Int32.min
+        }
+        XCTAssertEqual(bloomOperationIndices.count, 5, diagnostics)
+        guard bloomOperationIndices.count == 5 else { return }
+        let combineTextures = try textures(
+            plan, operation: bloomOperationIndices[4]
+        )
+        XCTAssertEqual(
+            combineTextures[0],
+            "object:-2147483648:_rt_imageLayerComposite_-2147483648_a"
+        )
     }
 
     func testLinuxColorBlendModeAddsAndRemovesTheFinalCompatibilityPass() throws {

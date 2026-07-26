@@ -449,14 +449,28 @@ std::optional<ScriptMediaSnapshot> mediaSnapshotFromJson(const char* source) {
         throw std::invalid_argument("SceneScript media snapshot JSON must be an object");
     }
     ScriptMediaSnapshot snapshot;
-    if (const auto found = json.find("revision"); found != json.end()) {
+    const auto readRevision = [&json](const char* key) {
+        const auto found = json.find(key);
+        if (found == json.end()) return std::uint64_t{0};
         if (!found->is_number_unsigned() && !found->is_number_integer()) {
-            throw std::invalid_argument("SceneScript media revision must be an integer");
+            throw std::invalid_argument(
+                std::string("SceneScript media ") + key + " must be an integer"
+            );
         }
         const auto revision = found->get<std::int64_t>();
-        if (revision < 0) throw std::invalid_argument("SceneScript media revision must be non-negative");
-        snapshot.revision = static_cast<std::uint64_t>(revision);
-    }
+        if (revision < 0) {
+            throw std::invalid_argument(
+                std::string("SceneScript media ") + key +
+                    " must be non-negative"
+            );
+        }
+        return static_cast<std::uint64_t>(revision);
+    };
+    snapshot.statusRevision = readRevision("statusRevision");
+    snapshot.metadataRevision = readRevision("metadataRevision");
+    snapshot.playbackRevision = readRevision("playbackRevision");
+    snapshot.timelineRevision = readRevision("timelineRevision");
+    snapshot.thumbnailRevision = readRevision("thumbnailRevision");
     if (const auto found = json.find("available"); found != json.end()) {
         if (!found->is_boolean()) throw std::invalid_argument("SceneScript media available must be boolean");
         snapshot.available = found->get<bool>();

@@ -144,14 +144,62 @@ struct UserBinding {
     std::optional<std::string> condition;
 };
 
+struct TimelineAnimationTangent {
+    bool enabled = false;
+    double x = 0.0;
+    double y = 0.0;
+
+    [[nodiscard]] friend bool operator==(
+        const TimelineAnimationTangent& lhs,
+        const TimelineAnimationTangent& rhs
+    ) = default;
+};
+
+struct TimelineAnimationKeyframe {
+    double frame = 0.0;
+    double value = 0.0;
+    TimelineAnimationTangent front;
+    TimelineAnimationTangent back;
+
+    [[nodiscard]] friend bool operator==(
+        const TimelineAnimationKeyframe& lhs,
+        const TimelineAnimationKeyframe& rhs
+    ) = default;
+};
+
+enum class TimelineAnimationMode {
+    loop,
+    mirror,
+    single,
+};
+
+struct TimelineAnimation {
+    std::array<std::vector<TimelineAnimationKeyframe>, 4> curves;
+    double fps = 30.0;
+    double length = 0.0;
+    TimelineAnimationMode mode = TimelineAnimationMode::loop;
+    std::string name;
+    bool startPaused = false;
+    bool wrapLoop = false;
+    bool relative = false;
+    std::optional<std::string> parent;
+    std::vector<std::string> children;
+
+    [[nodiscard]] friend bool operator==(
+        const TimelineAnimation& lhs,
+        const TimelineAnimation& rhs
+    ) = default;
+};
+
 struct DynamicValue {
     RuntimeValue value;
     std::optional<UserBinding> user;
     std::optional<std::string> script;
     std::map<std::string, DynamicValue> scriptProperties;
+    std::optional<TimelineAnimation> animation;
 
     [[nodiscard]] bool isDynamic() const noexcept {
-        return user.has_value() || script.has_value();
+        return user.has_value() || script.has_value() || animation.has_value();
     }
 };
 
@@ -722,6 +770,11 @@ using SceneObjectData =
 struct SceneObject {
     ObjectBase base;
     SceneObjectData data;
+    // The public getInitialLayerConfig() contract returns the authored layer
+    // configuration, including fields that are intentionally immutable in
+    // SceneModel. Retain that source once instead of reconstructing a partial
+    // configuration from renderer state.
+    Value initialConfig;
 };
 
 struct SceneCamera {

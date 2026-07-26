@@ -773,6 +773,8 @@ void RecordProcesses(TIntermediate& intermediate, EShMessages messages, const st
 {
     if ((messages & EShMsgRelaxedErrors) != 0)
         intermediate.addProcess("relaxed-errors");
+    if ((messages & EShMsgHlslCompatibleGlsl) != 0)
+        intermediate.addProcess("hlsl-compatible-glsl");
     if ((messages & EShMsgSuppressWarnings) != 0)
         intermediate.addProcess("suppress-warnings");
     if ((messages & EShMsgKeepUncalled) != 0)
@@ -911,6 +913,10 @@ bool ProcessDeferred(
     }
 
     intermediate.setSource(source);
+    intermediate.setHlslCompatibleGlsl(
+        source == EShSourceGlsl &&
+        (messages & EShMsgHlslCompatibleGlsl) != 0
+    );
     intermediate.setVersion(version);
     intermediate.setProfile(profile);
     intermediate.setSpv(spvVersion);

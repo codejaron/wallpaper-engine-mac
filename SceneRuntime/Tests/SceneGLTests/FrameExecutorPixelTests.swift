@@ -48,6 +48,209 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
     }
 
+    func testFragmentSamplerDefaultOverridesVertexDefault() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform sampler2D g_Texture1; // {"default":"green"}
+            void main() {
+                gl_FragColor = texSample2D(g_Texture1, vec2(0.5, 0.5));
+            }
+            """,
+            vertexSource: """
+            uniform sampler2D g_Texture1; // {"default":"red"}
+            attribute vec3 a_Position;
+            attribute vec2 a_TexCoord;
+            void main() {
+                gl_Position = vec4(a_Position, 1.0);
+            }
+            """,
+            includeUnboundGreenTexture: true
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255]),
+            "Fragment metadata is later in the Linux provider chain and must override the vertex default"
+        )
+    }
+
+    func testUnavailableFragmentSamplerDefaultFallsBackToVertexDefault() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform sampler2D g_Texture1; // {"default":"texture_that_is_not_available"}
+            void main() {
+                gl_FragColor = texSample2D(g_Texture1, vec2(0.5, 0.5));
+            }
+            """,
+            vertexSource: """
+            uniform sampler2D g_Texture1; // {"default":"red"}
+            attribute vec3 a_Position;
+            attribute vec2 a_TexCoord;
+            void main() {
+                gl_Position = vec4(a_Position, 1.0);
+            }
+            """
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 0, 0, 255]),
+            "An unavailable fragment default must not suppress an earlier ready provider"
+        )
+    }
+
+    func testSceneTexturePropertyParticipatesInTheTextureProviderChain() throws {
+        let loaded = try loadFixture(
+            fragmentSource: textureOnlyFragmentShader,
+            includeUnboundGreenTexture: true,
+            sceneTexturePropertyKey: "selected_texture"
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, timeSeconds: 1)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 0, 0, 255]),
+            "An unbound scene-texture property must leave the ordinary material texture available"
+        )
+
+        try setString(
+            loaded.model,
+            key: "selected_texture",
+            value: "green"
+        )
+        try render(loaded.executor, timeSeconds: 2)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255]),
+            "A ready scene-texture property must override the ordinary material texture in the same slot"
+        )
+
+        try setString(
+            loaded.model,
+            key: "selected_texture",
+            value: "texture_that_is_not_available"
+        )
+        try render(loaded.executor, timeSeconds: 3)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 0, 0, 255]),
+            "An unavailable high-priority provider must fall through to the next ready candidate"
+        )
+    }
+
+    func testMediaThumbnailTexturesUseRealCurrentAndPreviousHostPixels() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform sampler2D g_Texture0;
+            uniform sampler2D g_Texture1;
+            void main() {
+                vec4 current = texSample2D(g_Texture0, vec2(0.5, 0.5));
+                vec4 previous = texSample2D(g_Texture1, vec2(0.5, 0.5));
+                gl_FragColor = vec4(
+                    current.g,
+                    previous.r,
+                    current.b + previous.g * 0.5,
+                    1.0
+                );
+            }
+            """,
+            hostTextureNames: [
+                "$mediaThumbnail",
+                "$mediaPreviousThumbnail",
+            ]
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, timeSeconds: 1)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255]),
+            "Absent host pixels must keep the ordinary material texture as the provider fallback"
+        )
+
+        try setMediaThumbnail(
+            loaded.executor,
+            revision: 1,
+            pixel: [0, 255, 0, 255],
+            overwriteBorrowedPixelsAfterSet: true
+        )
+        try render(loaded.executor, timeSeconds: 2)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 255, 0, 255]),
+            "The current cover must sample copied host pixels while previous still falls back"
+        )
+
+        try setMediaThumbnail(
+            loaded.executor,
+            revision: 2,
+            pixel: [0, 0, 255, 255]
+        )
+        try render(loaded.executor, timeSeconds: 3)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 0, 255, 255]),
+            "A new album-art revision must preserve the first cover as $mediaPreviousThumbnail"
+        )
+
+        var error: WESceneRuntimeErrorRef?
+        XCTAssertEqual(
+            we_scene_frame_executor_clear_media_thumbnail(
+                loaded.executor, 3, &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertNil(error)
+        try render(loaded.executor, timeSeconds: 4)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 0, 0, 255]),
+            "Clearing a new cover revision must expose the normal fallback as current and retain the last cover as previous"
+        )
+    }
+
+    func testMediaThumbnailRevisionIdentifiesImmutablePixels() throws {
+        let loaded = try loadFixture(fragmentSource: constantRedFragmentShader)
+        defer { destroy(loaded) }
+
+        try setMediaThumbnail(
+            loaded.executor,
+            revision: 7,
+            pixel: [0, 255, 0, 255]
+        )
+        try setMediaThumbnail(
+            loaded.executor,
+            revision: 7,
+            pixel: [0, 255, 0, 255]
+        )
+
+        XCTAssertThrowsError(
+            try setMediaThumbnail(
+                loaded.executor,
+                revision: 7,
+                pixel: [0, 0, 255, 255]
+            )
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("immutable"))
+        }
+
+        var error: WESceneRuntimeErrorRef?
+        XCTAssertEqual(
+            we_scene_frame_executor_clear_media_thumbnail(
+                loaded.executor, 7, &error
+            ),
+            0
+        )
+        XCTAssertTrue(errorMessage(error).contains("immutable"))
+        we_scene_runtime_error_destroy(error)
+    }
+
     func testActiveSamplerWithoutFrameTextureOrDefaultSkipsObject() throws {
         let loaded = try loadFixture(
             fragmentSource: """
@@ -294,7 +497,7 @@ final class FrameExecutorPixelTests: XCTestCase {
     }
 
     func testPuppetMeshVersionsRenderAnIndexedPartialImage() throws {
-        for version in ["MDLV0021", "MDLV0023"] {
+        for version in ["MDLV0013", "MDLV0021", "MDLV0023"] {
             let loaded = try loadFixture(
                 fragmentSource: constantRedFragmentShader,
                 puppetData: makePuppetMesh(version: version)
@@ -415,6 +618,27 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertEqual(try readPixels(loaded.executor), repeatedPixel([0, 255, 0, 255]))
     }
 
+    func testDynamicImageCloneExecutesAsDistinctRuntimeObject() throws {
+        let loaded = try loadFixture(
+            fragmentSource: validFragmentShader,
+            textureAnimationScript: """
+            export function init(value) {
+                const config = thisScene.getInitialLayerConfig(thisLayer);
+                thisScene.createLayer(config);
+                return value;
+            }
+            """
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 0, 0, 255])
+        )
+    }
+
     func testLinuxCommonBuiltinContractIsBoundForImagePasses() throws {
         let loaded = try loadFixture(fragmentSource: commonBuiltinContractFragmentShader)
         defer { destroy(loaded) }
@@ -424,6 +648,37 @@ final class FrameExecutorPixelTests: XCTestCase {
             try readPixels(loaded.executor),
             repeatedPixel([0, 255, 0, 255]),
             "The Linux common builtin contract must be populated before an image draw"
+        )
+    }
+
+    func testLayerAlphaIsPackedIntoColor4ForVersionedImageShaders() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform float g_UserAlpha;
+            uniform vec4 g_Color4;
+            varying vec2 v_TexCoord;
+            void main() {
+                bool alphaMatches = abs(g_UserAlpha - 0.625) < 0.0001
+                    && abs(g_Color4.a - 0.625) < 0.0001;
+                gl_FragColor = alphaMatches
+                    ? vec4(0.0, 1.0, 0.0, 1.0)
+                    : vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            """,
+            scriptedPointerAlpha: true
+        )
+        defer { destroy(loaded) }
+
+        try render(
+            loaded.executor,
+            pointerX: 0.5,
+            pointerY: 0.5,
+            timeSeconds: 1
+        )
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255]),
+            "Both legacy and versioned image shader opacity uniforms must carry the evaluated layer alpha"
         )
     }
 
@@ -1754,6 +2009,148 @@ final class FrameExecutorPixelTests: XCTestCase {
         })
     }
 
+    func testTextHorizontalAlignmentUsesAuthoredLayoutBounds() throws {
+        let left = try loadTextFixture(
+            font: "systemfont_arial",
+            horizontalAlignment: "left",
+            origin: "32 32 0",
+            size: "56 40"
+        )
+        defer { destroy(left) }
+        let right = try loadTextFixture(
+            font: "systemfont_arial",
+            horizontalAlignment: "right",
+            origin: "32 32 0",
+            size: "56 40"
+        )
+        defer { destroy(right) }
+
+        try render(left.executor)
+        try render(right.executor)
+        try assertNoExecutorIssues(left.executor)
+        try assertNoExecutorIssues(right.executor)
+        let leftBounds = try XCTUnwrap(
+            redPixelBounds(
+                try readPixels(left.executor),
+                width: Int(we_scene_frame_executor_width(left.executor))
+            )
+        )
+        let rightBounds = try XCTUnwrap(
+            redPixelBounds(
+                try readPixels(right.executor),
+                width: Int(we_scene_frame_executor_width(right.executor))
+            )
+        )
+        XCTAssertLessThan(leftBounds.minX, rightBounds.minX)
+        XCTAssertLessThan(leftBounds.maxX, rightBounds.maxX)
+    }
+
+    func testTextVerticalAlignmentUsesAuthoredLayoutBounds() throws {
+        let top = try loadTextFixture(
+            font: "systemfont_arial",
+            verticalAlignment: "top",
+            origin: "32 32 0",
+            size: "40 56"
+        )
+        defer { destroy(top) }
+        let bottom = try loadTextFixture(
+            font: "systemfont_arial",
+            verticalAlignment: "bottom",
+            origin: "32 32 0",
+            size: "40 56"
+        )
+        defer { destroy(bottom) }
+
+        try render(top.executor)
+        try render(bottom.executor)
+        try assertNoExecutorIssues(top.executor)
+        try assertNoExecutorIssues(bottom.executor)
+        let topBounds = try XCTUnwrap(
+            redPixelBounds(
+                try readPixels(top.executor),
+                width: Int(we_scene_frame_executor_width(top.executor))
+            )
+        )
+        let bottomBounds = try XCTUnwrap(
+            redPixelBounds(
+                try readPixels(bottom.executor),
+                width: Int(we_scene_frame_executor_width(bottom.executor))
+            )
+        )
+        XCTAssertLessThan(topBounds.minY, bottomBounds.minY)
+        XCTAssertLessThan(topBounds.maxY, bottomBounds.maxY)
+    }
+
+    func testTextWithImplicitLayoutSizeStillRenders() throws {
+        let loaded = try loadTextFixture(
+            font: "systemfont_arial",
+            origin: "32 32 0",
+            size: "0 0"
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertNotNil(
+            redPixelBounds(
+                try readPixels(loaded.executor),
+                width: Int(we_scene_frame_executor_width(loaded.executor))
+            )
+        )
+    }
+
+    func testTextRasterizationCompensatesForSmallAuthoredScale() throws {
+        let loaded = try loadTextFixture(
+            font: "systemfont_arial",
+            origin: "32 32 0",
+            scale: "0.05 0.05 1",
+            size: "0 0"
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        let bounds = try XCTUnwrap(
+            redPixelBounds(
+                try readPixels(loaded.executor),
+                width: Int(we_scene_frame_executor_width(loaded.executor))
+            )
+        )
+        XCTAssertGreaterThan(bounds.pixelCount, 8)
+    }
+
+    func testTextGlyphCoverageUsesWallpaperEngineTopLeftOrientation() throws {
+        let loaded = try loadTextFixture(
+            font: "systemfont_arial",
+            origin: "32 32 0",
+            size: "0 0",
+            text: "F"
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        let pixels = try readPixels(loaded.executor)
+        let width = Int(we_scene_frame_executor_width(loaded.executor))
+        let bounds = try XCTUnwrap(redPixelBounds(pixels, width: width))
+        let midpointX = (bounds.minX + bounds.maxX) / 2
+        let midpointY = (bounds.minY + bounds.maxY) / 2
+        var leftPixels = 0
+        var rightPixels = 0
+        var topPixels = 0
+        var bottomPixels = 0
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            guard pixels[offset] > 0 else { continue }
+            let pixel = offset / 4
+            let x = pixel % width
+            let y = pixel / width
+            if x <= midpointX { leftPixels += 1 } else { rightPixels += 1 }
+            if y <= midpointY { topPixels += 1 } else { bottomPixels += 1 }
+        }
+        XCTAssertGreaterThan(leftPixels, rightPixels)
+        XCTAssertGreaterThan(topPixels, bottomPixels)
+    }
+
     func testAnimatedTextureUsesImageFramesAndFixedSHARightClosedBoundaries() throws {
         let texture = makeAnimatedRGBA8Texture2x2(
             images: [
@@ -2230,7 +2627,9 @@ final class FrameExecutorPixelTests: XCTestCase {
         puppetData: Data? = nil,
         scriptedAudioAmount: Bool = false,
         scriptedMediaAmount: Bool = false,
-        textureAnimationScript: String? = nil
+        textureAnimationScript: String? = nil,
+        sceneTexturePropertyKey: String? = nil,
+        hostTextureNames: [String] = []
     ) throws -> RuntimePipeline {
         let fixture = try makeFixture(
             fragmentSource: fragmentSource,
@@ -2265,7 +2664,9 @@ final class FrameExecutorPixelTests: XCTestCase {
             puppetData: puppetData,
             scriptedAudioAmount: scriptedAudioAmount,
             scriptedMediaAmount: scriptedMediaAmount,
-            textureAnimationScript: textureAnimationScript
+            textureAnimationScript: textureAnimationScript,
+            sceneTexturePropertyKey: sceneTexturePropertyKey,
+            hostTextureNames: hostTextureNames
         )
         do {
             var error: WESceneRuntimeErrorRef?
@@ -2328,7 +2729,15 @@ final class FrameExecutorPixelTests: XCTestCase {
         }
     }
 
-    private func loadTextFixture(font: String) throws -> RuntimePipeline {
+    private func loadTextFixture(
+        font: String,
+        horizontalAlignment: String = "center",
+        verticalAlignment: String = "center",
+        origin: String = "0 0 0",
+        scale: String = "1 1 1",
+        size: String = "64 64",
+        text: String = "I"
+    ) throws -> RuntimePipeline {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let assets = root.appendingPathComponent("assets", isDirectory: true)
@@ -2347,10 +2756,10 @@ final class FrameExecutorPixelTests: XCTestCase {
             ],
             "objects": [[
                 "alpha": 1, "color": "255 0 0 255", "font": font,
-                "horizontalalign": "center", "id": 1, "name": "Text",
-                "origin": "0 0 0", "padding": "0 0", "pointsize": 20,
-                "size": "64 64", "spacing": "0 0", "text": "I",
-                "verticalalign": "center", "visible": true,
+                "horizontalalign": horizontalAlignment, "id": 1, "name": "Text",
+                "origin": origin, "padding": "0 0", "pointsize": 20,
+                "scale": scale, "size": size, "spacing": "0 0", "text": text,
+                "verticalalign": verticalAlignment, "visible": true,
             ]],
             "version": 1,
         ]
@@ -2465,7 +2874,11 @@ final class FrameExecutorPixelTests: XCTestCase {
         }
 
         var snapshot = WESceneMediaSnapshot(
-            revision: revision,
+            status_revision: revision,
+            metadata_revision: revision,
+            playback_revision: revision,
+            timeline_revision: revision,
+            thumbnail_revision: revision,
             available: 1,
             playback_state: playbackState,
             title: UnsafePointer(strings[0]),
@@ -2498,6 +2911,43 @@ final class FrameExecutorPixelTests: XCTestCase {
                     pointer[index] = 88
                 }
             }
+        }
+    }
+
+    private func setMediaThumbnail(
+        _ executor: WESceneFrameExecutorRef,
+        revision: UInt64,
+        pixel: [UInt8],
+        overwriteBorrowedPixelsAfterSet: Bool = false
+    ) throws {
+        precondition(pixel.count == 4)
+        let bytesPerRow = 12
+        var pixels = [UInt8]()
+        for _ in 0..<2 {
+            pixels.append(contentsOf: pixel)
+            pixels.append(contentsOf: pixel)
+            pixels.append(contentsOf: [11, 22, 33, 44])
+        }
+        var error: WESceneRuntimeErrorRef?
+        let succeeded = pixels.withUnsafeBufferPointer { storage in
+            var thumbnail = WESceneMediaThumbnailRGBA8(
+                revision: revision,
+                width: 2,
+                height: 2,
+                bytes_per_row: UInt32(bytesPerRow),
+                pixels: storage.baseAddress,
+                pixel_length: storage.count
+            )
+            return we_scene_frame_executor_set_media_thumbnail_rgba8(
+                executor, &thumbnail, &error
+            )
+        }
+        guard succeeded == 1 else {
+            throw failure("media thumbnail", error)
+        }
+        XCTAssertNil(error)
+        if overwriteBorrowedPixelsAfterSet {
+            pixels = [UInt8](repeating: 255, count: pixels.count)
         }
     }
 
@@ -2598,6 +3048,35 @@ final class FrameExecutorPixelTests: XCTestCase {
         guard result == 1 else { throw failure("readback", error) }
         XCTAssertNil(error)
         return pixels
+    }
+
+    private struct PixelBounds {
+        var minX: Int
+        var maxX: Int
+        var minY: Int
+        var maxY: Int
+        var pixelCount: Int
+    }
+
+    private func redPixelBounds(_ pixels: [UInt8], width: Int) -> PixelBounds? {
+        precondition(width > 0)
+        var result: PixelBounds?
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            guard pixels[offset] > 0 else { continue }
+            let pixel = offset / 4
+            let x = pixel % width
+            let y = pixel / width
+            var bounds = result ?? PixelBounds(
+                minX: x, maxX: x, minY: y, maxY: y, pixelCount: 0
+            )
+            bounds.minX = min(bounds.minX, x)
+            bounds.maxX = max(bounds.maxX, x)
+            bounds.minY = min(bounds.minY, y)
+            bounds.maxY = max(bounds.maxY, y)
+            bounds.pixelCount += 1
+            result = bounds
+        }
+        return result
     }
 
     private func lastRevision(_ executor: WESceneFrameExecutorRef) throws -> UInt64 {
@@ -2811,7 +3290,9 @@ final class FrameExecutorPixelTests: XCTestCase {
         puppetData: Data? = nil,
         scriptedAudioAmount: Bool = false,
         scriptedMediaAmount: Bool = false,
-        textureAnimationScript: String? = nil
+        textureAnimationScript: String? = nil,
+        sceneTexturePropertyKey: String? = nil,
+        hostTextureNames: [String] = []
     ) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -2958,6 +3439,13 @@ final class FrameExecutorPixelTests: XCTestCase {
             properties["atomic_failure_enabled"] = [
                 "text": "Atomic failure enabled", "type": "bool",
                 "value": false,
+            ]
+        }
+        if let sceneTexturePropertyKey {
+            properties[sceneTexturePropertyKey] = [
+                "text": "Texture",
+                "type": "scenetexture",
+                "value": "",
             ]
         }
         let project: [String: Any] = [
@@ -3214,6 +3702,14 @@ final class FrameExecutorPixelTests: XCTestCase {
         }
         if commandMode != .proceduralClear {
             basePass["textures"] = includeSecondTexture ? ["red", "green"] : ["red"]
+        }
+        if let sceneTexturePropertyKey {
+            basePass["usertextures"] = [[
+                "name": sceneTexturePropertyKey,
+                "type": "scenetexture",
+            ]]
+        } else if !hostTextureNames.isEmpty {
+            basePass["usertextures"] = hostTextureNames
         }
         let material: [String: Any] = [
             "passes": [basePass],
@@ -3548,7 +4044,18 @@ final class FrameExecutorPixelTests: XCTestCase {
     }
 
     private func makePuppetMesh(version: String = "MDLV0021") -> Data {
-        precondition(version == "MDLV0021" || version == "MDLV0023")
+        let vertexStride: Int
+        let uvOffset: Int
+        switch version {
+        case "MDLV0013":
+            vertexStride = 52
+            uvOffset = 44
+        case "MDLV0021", "MDLV0023":
+            vertexStride = 80
+            uvOffset = 72
+        default:
+            preconditionFailure("Unsupported synthetic puppet model version")
+        }
         let vertices: [(Float, Float, Float, Float, Float)] = [
             (-1, 1, 0, 0, 0),
             (1, 1, 0, 1, 0),
@@ -3557,16 +4064,16 @@ final class FrameExecutorPixelTests: XCTestCase {
         var result = Data(version.utf8)
         result.append(0)
         appendUInt32(0, to: &result)
-        appendUInt32(UInt32(vertices.count * 80), to: &result)
+        appendUInt32(UInt32(vertices.count * vertexStride), to: &result)
         for (x, y, z, u, v) in vertices {
             let start = result.count
             appendFloat32(x, to: &result)
             appendFloat32(y, to: &result)
             appendFloat32(z, to: &result)
-            result.append(Data(repeating: 0, count: 60))
+            result.append(Data(repeating: 0, count: uvOffset - 12))
             appendFloat32(u, to: &result)
             appendFloat32(v, to: &result)
-            precondition(result.count - start == 80)
+            precondition(result.count - start == vertexStride)
         }
         appendUInt32(6, to: &result)
         appendUInt16(0, to: &result)

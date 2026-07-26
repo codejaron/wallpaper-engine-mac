@@ -17,7 +17,12 @@
 
 namespace we::scene {
 
-enum class FrameResourceKind { assetTexture, framebuffer };
+enum class FrameResourceKind {
+    assetTexture,
+    framebuffer,
+    userPropertyTexture,
+    hostTexture,
+};
 enum class FramebufferFormat { rgba8, r8, rg16f, r16f };
 enum class FramebufferWrapMode { clampToEdge, clampToBorder, repeat };
 enum class FrameGeometryKind {
@@ -98,6 +103,10 @@ struct FrameResourceRef {
     // authored in Wallpaper Engine JSON for diagnostics and introspection.
     std::string id;
     std::string logicalName;
+    // Only userPropertyTexture uses resolvedAssetName. The stable id remains
+    // the property key while each immutable frame captures the selected asset
+    // name separately, so a property update cannot alias an old GPU resource.
+    std::string resolvedAssetName;
 
     [[nodiscard]] friend bool operator==(
         const FrameResourceRef& lhs,
@@ -108,6 +117,41 @@ struct FrameResourceRef {
 [[nodiscard]] FrameResourceRef frameAssetTextureResource(
     std::string_view name
 );
+
+enum class FrameTextureCandidateSource {
+    shaderVertexDefault,
+    shaderFragmentDefault,
+    materialTexture,
+    materialUserTexture,
+    overrideTexture,
+    overrideUserTexture,
+    bind,
+};
+
+struct FrameTextureCandidate final {
+    FrameTextureCandidateSource source =
+        FrameTextureCandidateSource::materialTexture;
+    FrameResourceRef resource;
+
+    [[nodiscard]] friend bool operator==(
+        const FrameTextureCandidate& lhs,
+        const FrameTextureCandidate& rhs
+    ) = default;
+};
+
+// Candidates are stored from lowest to highest precedence. Readiness is a GPU
+// execution concern: the executor walks the vector in reverse and only falls
+// back to previousInput/input after every authored/default provider is
+// unavailable. This is the TextureProvider chain used by the Linux runtime,
+// represented as immutable frame data instead of raw renderer pointers.
+struct FrameTextureBinding final {
+    std::vector<FrameTextureCandidate> candidates;
+
+    [[nodiscard]] friend bool operator==(
+        const FrameTextureBinding& lhs,
+        const FrameTextureBinding& rhs
+    ) = default;
+};
 
 struct FramebufferDescriptor {
     FrameResourceRef resource;
@@ -219,7 +263,7 @@ struct FrameParticleDescriptor {
     DepthMode depthTest = DepthMode::disabled;
     DepthMode depthWrite = DepthMode::disabled;
     FrameResourceRef texture0;
-    std::map<int, FrameResourceRef> textures;
+    std::map<int, FrameTextureBinding> textures;
     ComboMap combos;
     std::map<std::string, EvaluatedValue> constants;
     FrameVector2 parallaxDepth;
@@ -266,7 +310,7 @@ struct FrameRenderPass {
     FrameResourceRef input;
     std::optional<FrameResourceRef> previousInput;
     FrameResourceRef destination;
-    std::map<int, FrameResourceRef> textures;
+    std::map<int, FrameTextureBinding> textures;
     ComboMap combos;
     std::map<std::string, EvaluatedValue> constants;
     bool writeAlpha = true;

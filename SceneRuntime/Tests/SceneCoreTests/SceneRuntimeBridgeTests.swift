@@ -73,6 +73,107 @@ final class SceneRuntimeBridgeTests: XCTestCase {
         )
     }
 
+    func testWallpaperEngineShaderForkAppliesHLSLVectorShapeSemantics() throws {
+        let vertex = """
+        #version 330
+        layout(location = 0) in vec2 aPosition;
+        out vec2 vUV;
+        vec2 narrowReturn(vec4 value) { return value; }
+        float consumeNarrow(vec2 value) { return value.x + value.y; }
+        void main() {
+            vec4 wide = vec4(aPosition, 0.25, 1.0);
+            vec2 assigned;
+            assigned = wide;
+            vec2 initialized = wide;
+            vec2 mixedWidth = wide + vec2(0.0);
+            float called = consumeNarrow(wide);
+            vUV = assigned + initialized + mixedWidth
+                + narrowReturn(wide) + vec2(called * 0.0);
+            gl_Position = vec4(aPosition, 0.0, 1.0);
+        }
+        """
+        let fragment = """
+        #version 330
+        in vec2 vUV;
+        out vec4 outColor;
+        void main() { outColor = vec4(vUV, 0.0, 1.0); }
+        """
+
+        var error: WESceneRuntimeErrorRef?
+        let translation = vertex.withCString { vertexSource in
+            fragment.withCString { fragmentSource in
+                "hlsl-shapes.vert".withCString { vertexName in
+                    "hlsl-shapes.frag".withCString { fragmentName in
+                        var sources = WESceneShaderSources(
+                            vertex_source: vertexSource,
+                            fragment_source: fragmentSource,
+                            vertex_name: vertexName,
+                            fragment_name: fragmentName
+                        )
+                        return we_scene_shader_translate(&sources, &error)
+                    }
+                }
+            }
+        }
+        guard let translation else {
+            let message = errorMessage(error)
+            we_scene_runtime_error_destroy(error)
+            XCTFail("HLSL-compatible vector translation failed: \(message)")
+            throw TestFailure.shaderTranslation
+        }
+        defer { we_scene_shader_translation_destroy(translation) }
+        XCTAssertNil(error)
+    }
+
+    func testShaderTranslationAllowsGlobalUniformAfterIncludedHelper() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let assets = root.appendingPathComponent("assets", isDirectory: true)
+        let packageURL = root.appendingPathComponent("scene.pkg")
+        try FileManager.default.createDirectory(
+            at: assets.appendingPathComponent("shaders", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let vertex = """
+        attribute vec3 a_Position;
+        attribute vec2 a_TexCoord;
+        varying vec2 v_TexCoord;
+        void main() {
+            gl_Position = vec4(a_Position, 1.0);
+            v_TexCoord = a_TexCoord;
+        }
+        """
+        let helper = """
+        vec4 sampleIncludedTexture(vec2 uv) {
+            return texSample2D(g_Texture0, uv);
+        }
+        """
+        let fragment = """
+        #include "late-uniform-helper.h"
+        varying vec2 v_TexCoord;
+        uniform sampler2D g_Texture0;
+        void main() {
+            gl_FragColor = sampleIncludedTexture(v_TexCoord);
+        }
+        """
+        try makePackage([
+            ("shaders/late-uniform.vert", Data(vertex.utf8)),
+            ("shaders/late-uniform.frag", Data(fragment.utf8)),
+            ("shaders/late-uniform-helper.h", Data(helper.utf8)),
+        ]).write(to: packageURL)
+        let runtime = try createRuntime(assets: assets, package: packageURL)
+        defer { we_scene_runtime_destroy(runtime) }
+
+        let translation = try translateShaderFiles(
+            runtime,
+            vertex: "shaders/late-uniform.vert",
+            fragment: "shaders/late-uniform.frag"
+        )
+        we_scene_shader_translation_destroy(translation)
+    }
+
     func testShaderTranslationNarrowsWideVertexVaryingToFragmentContract() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -126,10 +227,76 @@ final class SceneRuntimeBridgeTests: XCTestCase {
         }
         defer { we_scene_shader_translation_destroy(translation) }
         XCTAssertNil(error)
+        let translatedVertex = runtimeString(
+            we_scene_shader_translation_vertex_source(translation)
+        )
         XCTAssertTrue(
-            runtimeString(
-                we_scene_shader_translation_preprocessed_vertex_source(translation)
-            ).contains("varying vec2 v_TexCoord")
+            translatedVertex.contains("out vec2 v_TexCoord"),
+            translatedVertex
+        )
+    }
+
+    func testShaderTranslationExpandsNarrowVertexVaryingToFragmentContract() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let assets = root.appendingPathComponent("assets", isDirectory: true)
+        let packageURL = root.appendingPathComponent("scene.pkg")
+        try FileManager.default.createDirectory(
+            at: assets.appendingPathComponent("shaders", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let vertex = """
+        attribute vec3 a_Position;
+        attribute vec2 a_TexCoord;
+        varying /* producer precision */ highp vec2 v_EffectCoord;
+        void main() {
+            gl_Position = vec4(a_Position, 1.0);
+            v_EffectCoord = mix(
+                a_TexCoord,
+                vec2(clamp(a_Position.x, 0.0, 1.0)),
+                0.5
+            );
+        }
+        """
+        let fragment = """
+        varying mediump vec4 v_EffectCoord;
+        void main() {
+            gl_FragColor = v_EffectCoord;
+        }
+        """
+        try makePackage([
+            ("shaders/narrow-varying.vert", Data(vertex.utf8)),
+            ("shaders/wide-varying.frag", Data(fragment.utf8)),
+        ]).write(to: packageURL)
+        let runtime = try createRuntime(assets: assets, package: packageURL)
+        defer { we_scene_runtime_destroy(runtime) }
+
+        var error: WESceneRuntimeErrorRef?
+        let translation = "shaders/narrow-varying.vert".withCString { vertexPath in
+            "shaders/wide-varying.frag".withCString { fragmentPath in
+                we_scene_runtime_shader_translate_files(
+                    runtime,
+                    vertexPath,
+                    fragmentPath,
+                    &error
+                )
+            }
+        }
+        guard let translation else {
+            let message = errorMessage(error)
+            we_scene_runtime_error_destroy(error)
+            XCTFail("Shader translation failed: \(message)")
+            throw TestFailure.shaderTranslation
+        }
+        defer { we_scene_shader_translation_destroy(translation) }
+        XCTAssertNil(error)
+        let translatedVertex = runtimeString(
+            we_scene_shader_translation_vertex_source(translation)
+        )
+        XCTAssertTrue(
+            translatedVertex.contains("out vec4 v_EffectCoord"),
+            translatedVertex
         )
     }
 
@@ -203,6 +370,66 @@ final class SceneRuntimeBridgeTests: XCTestCase {
         )
         XCTAssertTrue(preprocessedVertex.contains("#define NOISE 1"), preprocessedVertex)
         XCTAssertTrue(preprocessedFragment.contains("#define NOISE 1"), preprocessedFragment)
+    }
+
+    func testShaderTranslationIgnoresInactiveVaryingDeclarations() throws {
+        for pbrMasks in [0, 1] {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let assets = root.appendingPathComponent("assets", isDirectory: true)
+            let packageURL = root.appendingPathComponent("scene.pkg")
+            try FileManager.default.createDirectory(
+                at: assets.appendingPathComponent("shaders", isDirectory: true),
+                withIntermediateDirectories: true
+            )
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let vertex = """
+            // [COMBO] {"combo":"PBRMASKS","default":\(pbrMasks)}
+            attribute vec3 a_Position;
+            attribute vec2 a_TexCoord;
+            #if PBRMASKS == 1
+            varying vec4 v_TexCoord;
+            #else
+            varying vec2 v_TexCoord;
+            #endif
+            void main() {
+                gl_Position = vec4(a_Position, 1.0);
+            #if PBRMASKS == 1
+                v_TexCoord = vec4(a_TexCoord, 0.0, 1.0);
+            #else
+                v_TexCoord = a_TexCoord;
+            #endif
+            }
+            """
+            let fragment = """
+            #if PBRMASKS == 1
+            varying vec4 v_TexCoord;
+            #else
+            varying vec2 v_TexCoord;
+            #endif
+            void main() {
+            #if PBRMASKS == 1
+                gl_FragColor = v_TexCoord;
+            #else
+                gl_FragColor = vec4(v_TexCoord, 0.0, 1.0);
+            #endif
+            }
+            """
+            try makePackage([
+                ("shaders/conditional-varying.vert", Data(vertex.utf8)),
+                ("shaders/conditional-varying.frag", Data(fragment.utf8)),
+            ]).write(to: packageURL)
+            let runtime = try createRuntime(assets: assets, package: packageURL)
+            defer { we_scene_runtime_destroy(runtime) }
+
+            let translation = try translateShaderFiles(
+                runtime,
+                vertex: "shaders/conditional-varying.vert",
+                fragment: "shaders/conditional-varying.frag"
+            )
+            we_scene_shader_translation_destroy(translation)
+        }
     }
 
     func testShaderParseFailurePreservesStageAndSourceName() {

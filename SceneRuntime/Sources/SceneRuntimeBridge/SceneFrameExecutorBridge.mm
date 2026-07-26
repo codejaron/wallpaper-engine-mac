@@ -237,7 +237,11 @@ script::ScriptMediaSnapshot mediaSnapshot(
         );
     }
     return {
-        .revision = input.revision,
+        .statusRevision = input.status_revision,
+        .metadataRevision = input.metadata_revision,
+        .playbackRevision = input.playback_revision,
+        .timelineRevision = input.timeline_revision,
+        .thumbnailRevision = input.thumbnail_revision,
         .available = available,
         .playbackState = mediaPlaybackState(input.playback_state),
         .title = requireString(input.title, "title"),
@@ -258,6 +262,77 @@ script::ScriptMediaSnapshot mediaSnapshot(
             input.high_contrast_color, "high contrast color"
         ),
     };
+}
+
+gl::MediaThumbnailRGBA8 mediaThumbnailRGBA8(
+    const WESceneMediaThumbnailRGBA8& input
+) {
+    if (input.width == 0 || input.height == 0) {
+        throw gl::Error(
+            gl::ErrorCode::invalidArgument,
+            "Scene media thumbnail dimensions must be greater than zero"
+        );
+    }
+    if (input.pixels == nullptr) {
+        throw gl::Error(
+            gl::ErrorCode::invalidArgument,
+            "Scene media thumbnail pixels are required"
+        );
+    }
+    const std::size_t minimumRowBytes =
+        static_cast<std::size_t>(input.width) * 4;
+    if (input.bytes_per_row < minimumRowBytes) {
+        throw gl::Error(
+            gl::ErrorCode::invalidArgument,
+            "Scene media thumbnail row bytes are smaller than one RGBA8 row"
+        );
+    }
+    if (static_cast<std::size_t>(input.bytes_per_row) >
+        std::numeric_limits<std::size_t>::max() / input.height) {
+        throw gl::Error(
+            gl::ErrorCode::invalidArgument,
+            "Scene media thumbnail storage length overflows size_t"
+        );
+    }
+    const std::size_t borrowedLength =
+        static_cast<std::size_t>(input.bytes_per_row) * input.height;
+    if (input.pixel_length != borrowedLength) {
+        throw gl::Error(
+            gl::ErrorCode::invalidArgument,
+            "Scene media thumbnail pixel length does not match its row layout"
+        );
+    }
+    if (minimumRowBytes >
+        std::numeric_limits<std::size_t>::max() / input.height) {
+        throw gl::Error(
+            gl::ErrorCode::invalidArgument,
+            "Scene media thumbnail packed length overflows size_t"
+        );
+    }
+    const std::size_t packedLength = minimumRowBytes * input.height;
+    if (packedLength > 256 * 1024 * 1024) {
+        throw gl::Error(
+            gl::ErrorCode::invalidArgument,
+            "Scene media thumbnail exceeds the 256 MiB allocation limit"
+        );
+    }
+
+    gl::MediaThumbnailRGBA8 result{
+        .revision = input.revision,
+        .width = input.width,
+        .height = input.height,
+        .pixels = std::vector<std::uint8_t>(packedLength),
+    };
+    for (std::uint32_t row = 0; row < input.height; ++row) {
+        std::copy_n(
+            input.pixels + static_cast<std::size_t>(row) *
+                input.bytes_per_row,
+            minimumRowBytes,
+            result.pixels.data() + static_cast<std::size_t>(row) *
+                minimumRowBytes
+        );
+    }
+    return result;
 }
 
 bool requireAudioSpectrum(
@@ -709,6 +784,78 @@ extern "C" int we_scene_frame_executor_clear_media_snapshot(
     if (!requireExecutor(executor, out_error)) return 0;
     executor->executor->setMediaSnapshot(std::nullopt);
     return 1;
+}
+
+extern "C" int we_scene_frame_executor_set_media_thumbnail_rgba8(
+    WESceneFrameExecutorRef executor,
+    const WESceneMediaThumbnailRGBA8* thumbnail,
+    WESceneRuntimeErrorRef* out_error
+) {
+    clearError(out_error);
+    if (!requireExecutor(executor, out_error)) return 0;
+    if (thumbnail == nullptr) {
+        assignError(
+            out_error,
+            WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+            "Scene media thumbnail is required"
+        );
+        return 0;
+    }
+    try {
+        executor->executor->setMediaThumbnail(
+            mediaThumbnailRGBA8(*thumbnail)
+        );
+        return 1;
+    } catch (const gl::Error& error) {
+        if (error.code() == gl::ErrorCode::invalidArgument) {
+            assignError(
+                out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+                error.what()
+            );
+        } else {
+            assignGLError(out_error, error);
+        }
+    } catch (const std::exception& error) {
+        assignExceptionError(
+            out_error, "copying a Scene media thumbnail", error.what()
+        );
+    } catch (...) {
+        assignExceptionError(
+            out_error, "copying a Scene media thumbnail", nullptr
+        );
+    }
+    return 0;
+}
+
+extern "C" int we_scene_frame_executor_clear_media_thumbnail(
+    WESceneFrameExecutorRef executor,
+    uint64_t revision,
+    WESceneRuntimeErrorRef* out_error
+) {
+    clearError(out_error);
+    if (!requireExecutor(executor, out_error)) return 0;
+    try {
+        executor->executor->clearMediaThumbnail(revision);
+        return 1;
+    } catch (const gl::Error& error) {
+        if (error.code() == gl::ErrorCode::invalidArgument) {
+            assignError(
+                out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+                error.what()
+            );
+        } else {
+            assignGLError(out_error, error);
+        }
+    } catch (const std::exception& error) {
+        assignExceptionError(
+            out_error, "clearing a Scene media thumbnail", error.what()
+        );
+    } catch (...) {
+        assignExceptionError(
+            out_error, "clearing a Scene media thumbnail", nullptr
+        );
+    }
+    return 0;
 }
 
 extern "C" int we_scene_frame_executor_render(

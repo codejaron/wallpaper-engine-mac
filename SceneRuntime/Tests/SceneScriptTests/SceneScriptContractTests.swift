@@ -2591,7 +2591,7 @@ final class SceneScriptContractTests: XCTestCase {
         XCTAssertTrue(message(error).contains("async cursorClick"))
     }
 
-    func testMediaSnapshotEventsExposeOfficialFieldsAndDeduplicateRevision() throws {
+    func testMediaSnapshotEventsExposeOfficialFieldsAndDeduplicateIndependentRevisions() throws {
         let instance = try makeInstance(
             source: """
             const calls = [];
@@ -2612,8 +2612,9 @@ final class SceneScriptContractTests: XCTestCase {
                 calls.push('playback');
             }
             export function mediaTimelineChanged(event) {
-                require(event.position === 1.25 && event.duration === 4.5, 'timeline fields');
-                calls.push('timeline');
+                require((event.position === 1.25 || event.position === 2.5)
+                    && event.duration === 4.5, 'timeline fields');
+                calls.push('timeline:' + event.position);
             }
             export function mediaThumbnailChanged(event) {
                 require(event.hasThumbnail === true, 'thumbnail flag');
@@ -2630,27 +2631,36 @@ final class SceneScriptContractTests: XCTestCase {
         defer { we_scene_script_test_destroy(instance) }
 
         let first = #"""
-        {"revision":1,"available":true,"playbackState":1,"title":"Song","artist":"Artist","contentType":"music","albumTitle":"","subTitle":"","albumArtist":"","genres":"","position":1.25,"duration":4.5,"hasThumbnail":true,"primaryColor":{"x":0.1,"y":0.2,"z":0.3},"secondaryColor":{"x":0.2,"y":0.3,"z":0.4},"tertiaryColor":{"x":0.3,"y":0.4,"z":0.5},"textColor":{"x":0.4,"y":0.5,"z":0.6},"highContrastColor":{"x":1,"y":1,"z":1}}
+        {"statusRevision":1,"metadataRevision":1,"playbackRevision":1,"timelineRevision":1,"thumbnailRevision":1,"available":true,"playbackState":1,"title":"Song","artist":"Artist","contentType":"music","albumTitle":"","subTitle":"","albumArtist":"","genres":"","position":1.25,"duration":4.5,"hasThumbnail":true,"primaryColor":{"x":0.1,"y":0.2,"z":0.3},"secondaryColor":{"x":0.2,"y":0.3,"z":0.4},"tertiaryColor":{"x":0.3,"y":0.4,"z":0.5},"textColor":{"x":0.4,"y":0.5,"z":0.6},"highContrastColor":{"x":1,"y":1,"z":1}}
         """#
         XCTAssertEqual(
             try evaluateWithEvents(instance, runtime: 1, frameTime: 1.0 / 60.0, mediaSnapshotJSON: first) as? String,
-            "status:true|properties|playback|timeline|thumbnail"
+            "status:true|properties|playback|timeline:1.25|thumbnail"
         )
 
         let sameRevision = first.replacingOccurrences(of: "Song", with: "Different")
         XCTAssertEqual(
             try evaluateWithEvents(instance, runtime: 2, frameTime: 1.0 / 60.0, mediaSnapshotJSON: sameRevision) as? String,
-            "status:true|properties|playback|timeline|thumbnail"
+            "status:true|properties|playback|timeline:1.25|thumbnail"
         )
 
-        let unavailable = #"{"revision":2,"available":false}"#
+        let timelineOnly = first
+            .replacingOccurrences(of: #""timelineRevision":1"#, with: #""timelineRevision":2"#)
+            .replacingOccurrences(of: #""position":1.25"#, with: #""position":2.5"#)
+        XCTAssertEqual(
+            try evaluateWithEvents(instance, runtime: 2.5, frameTime: 1.0 / 60.0, mediaSnapshotJSON: timelineOnly) as? String,
+            "status:true|properties|playback|timeline:1.25|thumbnail|timeline:2.5",
+            "A timeline tick must not retrigger metadata, playback, or thumbnail callbacks"
+        )
+
+        let unavailable = #"{"statusRevision":2,"metadataRevision":1,"playbackRevision":1,"timelineRevision":2,"thumbnailRevision":1,"available":false}"#
         XCTAssertEqual(
             try evaluateWithEvents(instance, runtime: 3, frameTime: 1.0 / 60.0, mediaSnapshotJSON: unavailable) as? String,
-            "status:true|properties|playback|timeline|thumbnail|status:false"
+            "status:true|properties|playback|timeline:1.25|thumbnail|timeline:2.5|status:false"
         )
         XCTAssertEqual(
             try evaluateWithEvents(instance, runtime: 4, frameTime: 1.0 / 60.0, mediaSnapshotJSON: unavailable) as? String,
-            "status:true|properties|playback|timeline|thumbnail|status:false"
+            "status:true|properties|playback|timeline:1.25|thumbnail|timeline:2.5|status:false"
         )
     }
 }

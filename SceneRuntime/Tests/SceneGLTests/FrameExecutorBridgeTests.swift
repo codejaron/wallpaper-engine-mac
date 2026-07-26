@@ -172,7 +172,11 @@ final class FrameExecutorBridgeTests: XCTestCase {
         we_scene_runtime_error_destroy(error)
 
         var unavailable = WESceneMediaSnapshot(
-            revision: 1,
+            status_revision: 1,
+            metadata_revision: 1,
+            playback_revision: 1,
+            timeline_revision: 1,
+            thumbnail_revision: 1,
             available: 0,
             playback_state: WE_SCENE_MEDIA_STOPPED,
             title: nil,

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -366,6 +367,16 @@ struct JSOwner {
     ~JSOwner() { if (ctx) JS_FreeValue(ctx, value); }
     JSOwner(const JSOwner&) = delete;
     JSOwner& operator=(const JSOwner&) = delete;
+    JSOwner(JSOwner&& other) noexcept
+        : ctx(std::exchange(other.ctx, nullptr)),
+          value(std::exchange(other.value, JS_UNDEFINED)) {}
+    JSOwner& operator=(JSOwner&& other) noexcept {
+        if (this == &other) return *this;
+        if (ctx) JS_FreeValue(ctx, value);
+        ctx = std::exchange(other.ctx, nullptr);
+        value = std::exchange(other.value, JS_UNDEFINED);
+        return *this;
+    }
 };
 
 struct ScriptFailure {
@@ -516,6 +527,62 @@ JSValue toJS(JSContext* ctx, const RuntimeValue& value) {
         }
     }
     return JS_NULL;
+}
+
+JSValue toJS(JSContext* ctx, const Value& value, bool immutable) {
+    JSValue result = JS_UNDEFINED;
+    if (std::holds_alternative<std::nullptr_t>(value.storage)) {
+        return JS_NULL;
+    }
+    if (const auto* boolean = std::get_if<bool>(&value.storage)) {
+        return JS_NewBool(ctx, *boolean);
+    }
+    if (const auto* integer = std::get_if<std::int64_t>(&value.storage)) {
+        return JS_NewInt64(ctx, *integer);
+    }
+    if (const auto* number = std::get_if<double>(&value.storage)) {
+        return JS_NewFloat64(ctx, *number);
+    }
+    if (const auto* string = std::get_if<std::string>(&value.storage)) {
+        return JS_NewStringLen(ctx, string->data(), string->size());
+    }
+    if (const auto* array = std::get_if<Value::Array>(&value.storage)) {
+        result = JS_NewArray(ctx);
+        if (JS_IsException(result)) return result;
+        for (std::size_t index = 0; index < array->size(); ++index) {
+            JSValue element = toJS(ctx, array->at(index), immutable);
+            if (JS_IsException(element) || JS_SetPropertyUint32(
+                    ctx, result, static_cast<std::uint32_t>(index), element
+                ) < 0) {
+                if (!JS_IsException(element)) JS_FreeValue(ctx, element);
+                JS_FreeValue(ctx, result);
+                return JS_EXCEPTION;
+            }
+        }
+    } else {
+        const auto& object = std::get<Value::Object>(value.storage);
+        result = JS_NewObject(ctx);
+        if (JS_IsException(result)) return result;
+        for (const auto& [name, child] : object) {
+            JSValue property = toJS(ctx, child, immutable);
+            if (JS_IsException(property) || JS_DefinePropertyValueStr(
+                    ctx,
+                    result,
+                    name.c_str(),
+                    property,
+                    immutable ? JS_PROP_ENUMERABLE : JS_PROP_C_W_E
+                ) < 0) {
+                if (!JS_IsException(property)) JS_FreeValue(ctx, property);
+                JS_FreeValue(ctx, result);
+                return JS_EXCEPTION;
+            }
+        }
+    }
+    if (immutable && JS_FreezeObject(ctx, result) < 0) {
+        JS_FreeValue(ctx, result);
+        return JS_EXCEPTION;
+    }
+    return result;
 }
 
 RuntimeValue fromJS(
@@ -1004,6 +1071,20 @@ void ScriptPropertyObjectRegistry::commit(
 }
 
 struct ScriptLayerRegistry::Impl final {
+    enum class TimelineState {
+        playing,
+        paused,
+        stopped,
+        completed,
+    };
+
+    struct TimelineController final {
+        TimelineState state = TimelineState::playing;
+        double rate = 1.0;
+        double anchorRuntimeSeconds = 0.0;
+        double anchorFrame = 0.0;
+    };
+
     struct TextureAnimationController final {
         bool joined = true;
         bool playing = true;
@@ -1029,21 +1110,305 @@ struct ScriptLayerRegistry::Impl final {
         bool animationResolved = false;
         std::optional<ScriptTextureAnimationMetadata> animationMetadata;
         TextureAnimationController animation;
+        std::map<std::string, TimelineController> timelines;
         SoundController sound;
     };
 
     mutable std::recursive_mutex mutex;
     std::vector<int> order;
     std::map<int, Layer> layers;
+    std::set<int> pendingDestroy;
+    std::set<int> destroyedBaseIds;
+    int nextDynamicId = -1;
     double runtimeSeconds = 0.0;
     std::function<std::optional<ScriptTextureAnimationMetadata>(
         std::string_view
     )> textureAnimationResolver;
 
-    static ScriptLayerDescriptor effective(const Layer& layer) {
+    static double cubic(
+        double p0,
+        double p1,
+        double p2,
+        double p3,
+        double t
+    ) {
+        const double remaining = 1.0 - t;
+        return remaining * remaining * remaining * p0 +
+            3.0 * remaining * remaining * t * p1 +
+            3.0 * remaining * t * t * p2 + t * t * t * p3;
+    }
+
+    static double evaluateCurveSegment(
+        const TimelineAnimationKeyframe& start,
+        const TimelineAnimationKeyframe& end,
+        double frame
+    ) {
+        const double span = end.frame - start.frame;
+        if (span <= 0.0) return end.value;
+        const double linear = std::clamp(
+            (frame - start.frame) / span, 0.0, 1.0
+        );
+        if (!start.front.enabled && !end.back.enabled) {
+            return std::lerp(start.value, end.value, linear);
+        }
+
+        const double p1x = start.front.enabled
+            ? start.frame + start.front.x
+            : start.frame + span / 3.0;
+        const double p2x = end.back.enabled
+            ? end.frame + end.back.x
+            : end.frame - span / 3.0;
+        const double p1y = start.front.enabled
+            ? start.value + start.front.y
+            : std::lerp(start.value, end.value, 1.0 / 3.0);
+        const double p2y = end.back.enabled
+            ? end.value + end.back.y
+            : std::lerp(start.value, end.value, 2.0 / 3.0);
+        if (p1x < start.frame || p2x < p1x || p2x > end.frame) {
+            return std::lerp(start.value, end.value, linear);
+        }
+        double low = 0.0;
+        double high = 1.0;
+        for (int iteration = 0; iteration < 24; ++iteration) {
+            const double middle = (low + high) * 0.5;
+            if (cubic(
+                    start.frame, p1x, p2x, end.frame, middle
+                ) < frame) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        return cubic(
+            start.value,
+            p1y,
+            p2y,
+            end.value,
+            (low + high) * 0.5
+        );
+    }
+
+    static double evaluateCurve(
+        const std::vector<TimelineAnimationKeyframe>& curve,
+        double frame
+    ) {
+        if (curve.empty()) return 0.0;
+        if (frame <= curve.front().frame) return curve.front().value;
+        for (std::size_t index = 1; index < curve.size(); ++index) {
+            if (frame <= curve[index].frame) {
+                return evaluateCurveSegment(
+                    curve[index - 1], curve[index], frame
+                );
+            }
+        }
+        return curve.back().value;
+    }
+
+    static RuntimeValue animatedValue(
+        const RuntimeValue& base,
+        const TimelineAnimation& animation,
+        double frame
+    ) {
+        if (base.isVector()) {
+            std::array<double, 4> components = base.vector();
+            for (std::size_t index = 0;
+                 index < base.componentCount(); ++index) {
+                if (animation.curves[index].empty()) continue;
+                const double value = evaluateCurve(
+                    animation.curves[index], frame
+                );
+                components[index] = animation.relative
+                    ? components[index] + value
+                    : value;
+            }
+            return RuntimeValue::vector(components, base.componentCount());
+        }
+        const double value = evaluateCurve(animation.curves.front(), frame);
+        return RuntimeValue::floating(
+            animation.relative ? base.number() + value : value
+        );
+    }
+
+    static std::string timelineRoot(
+        const Layer& layer,
+        std::string_view property
+    ) {
+        const auto found = layer.base.propertyAnimations.find(
+            std::string(property)
+        );
+        if (found == layer.base.propertyAnimations.end()) {
+            throw std::invalid_argument(
+                "SceneScript layer '" + layer.base.name +
+                "' has no timeline animation '" + std::string(property) + "'"
+            );
+        }
+        return found->second.parent.value_or(std::string(property));
+    }
+
+    static const TimelineAnimation& rootAnimation(
+        const Layer& layer,
+        std::string_view name,
+        std::string& root
+    ) {
+        auto found = layer.base.propertyAnimations.find(std::string(name));
+        if (found == layer.base.propertyAnimations.end()) {
+            found = std::find_if(
+                layer.base.propertyAnimations.begin(),
+                layer.base.propertyAnimations.end(),
+                [&](const auto& entry) {
+                    return !entry.second.name.empty() &&
+                        entry.second.name == name;
+                }
+            );
+        }
+        if (found == layer.base.propertyAnimations.end()) {
+            throw std::invalid_argument(
+                "SceneScript layer '" + layer.base.name +
+                "' has no timeline animation '" + std::string(name) + "'"
+            );
+        }
+        root = found->second.parent.value_or(found->first);
+        const auto rootFound = layer.base.propertyAnimations.find(root);
+        if (rootFound == layer.base.propertyAnimations.end() ||
+            rootFound->second.parent) {
+            throw std::logic_error(
+                "Timeline animation root '" + root + "' is unavailable"
+            );
+        }
+        return rootFound->second;
+    }
+
+    static void validateTimelines(const ScriptLayerDescriptor& descriptor) {
+        for (const auto& [property, animation] : descriptor.propertyAnimations) {
+            if (animation.parent) {
+                const auto parent = descriptor.propertyAnimations.find(
+                    *animation.parent
+                );
+                if (parent == descriptor.propertyAnimations.end() ||
+                    parent->second.parent) {
+                    throw std::invalid_argument(
+                        "Timeline animation '" + property +
+                        "' references unavailable root '" +
+                        *animation.parent + "'"
+                    );
+                }
+                if (std::ranges::find(
+                        parent->second.children, property
+                    ) == parent->second.children.end()) {
+                    throw std::invalid_argument(
+                        "Timeline animation parent '" + *animation.parent +
+                        "' does not declare child '" + property + "'"
+                    );
+                }
+                if (animation.fps != parent->second.fps ||
+                    animation.length != parent->second.length ||
+                    animation.mode != parent->second.mode) {
+                    throw std::invalid_argument(
+                        "Timeline animation child '" + property +
+                        "' does not share its parent's timing"
+                    );
+                }
+            }
+            for (const std::string& child : animation.children) {
+                const auto childFound = descriptor.propertyAnimations.find(child);
+                if (childFound == descriptor.propertyAnimations.end() ||
+                    childFound->second.parent != property) {
+                    throw std::invalid_argument(
+                        "Timeline animation root '" + property +
+                        "' has an invalid child '" + child + "'"
+                    );
+                }
+            }
+        }
+    }
+
+    void initializeTimelines(Layer& layer, double anchorRuntimeSeconds) {
+        validateTimelines(layer.base);
+        for (const auto& [property, animation] : layer.base.propertyAnimations) {
+            if (animation.parent) continue;
+            layer.timelines.try_emplace(
+                property,
+                TimelineController{
+                    .state = animation.startPaused
+                        ? TimelineState::paused
+                        : TimelineState::playing,
+                    .rate = 1.0,
+                    .anchorRuntimeSeconds = anchorRuntimeSeconds,
+                    .anchorFrame = 0.0,
+                }
+            );
+        }
+        std::erase_if(layer.timelines, [&](const auto& entry) {
+            const auto animation = layer.base.propertyAnimations.find(entry.first);
+            return animation == layer.base.propertyAnimations.end() ||
+                animation->second.parent.has_value();
+        });
+    }
+
+    double timelineFrame(
+        Layer& layer,
+        const std::string& root,
+        const TimelineAnimation& animation
+    ) {
+        TimelineController& controller = layer.timelines.at(root);
+        double frame = controller.anchorFrame;
+        if (controller.state == TimelineState::playing) {
+            frame += (runtimeSeconds - controller.anchorRuntimeSeconds) *
+                animation.fps * controller.rate;
+        }
+        const double length = animation.length;
+        if (length <= 0.0) return 0.0;
+        if (animation.wrapLoop || animation.mode == TimelineAnimationMode::loop) {
+            frame = std::fmod(frame, length);
+            if (frame < 0.0) frame += length;
+            return frame;
+        }
+        if (animation.mode == TimelineAnimationMode::mirror) {
+            const double period = length * 2.0;
+            frame = std::fmod(frame, period);
+            if (frame < 0.0) frame += period;
+            return frame <= length ? frame : period - frame;
+        }
+        const double clamped = std::clamp(frame, 0.0, length);
+        if (controller.state == TimelineState::playing && clamped != frame) {
+            controller.state = TimelineState::completed;
+            controller.anchorFrame = clamped;
+            controller.anchorRuntimeSeconds = runtimeSeconds;
+        }
+        return clamped;
+    }
+
+    RuntimeValue effectiveProperty(Layer& layer, std::string_view property) {
+        const std::string key(property);
+        if (const auto overlay = layer.overlay.find(key);
+            overlay != layer.overlay.end()) {
+            return overlay->second;
+        }
+        const auto base = layer.base.properties.find(key);
+        if (base == layer.base.properties.end()) {
+            throw std::invalid_argument(
+                "SceneScript layer '" + layer.base.name +
+                "' has no property '" + key + "'"
+            );
+        }
+        const auto animation = layer.base.propertyAnimations.find(key);
+        if (animation == layer.base.propertyAnimations.end()) {
+            return base->second;
+        }
+        const std::string root = timelineRoot(layer, key);
+        const TimelineAnimation& rootMetadata =
+            layer.base.propertyAnimations.at(root);
+        return animatedValue(
+            base->second,
+            animation->second,
+            timelineFrame(layer, root, rootMetadata)
+        );
+    }
+
+    ScriptLayerDescriptor effective(Layer& layer) {
         ScriptLayerDescriptor result = layer.base;
-        for (const auto& [property, value] : layer.overlay) {
-            result.properties[property] = value;
+        for (auto& [property, value] : result.properties) {
+            value = effectiveProperty(layer, property);
         }
         return result;
     }
@@ -1218,45 +1583,69 @@ void ScriptLayerRegistry::setBaseLayers(
     std::vector<ScriptLayerDescriptor> descriptors
 ) {
     std::lock_guard lock(impl_->mutex);
-    std::map<int, Impl::Layer> next;
-    std::vector<int> nextOrder;
-    nextOrder.reserve(descriptors.size());
+    for (const int id : impl_->pendingDestroy) {
+        const auto found = impl_->layers.find(id);
+        if (found != impl_->layers.end() && !found->second.base.dynamic) {
+            impl_->destroyedBaseIds.emplace(id);
+        }
+        impl_->layers.erase(id);
+        std::erase(impl_->order, id);
+    }
+    impl_->pendingDestroy.clear();
+
+    std::set<int> incomingIds;
+    std::vector<int> newBaseIds;
     for (auto& descriptor : descriptors) {
         if (descriptor.id == 0) {
             throw std::invalid_argument("SceneScript layer id must be non-zero");
         }
-        if (!next.emplace(descriptor.id, Impl::Layer{}).second) {
+        if (!incomingIds.emplace(descriptor.id).second) {
             throw std::invalid_argument(
                 "SceneScript layer registry contains duplicate id " +
                 std::to_string(descriptor.id)
             );
         }
-        nextOrder.push_back(descriptor.id);
-        Impl::Layer& target = next.at(descriptor.id);
-        target.base = std::move(descriptor);
-        if (const auto old = impl_->layers.find(target.base.id);
-            old != impl_->layers.end()) {
-            // Keep only overlays for properties that still exist on the new
-            // descriptor. Host schema changes must not leave stale writes
-            // reachable through a newly reused layer id.
-            for (const auto& [property, value] : old->second.overlay) {
-                if (target.base.properties.contains(property)) {
-                    target.overlay.emplace(property, value);
-                }
+        descriptor.dynamic = false;
+        if (impl_->destroyedBaseIds.contains(descriptor.id)) continue;
+
+        const int id = descriptor.id;
+        const auto existing = impl_->layers.find(id);
+        if (existing == impl_->layers.end()) {
+            Impl::Layer layer;
+            layer.base = std::move(descriptor);
+            impl_->initializeTimelines(layer, impl_->runtimeSeconds);
+            impl_->layers.emplace(id, std::move(layer));
+            newBaseIds.push_back(id);
+        } else {
+            Impl::Layer& target = existing->second;
+            if (target.base.dynamic) {
+                throw std::invalid_argument(
+                    "SceneScript static layer id collides with a dynamic layer"
+                );
             }
-            if (old->second.base.type == target.base.type) {
-                target.sound = old->second.sound;
+            const auto oldAsset = target.base.textureAssetIdentity;
+            const ScriptLayerType oldType = target.base.type;
+            target.base = std::move(descriptor);
+            std::erase_if(target.overlay, [&](const auto& entry) {
+                return !target.base.properties.contains(entry.first);
+            });
+            std::erase_if(target.pending, [&](const auto& entry) {
+                return !target.base.properties.contains(entry.first);
+            });
+            if (oldType != target.base.type) {
+                target.sound = {};
             }
-            const auto oldAsset = old->second.base.textureAssetIdentity;
-            const auto nextAsset = target.base.textureAssetIdentity;
-            if (oldAsset == nextAsset &&
-                old->second.base.type == ScriptLayerType::image &&
-                target.base.type == ScriptLayerType::image) {
-                target.animation = old->second.animation;
-                target.animationResolved = old->second.animationResolved;
-                target.animationMetadata = old->second.animationMetadata;
+            if (oldAsset != target.base.textureAssetIdentity ||
+                oldType != ScriptLayerType::image ||
+                target.base.type != ScriptLayerType::image) {
+                target.animation = {};
+                target.animationResolved = false;
+                target.animationMetadata.reset();
             }
+            impl_->initializeTimelines(target, impl_->runtimeSeconds);
         }
+
+        Impl::Layer& target = impl_->layers.at(id);
         if (target.base.textureAnimation) {
             Impl::animationDuration(*target.base.textureAnimation);
             target.animationResolved = true;
@@ -1267,8 +1656,18 @@ void ScriptLayerRegistry::setBaseLayers(
             }
         }
     }
-    impl_->order = std::move(nextOrder);
-    impl_->layers = std::move(next);
+
+    std::erase_if(impl_->layers, [&](const auto& entry) {
+        return !entry.second.base.dynamic && !incomingIds.contains(entry.first);
+    });
+    std::erase_if(impl_->order, [&](int id) {
+        return !impl_->layers.contains(id);
+    });
+    for (const int id : newBaseIds) {
+        if (std::ranges::find(impl_->order, id) == impl_->order.end()) {
+            impl_->order.push_back(id);
+        }
+    }
 }
 
 void ScriptLayerRegistry::setRuntimeSeconds(double runtimeSeconds) {
@@ -1295,7 +1694,7 @@ std::vector<ScriptLayerDescriptor> ScriptLayerRegistry::enumerate() const {
     std::vector<ScriptLayerDescriptor> result;
     result.reserve(impl_->order.size());
     for (const int id : impl_->order) {
-        result.push_back(Impl::effective(impl_->layers.at(id)));
+        result.push_back(impl_->effective(impl_->layers.at(id)));
     }
     return result;
 }
@@ -1304,7 +1703,7 @@ std::optional<ScriptLayerDescriptor> ScriptLayerRegistry::find(int id) const {
     std::lock_guard lock(impl_->mutex);
     const auto found = impl_->layers.find(id);
     if (found == impl_->layers.end()) return std::nullopt;
-    return Impl::effective(found->second);
+    return impl_->effective(found->second);
 }
 
 std::optional<ScriptLayerDescriptor> ScriptLayerRegistry::find(
@@ -1312,9 +1711,9 @@ std::optional<ScriptLayerDescriptor> ScriptLayerRegistry::find(
 ) const {
     std::lock_guard lock(impl_->mutex);
     for (const int id : impl_->order) {
-        const Impl::Layer& layer = impl_->layers.at(id);
+        Impl::Layer& layer = impl_->layers.at(id);
         if (layer.base.name == name) {
-            return Impl::effective(layer);
+            return impl_->effective(layer);
         }
     }
     return std::nullopt;
@@ -1327,14 +1726,118 @@ std::optional<RuntimeValue> ScriptLayerRegistry::read(
     std::lock_guard lock(impl_->mutex);
     const auto found = impl_->layers.find(id);
     if (found == impl_->layers.end()) return std::nullopt;
-    const Impl::Layer& layer = found->second;
-    if (const auto overlay = layer.overlay.find(std::string(property));
-        overlay != layer.overlay.end()) {
-        return overlay->second;
+    Impl::Layer& layer = found->second;
+    if (!layer.base.properties.contains(std::string(property))) {
+        return std::nullopt;
     }
-    const auto base = layer.base.properties.find(std::string(property));
-    if (base == layer.base.properties.end()) return std::nullopt;
-    return base->second;
+    return impl_->effectiveProperty(layer, property);
+}
+
+std::optional<Value> ScriptLayerRegistry::initialLayerConfig(int id) const {
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->layers.find(id);
+    if (found == impl_->layers.end()) return std::nullopt;
+    return found->second.base.initialConfig;
+}
+
+std::optional<ScriptLayerDescriptor>
+ScriptLayerRegistry::initialLayerDescriptor(int id) const {
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->layers.find(id);
+    if (found == impl_->layers.end()) return std::nullopt;
+    return found->second.base;
+}
+
+ScriptLayerDescriptor ScriptLayerRegistry::createLayer(
+    int templateId,
+    std::map<std::string, RuntimeValue> propertyOverrides
+) {
+    std::lock_guard lock(impl_->mutex);
+    const auto source = impl_->layers.find(templateId);
+    if (source == impl_->layers.end()) {
+        throw std::invalid_argument(
+            "SceneScript layer " + std::to_string(templateId) + " does not exist"
+        );
+    }
+    if (impl_->nextDynamicId == std::numeric_limits<int>::min()) {
+        throw std::overflow_error("SceneScript dynamic layer id space is exhausted");
+    }
+
+    Impl::Layer layer;
+    layer.base = source->second.base;
+    layer.base.id = impl_->nextDynamicId--;
+    layer.base.dynamic = true;
+    for (auto& [property, value] : propertyOverrides) {
+        const auto base = layer.base.properties.find(property);
+        if (base == layer.base.properties.end()) {
+            throw std::invalid_argument(
+                "SceneScript layer configuration contains unsupported property '" +
+                property + "'"
+            );
+        }
+        const RuntimeValueType expected = base->second.type();
+        const RuntimeValueType actual = value.type();
+        const bool compatibleNumbers =
+            (expected == RuntimeValueType::integer ||
+             expected == RuntimeValueType::floating) &&
+            (actual == RuntimeValueType::integer ||
+             actual == RuntimeValueType::floating);
+        if (!compatibleNumbers && expected != actual) {
+            throw std::invalid_argument(
+                "SceneScript layer configuration property '" + property +
+                "' has an incompatible value type"
+            );
+        }
+        base->second = std::move(value);
+    }
+    const auto visible = layer.base.properties.find("visible");
+    if (visible == layer.base.properties.end()) {
+        throw std::invalid_argument(
+            "SceneScript dynamic layer template has no visible property"
+        );
+    }
+    visible->second = RuntimeValue::boolean(true);
+    impl_->initializeTimelines(layer, impl_->runtimeSeconds);
+    if (layer.base.textureAnimation) {
+        Impl::animationDuration(*layer.base.textureAnimation);
+        layer.animationResolved = true;
+        layer.animationMetadata = layer.base.textureAnimation;
+    }
+    const int id = layer.base.id;
+    impl_->layers.emplace(id, std::move(layer));
+    impl_->order.push_back(id);
+    return impl_->effective(impl_->layers.at(id));
+}
+
+bool ScriptLayerRegistry::destroyLayer(int id) {
+    std::lock_guard lock(impl_->mutex);
+    if (!impl_->layers.contains(id) || impl_->pendingDestroy.contains(id)) {
+        return false;
+    }
+    impl_->pendingDestroy.emplace(id);
+    return true;
+}
+
+std::size_t ScriptLayerRegistry::layerCount() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->order.size();
+}
+
+std::optional<std::size_t> ScriptLayerRegistry::layerIndex(int id) const {
+    std::lock_guard lock(impl_->mutex);
+    const auto found = std::ranges::find(impl_->order, id);
+    if (found == impl_->order.end()) return std::nullopt;
+    return static_cast<std::size_t>(found - impl_->order.begin());
+}
+
+bool ScriptLayerRegistry::sortLayer(int id, std::size_t index) {
+    std::lock_guard lock(impl_->mutex);
+    const auto found = std::ranges::find(impl_->order, id);
+    if (found == impl_->order.end() || index >= impl_->order.size()) return false;
+    const int value = *found;
+    impl_->order.erase(found);
+    impl_->order.insert(impl_->order.begin() + static_cast<std::ptrdiff_t>(index), value);
+    return true;
 }
 
 void ScriptLayerRegistry::write(
@@ -1500,6 +2003,123 @@ void ScriptLayerRegistry::joinTextureAnimation(int id) {
         );
     }
     layer.animation = Impl::TextureAnimationController{};
+}
+
+ScriptTimelineAnimationSnapshot
+ScriptLayerRegistry::timelineAnimationSnapshot(
+    int id,
+    std::string_view name
+) {
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->layers.find(id);
+    if (found == impl_->layers.end()) {
+        throw std::invalid_argument(
+            "SceneScript layer " + std::to_string(id) + " does not exist"
+        );
+    }
+    Impl::Layer& layer = found->second;
+    std::string root;
+    const TimelineAnimation& animation = Impl::rootAnimation(layer, name, root);
+    const double frame = impl_->timelineFrame(layer, root, animation);
+    const Impl::TimelineController& controller = layer.timelines.at(root);
+    return {
+        .layerId = id,
+        .property = root,
+        .name = animation.name,
+        .fps = animation.fps,
+        .frameCount = animation.length,
+        .durationSeconds = animation.fps > 0.0
+            ? animation.length / animation.fps
+            : 0.0,
+        .frame = frame,
+        .rate = controller.rate,
+        .playing = controller.state == Impl::TimelineState::playing,
+    };
+}
+
+void ScriptLayerRegistry::setTimelineAnimationRate(
+    int id,
+    std::string_view name,
+    double rate
+) {
+    if (!std::isfinite(rate)) {
+        throw std::invalid_argument("Timeline animation rate must be finite");
+    }
+    std::lock_guard lock(impl_->mutex);
+    Impl::Layer& layer = impl_->layers.at(id);
+    std::string root;
+    const TimelineAnimation& animation = Impl::rootAnimation(layer, name, root);
+    const double frame = impl_->timelineFrame(layer, root, animation);
+    Impl::TimelineController& controller = layer.timelines.at(root);
+    controller.anchorFrame = frame;
+    controller.anchorRuntimeSeconds = impl_->runtimeSeconds;
+    controller.rate = rate;
+}
+
+void ScriptLayerRegistry::playTimelineAnimation(
+    int id,
+    std::string_view name
+) {
+    std::lock_guard lock(impl_->mutex);
+    Impl::Layer& layer = impl_->layers.at(id);
+    std::string root;
+    const TimelineAnimation& animation = Impl::rootAnimation(layer, name, root);
+    const double frame = impl_->timelineFrame(layer, root, animation);
+    Impl::TimelineController& controller = layer.timelines.at(root);
+    if (controller.state == Impl::TimelineState::playing) return;
+    controller.anchorFrame =
+        controller.state == Impl::TimelineState::completed ? 0.0 : frame;
+    controller.anchorRuntimeSeconds = impl_->runtimeSeconds;
+    controller.state = Impl::TimelineState::playing;
+}
+
+void ScriptLayerRegistry::pauseTimelineAnimation(
+    int id,
+    std::string_view name
+) {
+    std::lock_guard lock(impl_->mutex);
+    Impl::Layer& layer = impl_->layers.at(id);
+    std::string root;
+    const TimelineAnimation& animation = Impl::rootAnimation(layer, name, root);
+    const double frame = impl_->timelineFrame(layer, root, animation);
+    Impl::TimelineController& controller = layer.timelines.at(root);
+    controller.anchorFrame = frame;
+    controller.anchorRuntimeSeconds = impl_->runtimeSeconds;
+    controller.state = Impl::TimelineState::paused;
+}
+
+void ScriptLayerRegistry::stopTimelineAnimation(
+    int id,
+    std::string_view name
+) {
+    std::lock_guard lock(impl_->mutex);
+    Impl::Layer& layer = impl_->layers.at(id);
+    std::string root;
+    (void)Impl::rootAnimation(layer, name, root);
+    Impl::TimelineController& controller = layer.timelines.at(root);
+    controller.anchorFrame = 0.0;
+    controller.anchorRuntimeSeconds = impl_->runtimeSeconds;
+    controller.state = Impl::TimelineState::stopped;
+}
+
+void ScriptLayerRegistry::setTimelineAnimationFrame(
+    int id,
+    std::string_view name,
+    double frame
+) {
+    if (!std::isfinite(frame)) {
+        throw std::invalid_argument("Timeline animation frame must be finite");
+    }
+    std::lock_guard lock(impl_->mutex);
+    Impl::Layer& layer = impl_->layers.at(id);
+    std::string root;
+    const TimelineAnimation& animation = Impl::rootAnimation(layer, name, root);
+    if (frame < 0.0 || frame > animation.length) {
+        throw std::out_of_range("Timeline animation frame is out of range");
+    }
+    Impl::TimelineController& controller = layer.timelines.at(root);
+    controller.anchorFrame = frame;
+    controller.anchorRuntimeSeconds = impl_->runtimeSeconds;
 }
 
 ScriptSoundSnapshot ScriptLayerRegistry::soundSnapshot(int id) const {
@@ -1738,6 +2358,23 @@ struct ScriptInstance::Impl {
         textureAnimationSetFrame = 11,
         textureAnimationJoin = 12,
         textureAnimationReadOnly = 13,
+    };
+
+    enum TimelineAnimationClosureMagic : int {
+        timelineAnimationForLayer = 1,
+        timelineAnimationFPS = 2,
+        timelineAnimationFrameCount = 3,
+        timelineAnimationDuration = 4,
+        timelineAnimationName = 5,
+        timelineAnimationRate = 6,
+        timelineAnimationSetRate = 7,
+        timelineAnimationPlay = 8,
+        timelineAnimationStop = 9,
+        timelineAnimationPause = 10,
+        timelineAnimationIsPlaying = 11,
+        timelineAnimationGetFrame = 12,
+        timelineAnimationSetFrame = 13,
+        timelineAnimationReadOnly = 14,
     };
 
     enum SoundClosureMagic : int {
@@ -2134,11 +2771,13 @@ struct ScriptInstance::Impl {
         const char* name,
         int length,
         int magic,
-        JSCClosure* callback
+        JSCClosure* callback,
+        std::string property = {}
     ) {
         auto* data = new (std::nothrow) LayerPropertyClosureData{
             .owner = timerOwner,
             .layerId = layerId,
+            .property = std::move(property),
         };
         if (data == nullptr) {
             throw ScriptError(
@@ -2163,6 +2802,180 @@ struct ScriptInstance::Impl {
             );
         }
         return function;
+    }
+
+    static JSValue timelineAnimationClosure(
+        JSContext* context,
+        JSValueConst,
+        int argc,
+        JSValueConst* argv,
+        int magic,
+        void* opaque
+    ) {
+        LayerPropertyClosureData* data = nullptr;
+        Impl* self = fromLayerPropertyClosure(context, opaque, data);
+        if (self == nullptr) return JS_EXCEPTION;
+        try {
+            if (magic == timelineAnimationForLayer) {
+                if (argc != 1 || !JS_IsString(argv[0])) {
+                    return JS_ThrowTypeError(
+                        context, "ILayer.getAnimation requires one animation name"
+                    );
+                }
+                return self->makeTimelineAnimationObject(
+                    data->layerId, stringValue(context, argv[0])
+                );
+            }
+            const ScriptTimelineAnimationSnapshot snapshot =
+                self->layerRegistry->timelineAnimationSnapshot(
+                    data->layerId, data->property
+                );
+            switch (magic) {
+                case timelineAnimationFPS:
+                    return JS_NewFloat64(context, snapshot.fps);
+                case timelineAnimationFrameCount:
+                    return JS_NewFloat64(context, snapshot.frameCount);
+                case timelineAnimationDuration:
+                    return JS_NewFloat64(context, snapshot.durationSeconds);
+                case timelineAnimationName:
+                    return JS_NewStringLen(
+                        context, snapshot.name.data(), snapshot.name.size()
+                    );
+                case timelineAnimationRate:
+                    return JS_NewFloat64(context, snapshot.rate);
+                case timelineAnimationSetRate: {
+                    if (argc != 1) {
+                        return JS_ThrowTypeError(
+                            context, "IAnimation.rate setter requires one value"
+                        );
+                    }
+                    double rate = 0.0;
+                    if (JS_ToFloat64(context, &rate, argv[0]) < 0) {
+                        return JS_EXCEPTION;
+                    }
+                    self->layerRegistry->setTimelineAnimationRate(
+                        data->layerId, data->property, rate
+                    );
+                    return JS_UNDEFINED;
+                }
+                case timelineAnimationPlay:
+                    self->layerRegistry->playTimelineAnimation(
+                        data->layerId, data->property
+                    );
+                    return JS_UNDEFINED;
+                case timelineAnimationStop:
+                    self->layerRegistry->stopTimelineAnimation(
+                        data->layerId, data->property
+                    );
+                    return JS_UNDEFINED;
+                case timelineAnimationPause:
+                    self->layerRegistry->pauseTimelineAnimation(
+                        data->layerId, data->property
+                    );
+                    return JS_UNDEFINED;
+                case timelineAnimationIsPlaying:
+                    return JS_NewBool(context, snapshot.playing);
+                case timelineAnimationGetFrame:
+                    return JS_NewFloat64(context, snapshot.frame);
+                case timelineAnimationSetFrame: {
+                    if (argc != 1) {
+                        return JS_ThrowTypeError(
+                            context, "IAnimation.setFrame requires one frame"
+                        );
+                    }
+                    double frame = 0.0;
+                    if (JS_ToFloat64(context, &frame, argv[0]) < 0) {
+                        return JS_EXCEPTION;
+                    }
+                    self->layerRegistry->setTimelineAnimationFrame(
+                        data->layerId, data->property, frame
+                    );
+                    return JS_UNDEFINED;
+                }
+                case timelineAnimationReadOnly:
+                    return JS_ThrowTypeError(
+                        context, "IAnimation property is read-only"
+                    );
+                default:
+                    return JS_ThrowInternalError(
+                        context, "Unknown timeline animation operation"
+                    );
+            }
+        } catch (const std::out_of_range& error) {
+            return JS_ThrowRangeError(context, "%s", error.what());
+        } catch (const std::invalid_argument& error) {
+            return JS_ThrowTypeError(context, "%s", error.what());
+        } catch (const std::exception& error) {
+            return JS_ThrowInternalError(context, "%s", error.what());
+        }
+    }
+
+    JSValue makeTimelineAnimationObject(
+        int layerId,
+        const std::string& animationName
+    ) {
+        const std::pair key{layerId, animationName};
+        if (const auto found = timelineAnimationObjects.find(key);
+            found != timelineAnimationObjects.end()) {
+            return JS_DupValue(ctx, found->second);
+        }
+        (void)layerRegistry->timelineAnimationSnapshot(layerId, animationName);
+        JSValue object = JS_NewObject(ctx);
+        if (JS_IsException(object)) return object;
+        try {
+            const auto closure = [&](
+                const char* name,
+                int length,
+                int operation
+            ) {
+                return makeLayerClosure(
+                    layerId,
+                    name,
+                    length,
+                    operation,
+                    timelineAnimationClosure,
+                    animationName
+                );
+            };
+            for (const auto& property : std::array{
+                     std::tuple{"fps", timelineAnimationFPS},
+                     std::tuple{"frameCount", timelineAnimationFrameCount},
+                     std::tuple{"duration", timelineAnimationDuration},
+                     std::tuple{"name", timelineAnimationName},
+                 }) {
+                const auto [name, getter] = property;
+                defineAccessor(
+                    ctx,
+                    object,
+                    name,
+                    closure(name, 0, getter),
+                    closure(name, 1, timelineAnimationReadOnly)
+                );
+            }
+            defineAccessor(
+                ctx,
+                object,
+                "rate",
+                closure("get rate", 0, timelineAnimationRate),
+                closure("set rate", 1, timelineAnimationSetRate)
+            );
+            for (const auto& method : std::array{
+                     std::tuple{"play", 0, timelineAnimationPlay},
+                     std::tuple{"stop", 0, timelineAnimationStop},
+                     std::tuple{"pause", 0, timelineAnimationPause},
+                     std::tuple{"isPlaying", 0, timelineAnimationIsPlaying},
+                     std::tuple{"getFrame", 0, timelineAnimationGetFrame},
+                     std::tuple{"setFrame", 1, timelineAnimationSetFrame},
+                 }) {
+                const auto [name, length, operation] = method;
+                setProperty(ctx, object, name, closure(name, length, operation));
+            }
+            timelineAnimationObjects.emplace(key, JS_DupValue(ctx, object));
+            return object;
+        } catch (...) {
+            JS_FreeValue(ctx, object);
+            throw;
+        }
     }
 
     static JSValue textureAnimationClosure(
@@ -2468,6 +3281,18 @@ struct ScriptInstance::Impl {
                 object, descriptor->id, "pointsize", "pointSize"
             );
         }
+        setProperty(
+            ctx,
+            object,
+            "getAnimation",
+            makeLayerClosure(
+                descriptor->id,
+                "getAnimation",
+                1,
+                timelineAnimationForLayer,
+                timelineAnimationClosure
+            )
+        );
         if (descriptor->type == ScriptLayerType::image) {
             setProperty(
                 ctx,
@@ -2694,6 +3519,11 @@ struct ScriptInstance::Impl {
     }
 
     void clearLayerObjects() {
+        for (auto& [key, object] : timelineAnimationObjects) {
+            (void)key;
+            JS_FreeValue(ctx, object);
+        }
+        timelineAnimationObjects.clear();
         for (auto& [id, object] : textureAnimationObjects) {
             (void)id;
             JS_FreeValue(ctx, object);
@@ -2709,6 +3539,231 @@ struct ScriptInstance::Impl {
             JS_FreeValue(ctx, object);
         }
         propertyObjects.clear();
+    }
+
+    static std::string foldedPropertyName(std::string_view name) {
+        std::string result;
+        result.reserve(name.size());
+        for (const unsigned char character : name) {
+            result.push_back(static_cast<char>(std::tolower(character)));
+        }
+        return result;
+    }
+
+    static std::optional<std::string> configPropertyName(
+        const ScriptLayerDescriptor& descriptor,
+        std::string_view configKey
+    ) {
+        if (descriptor.properties.contains(std::string(configKey))) {
+            return std::string(configKey);
+        }
+        const std::string folded = foldedPropertyName(configKey);
+        for (const auto& [property, value] : descriptor.properties) {
+            (void)value;
+            if (foldedPropertyName(property) == folded) return property;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<int> resolveLayerArgument(
+        JSContext* context,
+        JSValueConst value
+    ) {
+        if (JS_IsNumber(value)) {
+            std::int32_t id = 0;
+            if (JS_ToInt32(context, &id, value) < 0) return std::nullopt;
+            return layerRegistry->find(id) ? std::optional<int>(id) : std::nullopt;
+        }
+        if (JS_IsString(value)) {
+            const auto descriptor = layerRegistry->find(stringValue(context, value));
+            return descriptor
+                ? std::optional<int>(descriptor->id)
+                : std::nullopt;
+        }
+        if (JS_IsObject(value)) {
+            JSOwner idValue(context, JS_GetPropertyStr(context, value, "id"));
+            if (JS_IsException(idValue.value)) return std::nullopt;
+            if (!JS_IsNumber(idValue.value)) return std::nullopt;
+            std::int32_t id = 0;
+            if (JS_ToInt32(context, &id, idValue.value) < 0) return std::nullopt;
+            return layerRegistry->find(id) ? std::optional<int>(id) : std::nullopt;
+        }
+        return std::nullopt;
+    }
+
+    JSValue makeInitialLayerConfig(int layerId) {
+        const auto descriptor = layerRegistry->initialLayerDescriptor(layerId);
+        if (!descriptor) return JS_UNDEFINED;
+        const auto* source = std::get_if<Value::Object>(
+            &descriptor->initialConfig.storage
+        );
+        if (source == nullptr) {
+            throw std::invalid_argument(
+                "SceneScript layer initial configuration is not an object"
+            );
+        }
+
+        JSValue result = JS_NewObject(ctx);
+        if (JS_IsException(result)) return result;
+        try {
+            for (const auto& [configKey, sourceValue] : *source) {
+                const auto property = configPropertyName(*descriptor, configKey);
+                JSValue jsValue = JS_UNDEFINED;
+                if (!property) {
+                    jsValue = toJS(ctx, sourceValue, true);
+                } else if (const auto* wrapper = std::get_if<Value::Object>(
+                               &sourceValue.storage
+                           ); wrapper != nullptr && wrapper->contains("value")) {
+                    jsValue = JS_NewObject(ctx);
+                    if (JS_IsException(jsValue)) {
+                        throw ScriptError(
+                            ScriptErrorCode::resourceLimit,
+                            "creating layer configuration property"
+                        );
+                    }
+                    for (const auto& [name, child] : *wrapper) {
+                        JSValue childValue = name == "value"
+                            ? toJS(ctx, descriptor->properties.at(*property))
+                            : toJS(ctx, child, true);
+                        const int flags = name == "value"
+                            ? JS_PROP_WRITABLE | JS_PROP_ENUMERABLE
+                            : JS_PROP_ENUMERABLE;
+                        if (JS_IsException(childValue) ||
+                            JS_DefinePropertyValueStr(
+                                ctx,
+                                jsValue,
+                                name.c_str(),
+                                childValue,
+                                flags
+                            ) < 0) {
+                            if (!JS_IsException(childValue)) {
+                                JS_FreeValue(ctx, childValue);
+                            }
+                            JS_FreeValue(ctx, jsValue);
+                            jsError(
+                                ctx,
+                                ScriptErrorCode::exception,
+                                "defining layer configuration property"
+                            );
+                        }
+                    }
+                    if (JS_PreventExtensions(ctx, jsValue) < 0) {
+                        JS_FreeValue(ctx, jsValue);
+                        jsError(
+                            ctx,
+                            ScriptErrorCode::exception,
+                            "sealing layer configuration property"
+                        );
+                    }
+                } else {
+                    jsValue = toJS(ctx, descriptor->properties.at(*property));
+                }
+                if (JS_IsException(jsValue) || JS_DefinePropertyValueStr(
+                        ctx,
+                        result,
+                        configKey.c_str(),
+                        jsValue,
+                        property
+                            ? JS_PROP_WRITABLE | JS_PROP_ENUMERABLE
+                            : JS_PROP_ENUMERABLE
+                    ) < 0) {
+                    if (!JS_IsException(jsValue)) JS_FreeValue(ctx, jsValue);
+                    jsError(
+                        ctx,
+                        ScriptErrorCode::exception,
+                        "defining layer configuration"
+                    );
+                }
+            }
+            if (JS_DefinePropertyValue(
+                    ctx,
+                    result,
+                    layerConfigTemplateAtom,
+                    JS_NewInt32(ctx, layerId),
+                    0
+                ) < 0 || JS_PreventExtensions(ctx, result) < 0) {
+                jsError(
+                    ctx,
+                    ScriptErrorCode::exception,
+                    "sealing layer configuration"
+                );
+            }
+            return result;
+        } catch (...) {
+            JS_FreeValue(ctx, result);
+            throw;
+        }
+    }
+
+    std::map<std::string, RuntimeValue> layerConfigOverrides(
+        JSContext* context,
+        JSValueConst configuration,
+        const ScriptLayerDescriptor& descriptor
+    ) {
+        const auto* source = std::get_if<Value::Object>(
+            &descriptor.initialConfig.storage
+        );
+        if (source == nullptr) {
+            throw std::invalid_argument(
+                "SceneScript layer initial configuration is not an object"
+            );
+        }
+        std::map<std::string, RuntimeValue> result;
+        for (const auto& [configKey, sourceValue] : *source) {
+            const auto property = configPropertyName(descriptor, configKey);
+            if (!property) continue;
+            JSOwner configured(
+                context,
+                JS_GetPropertyStr(context, configuration, configKey.c_str())
+            );
+            if (JS_IsException(configured.value)) {
+                jsError(
+                    context,
+                    ScriptErrorCode::exception,
+                    "reading layer configuration"
+                );
+            }
+            JSValueConst value = configured.value;
+            JSOwner wrappedValue;
+            const auto* wrapper = std::get_if<Value::Object>(&sourceValue.storage);
+            if (wrapper != nullptr && wrapper->contains("value")) {
+                if (!JS_IsObject(configured.value)) {
+                    throw std::invalid_argument(
+                        "SceneScript layer configuration property '" +
+                        configKey + "' must retain its DynamicValue object"
+                    );
+                }
+                wrappedValue = JSOwner(
+                    context,
+                    JS_GetPropertyStr(context, configured.value, "value")
+                );
+                if (JS_IsException(wrappedValue.value)) {
+                    jsError(
+                        context,
+                        ScriptErrorCode::exception,
+                        "reading layer configuration DynamicValue"
+                    );
+                }
+                value = wrappedValue.value;
+            }
+            const RuntimeValue& expected = descriptor.properties.at(*property);
+            RuntimeValue converted = fromJS(context, value, &expected);
+            const RuntimeValueType expectedType = expected.type();
+            const RuntimeValueType actualType = converted.type();
+            const bool compatibleNumbers =
+                (expectedType == RuntimeValueType::integer ||
+                 expectedType == RuntimeValueType::floating) &&
+                (actualType == RuntimeValueType::integer ||
+                 actualType == RuntimeValueType::floating);
+            if (!compatibleNumbers && expectedType != actualType) {
+                throw std::invalid_argument(
+                    "SceneScript layer configuration property '" + configKey +
+                    "' has an incompatible value type"
+                );
+            }
+            result.emplace(*property, std::move(converted));
+        }
+        return result;
     }
 
     static JSValue getSceneLayer(
@@ -2773,6 +3828,206 @@ struct ScriptInstance::Impl {
             JS_FreeValue(context, result);
             return JS_ThrowInternalError(context, "%s", error.what());
         }
+    }
+
+    static JSValue getSceneLayerCount(
+        JSContext* context,
+        JSValueConst,
+        int argc,
+        JSValueConst*
+    ) {
+        Impl* self = fromContext(context);
+        if (self == nullptr) return JS_EXCEPTION;
+        if (!self->layerRegistry) {
+            return JS_ThrowInternalError(
+                context, "SceneScript layer registry is unavailable"
+            );
+        }
+        if (argc != 0) {
+            return JS_ThrowTypeError(
+                context, "thisScene.getLayerCount does not accept arguments"
+            );
+        }
+        return JS_NewInt64(
+            context,
+            static_cast<std::int64_t>(self->layerRegistry->layerCount())
+        );
+    }
+
+    static JSValue getInitialSceneLayerConfig(
+        JSContext* context,
+        JSValueConst,
+        int argc,
+        JSValueConst* argv
+    ) {
+        Impl* self = fromContext(context);
+        if (self == nullptr) return JS_EXCEPTION;
+        if (!self->layerRegistry) {
+            return JS_ThrowInternalError(
+                context, "SceneScript layer registry is unavailable"
+            );
+        }
+        if (argc != 1) {
+            return JS_ThrowTypeError(
+                context,
+                "thisScene.getInitialLayerConfig requires one layer"
+            );
+        }
+        try {
+            const auto id = self->resolveLayerArgument(context, argv[0]);
+            if (!id) {
+                return JS_ThrowTypeError(
+                    context,
+                    "thisScene.getInitialLayerConfig requires an existing layer"
+                );
+            }
+            return self->makeInitialLayerConfig(*id);
+        } catch (const std::invalid_argument& error) {
+            return JS_ThrowTypeError(context, "%s", error.what());
+        } catch (const std::exception& error) {
+            return JS_ThrowInternalError(context, "%s", error.what());
+        }
+    }
+
+    static JSValue createSceneLayer(
+        JSContext* context,
+        JSValueConst,
+        int argc,
+        JSValueConst* argv
+    ) {
+        Impl* self = fromContext(context);
+        if (self == nullptr) return JS_EXCEPTION;
+        if (!self->layerRegistry) {
+            return JS_ThrowInternalError(
+                context, "SceneScript layer registry is unavailable"
+            );
+        }
+        if (argc != 1 || !JS_IsObject(argv[0])) {
+            return JS_ThrowTypeError(
+                context, "thisScene.createLayer requires one configuration object"
+            );
+        }
+        try {
+            JSOwner templateIdentity(
+                context,
+                JS_GetProperty(
+                    context, argv[0], self->layerConfigTemplateAtom
+                )
+            );
+            if (JS_IsException(templateIdentity.value)) return JS_EXCEPTION;
+            if (!JS_IsNumber(templateIdentity.value)) {
+                return JS_ThrowTypeError(
+                    context,
+                    "thisScene.createLayer currently requires a configuration returned by getInitialLayerConfig; arbitrary layer construction is unsupported"
+                );
+            }
+            std::int32_t templateId = 0;
+            if (JS_ToInt32(context, &templateId, templateIdentity.value) < 0) {
+                return JS_EXCEPTION;
+            }
+            const auto descriptor =
+                self->layerRegistry->initialLayerDescriptor(templateId);
+            if (!descriptor) {
+                return JS_ThrowTypeError(
+                    context,
+                    "thisScene.createLayer configuration references an unavailable template"
+                );
+            }
+            ScriptLayerDescriptor created = self->layerRegistry->createLayer(
+                templateId,
+                self->layerConfigOverrides(context, argv[0], *descriptor)
+            );
+            self->layerMutationUsed = true;
+            return self->makeLayerObject(created.id);
+        } catch (const std::out_of_range& error) {
+            return JS_ThrowRangeError(context, "%s", error.what());
+        } catch (const std::invalid_argument& error) {
+            return JS_ThrowTypeError(context, "%s", error.what());
+        } catch (const std::exception& error) {
+            return JS_ThrowInternalError(context, "%s", error.what());
+        }
+    }
+
+    static JSValue destroySceneLayer(
+        JSContext* context,
+        JSValueConst,
+        int argc,
+        JSValueConst* argv
+    ) {
+        Impl* self = fromContext(context);
+        if (self == nullptr) return JS_EXCEPTION;
+        if (!self->layerRegistry) {
+            return JS_ThrowInternalError(
+                context, "SceneScript layer registry is unavailable"
+            );
+        }
+        if (argc != 1) {
+            return JS_ThrowTypeError(
+                context, "thisScene.destroyLayer requires one layer"
+            );
+        }
+        const auto id = self->resolveLayerArgument(context, argv[0]);
+        if (!id) return JS_NewBool(context, false);
+        const bool destroyed = self->layerRegistry->destroyLayer(*id);
+        self->layerMutationUsed = self->layerMutationUsed || destroyed;
+        return JS_NewBool(context, destroyed);
+    }
+
+    static JSValue getSceneLayerIndex(
+        JSContext* context,
+        JSValueConst,
+        int argc,
+        JSValueConst* argv
+    ) {
+        Impl* self = fromContext(context);
+        if (self == nullptr) return JS_EXCEPTION;
+        if (!self->layerRegistry) {
+            return JS_ThrowInternalError(
+                context, "SceneScript layer registry is unavailable"
+            );
+        }
+        if (argc != 1) {
+            return JS_ThrowTypeError(
+                context, "thisScene.getLayerIndex requires one layer"
+            );
+        }
+        const auto id = self->resolveLayerArgument(context, argv[0]);
+        if (!id) return JS_NewInt32(context, -1);
+        const auto index = self->layerRegistry->layerIndex(*id);
+        return JS_NewInt64(
+            context,
+            index ? static_cast<std::int64_t>(*index) : -1
+        );
+    }
+
+    static JSValue sortSceneLayer(
+        JSContext* context,
+        JSValueConst,
+        int argc,
+        JSValueConst* argv
+    ) {
+        Impl* self = fromContext(context);
+        if (self == nullptr) return JS_EXCEPTION;
+        if (!self->layerRegistry) {
+            return JS_ThrowInternalError(
+                context, "SceneScript layer registry is unavailable"
+            );
+        }
+        if (argc != 2) {
+            return JS_ThrowTypeError(
+                context, "thisScene.sortLayer requires a layer and index"
+            );
+        }
+        const auto id = self->resolveLayerArgument(context, argv[0]);
+        if (!id) return JS_NewBool(context, false);
+        std::int64_t index = 0;
+        if (JS_ToInt64(context, &index, argv[1]) < 0) return JS_EXCEPTION;
+        if (index < 0) return JS_NewBool(context, false);
+        const bool sorted = self->layerRegistry->sortLayer(
+            *id, static_cast<std::size_t>(index)
+        );
+        self->layerMutationUsed = self->layerMutationUsed || sorted;
+        return JS_NewBool(context, sorted);
     }
 
     static JSValue getLayerText(
@@ -3609,6 +4864,9 @@ struct ScriptInstance::Impl {
             clearTimers();
             clearAudioBuffers();
             clearLayerObjects();
+            if (layerConfigTemplateAtom != JS_ATOM_NULL) {
+                JS_FreeAtom(ctx, layerConfigTemplateAtom);
+            }
             JS_FreeValue(ctx, init);
             JS_FreeValue(ctx, update);
             JS_FreeValue(ctx, thisScene);
@@ -3625,6 +4883,7 @@ struct ScriptInstance::Impl {
             audioBuffers.clear();
             layerObjects.clear();
             textureAnimationObjects.clear();
+            timelineAnimationObjects.clear();
             propertyObjects.clear();
         }
 
@@ -3640,6 +4899,7 @@ struct ScriptInstance::Impl {
         cursor = JS_UNDEFINED;
         scriptProperties = JS_UNDEFINED;
         userProperties = JS_UNDEFINED;
+        layerConfigTemplateAtom = JS_ATOM_NULL;
         nextTimerId = 0;
         started = false;
         hasUpdate = false;
@@ -3648,8 +4908,11 @@ struct ScriptInstance::Impl {
         layerMutationUsed = false;
         lastInvocationReturnedUndefined = false;
         audioUnavailable = false;
-        lastMediaRevision.reset();
-        lastMediaAvailable.reset();
+        lastMediaStatusRevision.reset();
+        lastMediaMetadataRevision.reset();
+        lastMediaPlaybackRevision.reset();
+        lastMediaTimelineRevision.reset();
+        lastMediaThumbnailRevision.reset();
         pendingUserProperties = userPropertyValues;
         userPropertiesInitialized = false;
         if (!final) {
@@ -3663,6 +4926,27 @@ struct ScriptInstance::Impl {
         if (!ctx) throw ScriptError(ScriptErrorCode::resourceLimit, "Unable to allocate QuickJS context");
         try {
             JS_SetContextOpaque(ctx, this);
+            JSOwner configTemplateSymbol(
+                ctx,
+                JS_NewSymbol(ctx, "SceneScript layer configuration template", false)
+            );
+            if (JS_IsException(configTemplateSymbol.value)) {
+                jsError(
+                    ctx,
+                    ScriptErrorCode::resourceLimit,
+                    "creating layer configuration identity"
+                );
+            }
+            layerConfigTemplateAtom = JS_ValueToAtom(
+                ctx, configTemplateSymbol.value
+            );
+            if (layerConfigTemplateAtom == JS_ATOM_NULL) {
+                jsError(
+                    ctx,
+                    ScriptErrorCode::resourceLimit,
+                    "creating layer configuration identity atom"
+                );
+            }
             JSOwner global(ctx, JS_GetGlobalObject(ctx));
 
             JSOwner vectorBuiltins(ctx, JS_Eval(
@@ -3986,6 +5270,25 @@ struct ScriptInstance::Impl {
                 "enumerateLayers",
                 JS_NewCFunction(ctx, enumerateSceneLayers, "enumerateLayers", 0)
             );
+            for (const auto& method : std::array{
+                     std::tuple{"getLayerCount", 0, getSceneLayerCount},
+                     std::tuple{
+                         "getInitialLayerConfig", 1,
+                         getInitialSceneLayerConfig
+                     },
+                     std::tuple{"createLayer", 1, createSceneLayer},
+                     std::tuple{"destroyLayer", 1, destroySceneLayer},
+                     std::tuple{"getLayerIndex", 1, getSceneLayerIndex},
+                     std::tuple{"sortLayer", 2, sortSceneLayer},
+                 }) {
+                const auto [name, length, function] = method;
+                setProperty(
+                    ctx,
+                    thisScene,
+                    name,
+                    JS_NewCFunction(ctx, function, name, length)
+                );
+            }
             defineProperty(
                 ctx,
                 global.value,
@@ -4586,10 +5889,24 @@ struct ScriptInstance::Impl {
 
     void dispatchMediaSnapshot(const std::optional<ScriptMediaSnapshot>& snapshot) {
         if (!snapshot || module == nullptr) return;
-        const bool changed = !lastMediaRevision ||
-            *lastMediaRevision != snapshot->revision ||
-            (lastMediaAvailable && *lastMediaAvailable != snapshot->available);
-        if (!changed) return;
+        const bool statusChanged = !lastMediaStatusRevision ||
+            *lastMediaStatusRevision != snapshot->statusRevision;
+        const bool metadataChanged = snapshot->available &&
+            (!lastMediaMetadataRevision ||
+             *lastMediaMetadataRevision != snapshot->metadataRevision);
+        const bool playbackChanged = snapshot->available &&
+            (!lastMediaPlaybackRevision ||
+             *lastMediaPlaybackRevision != snapshot->playbackRevision);
+        const bool timelineChanged = snapshot->available &&
+            (!lastMediaTimelineRevision ||
+             *lastMediaTimelineRevision != snapshot->timelineRevision);
+        const bool thumbnailChanged = snapshot->available &&
+            (!lastMediaThumbnailRevision ||
+             *lastMediaThumbnailRevision != snapshot->thumbnailRevision);
+        if (!statusChanged && !metadataChanged && !playbackChanged &&
+            !timelineChanged && !thumbnailChanged) {
+            return;
+        }
         if (!validMediaSnapshot(*snapshot)) {
             throw ScriptError(
                 ScriptErrorCode::invalidResultType,
@@ -4602,22 +5919,31 @@ struct ScriptInstance::Impl {
             jsError(ctx, ScriptErrorCode::exception, "reading SceneScript module namespace");
         }
 
-        if (!lastMediaAvailable || *lastMediaAvailable != snapshot->available) {
+        if (statusChanged) {
             JSOwner status(ctx, makeMediaStatusEvent(*snapshot));
             callOptionalEvent(nameSpace.value, "mediaStatusChanged", status.value);
+            lastMediaStatusRevision = snapshot->statusRevision;
         }
-        if (snapshot->available) {
+        if (metadataChanged) {
             JSOwner properties(ctx, makeMediaPropertiesEvent(*snapshot));
             callOptionalEvent(nameSpace.value, "mediaPropertiesChanged", properties.value);
+            lastMediaMetadataRevision = snapshot->metadataRevision;
+        }
+        if (playbackChanged) {
             JSOwner playback(ctx, makeMediaPlaybackEvent(*snapshot));
             callOptionalEvent(nameSpace.value, "mediaPlaybackChanged", playback.value);
+            lastMediaPlaybackRevision = snapshot->playbackRevision;
+        }
+        if (timelineChanged) {
             JSOwner timeline(ctx, makeMediaTimelineEvent(*snapshot));
             callOptionalEvent(nameSpace.value, "mediaTimelineChanged", timeline.value);
+            lastMediaTimelineRevision = snapshot->timelineRevision;
+        }
+        if (thumbnailChanged) {
             JSOwner thumbnail(ctx, makeMediaThumbnailEvent(*snapshot));
             callOptionalEvent(nameSpace.value, "mediaThumbnailChanged", thumbnail.value);
+            lastMediaThumbnailRevision = snapshot->thumbnailRevision;
         }
-        lastMediaRevision = snapshot->revision;
-        lastMediaAvailable = snapshot->available;
     }
 
     [[nodiscard]] bool hasBoundOwnerProperty() const noexcept {
@@ -5089,6 +6415,7 @@ struct ScriptInstance::Impl {
     JSValue cursor = JS_UNDEFINED;
     JSValue scriptProperties = JS_UNDEFINED;
     JSValue userProperties = JS_UNDEFINED;
+    JSAtom layerConfigTemplateAtom = JS_ATOM_NULL;
     std::map<std::string, RuntimeValue> userPropertyValues;
     std::map<std::string, RuntimeValue> pendingUserProperties;
     bool userPropertiesInitialized = false;
@@ -5097,6 +6424,7 @@ struct ScriptInstance::Impl {
     ScriptPropertyOwner owner;
     std::map<int, JSValue> layerObjects;
     std::map<int, JSValue> textureAnimationObjects;
+    std::map<std::pair<int, std::string>, JSValue> timelineAnimationObjects;
     std::map<std::string, JSValue> propertyObjects;
     std::map<std::size_t, AudioBuffers> audioBuffers;
     std::map<std::uint64_t, Timer> timers;
@@ -5111,8 +6439,11 @@ struct ScriptInstance::Impl {
     bool layerMutationUsed = false;
     bool lastInvocationReturnedUndefined = false;
     bool audioUnavailable = false;
-    std::optional<std::uint64_t> lastMediaRevision;
-    std::optional<bool> lastMediaAvailable;
+    std::optional<std::uint64_t> lastMediaStatusRevision;
+    std::optional<std::uint64_t> lastMediaMetadataRevision;
+    std::optional<std::uint64_t> lastMediaPlaybackRevision;
+    std::optional<std::uint64_t> lastMediaTimelineRevision;
+    std::optional<std::uint64_t> lastMediaThumbnailRevision;
     bool realmNeedsRebuild = false;
     std::string transientAudioFailureMessage;
     bool failed = false;

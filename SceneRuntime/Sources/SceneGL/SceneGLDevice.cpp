@@ -1187,6 +1187,71 @@ GLuint Device::Session::uploadCoverageTexture(
     }
 }
 
+GLuint Device::Session::uploadRGBA8Texture(
+    std::uint32_t width,
+    std::uint32_t height,
+    std::span<const std::uint8_t> pixels
+) {
+    validateResourceDimensions(width, height, 4, "Host RGBA8 texture");
+    validateMaximumTextureSize(width, height, "Host RGBA8 texture");
+    if (static_cast<std::size_t>(width) >
+        std::numeric_limits<std::size_t>::max() /
+            static_cast<std::size_t>(height) / 4) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Host RGBA8 texture byte count overflows size_t"
+        );
+    }
+    const std::size_t expected = static_cast<std::size_t>(width) * height * 4;
+    if (pixels.size() != expected) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Host RGBA8 texture requires tightly packed pixel storage"
+        );
+    }
+
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    if (texture == 0) {
+        throw Error(
+            ErrorCode::textureUpload,
+            "Creating a host RGBA8 texture failed"
+        );
+    }
+    device_.textures_.insert(texture);
+    try {
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        const PixelStoreGuard pixelStore(
+            GL_UNPACK_ALIGNMENT, GL_UNPACK_ROW_LENGTH
+        );
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA8,
+            static_cast<GLsizei>(width),
+            static_cast<GLsizei>(height),
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            pixels.data()
+        );
+        checkError(
+            ErrorCode::textureUpload,
+            "Uploading a host RGBA8 texture"
+        );
+        return texture;
+    } catch (...) {
+        destroyTexture(texture);
+        throw;
+    }
+}
+
 void Device::Session::destroyTexture(GLuint& texture) noexcept {
     if (texture == 0) return;
     device_.textures_.erase(texture);

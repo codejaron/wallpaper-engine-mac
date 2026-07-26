@@ -37,6 +37,19 @@ struct FrameInputs final {
     std::optional<script::ScriptMediaSnapshot> mediaSnapshot;
 };
 
+struct MediaThumbnailRGBA8 final {
+    std::uint64_t revision = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    // Tightly packed, top-row-first RGBA8 pixels owned by the executor.
+    std::vector<std::uint8_t> pixels;
+
+    [[nodiscard]] friend bool operator==(
+        const MediaThumbnailRGBA8&,
+        const MediaThumbnailRGBA8&
+    ) = default;
+};
+
 enum class PresentationScaling { stretch, aspectFit, aspectFill };
 
 struct PresentationRect final {
@@ -153,6 +166,8 @@ public:
     void setMediaSnapshot(
         std::optional<script::ScriptMediaSnapshot> snapshot
     );
+    void setMediaThumbnail(MediaThumbnailRGBA8 thumbnail);
+    void clearMediaThumbnail(std::uint64_t revision);
     void setSoundRuntimeStates(
         std::vector<script::ScriptSoundRuntimeSnapshot> states
     );

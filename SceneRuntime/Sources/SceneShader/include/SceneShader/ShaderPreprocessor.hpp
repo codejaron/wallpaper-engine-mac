@@ -28,6 +28,9 @@ using ShaderParameterDefault = std::variant<
 >;
 
 struct ShaderParameterMetadata {
+    enum class Stage { vertex, fragment };
+
+    Stage stage = Stage::vertex;
     std::string type;
     std::string name;
     std::optional<std::string> material;

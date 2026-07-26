@@ -100,7 +100,11 @@ typedef enum WESceneMediaPlaybackState {
 // cannot supply a real media source must clear the snapshot rather than
 // fabricating empty metadata or a stopped track.
 typedef struct WESceneMediaSnapshot {
-    uint64_t revision;
+    uint64_t status_revision;
+    uint64_t metadata_revision;
+    uint64_t playback_revision;
+    uint64_t timeline_revision;
+    uint64_t thumbnail_revision;
     int available;
     WESceneMediaPlaybackState playback_state;
     const char* title;
@@ -119,6 +123,18 @@ typedef struct WESceneMediaSnapshot {
     double text_color[3];
     double high_contrast_color[3];
 } WESceneMediaSnapshot;
+
+// Borrowed RGBA8 rows are copied before the setter returns. bytes_per_row may
+// include host padding, but pixel_length must describe exactly height rows.
+// The first row is the image's top row, matching decoded album-cover data.
+typedef struct WESceneMediaThumbnailRGBA8 {
+    uint64_t revision;
+    uint32_t width;
+    uint32_t height;
+    uint32_t bytes_per_row;
+    const uint8_t* pixels;
+    size_t pixel_length;
+} WESceneMediaThumbnailRGBA8;
 
 typedef enum WEScenePresentationScaling {
     WE_SCENE_PRESENTATION_STRETCH = 0,
@@ -344,6 +360,8 @@ typedef struct WESceneGraphNodeInfo {
 typedef enum WESceneFrameResourceKind {
     WE_SCENE_FRAME_RESOURCE_ASSET_TEXTURE = 0,
     WE_SCENE_FRAME_RESOURCE_FRAMEBUFFER = 1,
+    WE_SCENE_FRAME_RESOURCE_USER_PROPERTY_TEXTURE = 2,
+    WE_SCENE_FRAME_RESOURCE_HOST_TEXTURE = 3,
 } WESceneFrameResourceKind;
 
 typedef enum WESceneFramebufferFormat {
@@ -939,6 +957,16 @@ int we_scene_frame_executor_set_media_snapshot(
 );
 int we_scene_frame_executor_clear_media_snapshot(
     WESceneFrameExecutorRef executor,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_set_media_thumbnail_rgba8(
+    WESceneFrameExecutorRef executor,
+    const WESceneMediaThumbnailRGBA8* thumbnail,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_clear_media_thumbnail(
+    WESceneFrameExecutorRef executor,
+    uint64_t revision,
     WESceneRuntimeErrorRef* out_error
 );
 int we_scene_frame_executor_render(

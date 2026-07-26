@@ -946,6 +946,266 @@ private:
         }
     }
 
+    TimelineAnimationTangent parseTimelineTangent(
+        const Document& document,
+        const Json& source,
+        std::string_view pointer
+    ) const {
+        requireObject(
+            document, source, pointer, "Timeline animation tangent"
+        );
+        return {
+            .enabled = optionalBool(
+                document, source, "enabled", pointer, false
+            ),
+            .x = optionalNumber(document, source, "x", pointer).value_or(0.0),
+            .y = optionalNumber(document, source, "y", pointer).value_or(0.0),
+        };
+    }
+
+    std::vector<TimelineAnimationKeyframe> parseTimelineCurve(
+        const Document& document,
+        const Json& source,
+        std::string_view pointer
+    ) const {
+        requireArray(document, source, pointer, "Timeline animation curve");
+        if (source.empty()) {
+            fail(
+                document,
+                std::string(pointer),
+                SceneModelErrorCode::invalidValue,
+                "Timeline animation curves must contain at least one keyframe"
+            );
+        }
+        std::vector<TimelineAnimationKeyframe> result;
+        result.reserve(source.size());
+        for (std::size_t index = 0; index < source.size(); ++index) {
+            const Json& keyframe = source[index];
+            const std::string keyframePointer = childPointer(pointer, index);
+            requireObject(
+                document,
+                keyframe,
+                keyframePointer,
+                "Timeline animation keyframe"
+            );
+            TimelineAnimationKeyframe parsed;
+            parsed.frame = numberValue(
+                document,
+                requiredField(document, keyframe, "frame", keyframePointer),
+                childPointer(keyframePointer, "frame"),
+                "Timeline animation keyframe frame"
+            );
+            parsed.value = numberValue(
+                document,
+                requiredField(document, keyframe, "value", keyframePointer),
+                childPointer(keyframePointer, "value"),
+                "Timeline animation keyframe value"
+            );
+            if (parsed.frame < 0.0) {
+                fail(
+                    document,
+                    childPointer(keyframePointer, "frame"),
+                    SceneModelErrorCode::invalidValue,
+                    "Timeline animation keyframe frames must be non-negative"
+                );
+            }
+            if (const Json* front = optionalField(keyframe, "front")) {
+                parsed.front = parseTimelineTangent(
+                    document,
+                    *front,
+                    childPointer(keyframePointer, "front")
+                );
+            }
+            if (const Json* back = optionalField(keyframe, "back")) {
+                parsed.back = parseTimelineTangent(
+                    document,
+                    *back,
+                    childPointer(keyframePointer, "back")
+                );
+            }
+            result.push_back(std::move(parsed));
+        }
+        std::ranges::sort(
+            result,
+            {},
+            &TimelineAnimationKeyframe::frame
+        );
+        for (std::size_t index = 1; index < result.size(); ++index) {
+            if (result[index - 1].frame == result[index].frame) {
+                fail(
+                    document,
+                    std::string(pointer),
+                    SceneModelErrorCode::invalidValue,
+                    "Timeline animation curves cannot contain duplicate frames"
+                );
+            }
+        }
+        return result;
+    }
+
+    TimelineAnimation parseTimelineAnimation(
+        const Document& document,
+        const Json& source,
+        std::string_view pointer,
+        const RuntimeValue& initial
+    ) const {
+        requireObject(document, source, pointer, "Timeline animation");
+        TimelineAnimation result;
+        bool hasCurve = false;
+        for (std::size_t component = 0; component < result.curves.size(); ++component) {
+            const std::string key = "c" + std::to_string(component);
+            if (const Json* curve = optionalField(source, key)) {
+                result.curves[component] = parseTimelineCurve(
+                    document,
+                    *curve,
+                    childPointer(pointer, key)
+                );
+                hasCurve = true;
+                if (component >= initial.componentCount()) {
+                    fail(
+                        document,
+                        childPointer(pointer, key),
+                        SceneModelErrorCode::invalidValue,
+                        "Timeline animation curve exceeds its value component count"
+                    );
+                }
+            }
+        }
+        const bool numericInitial = initial.type() == RuntimeValueType::floating ||
+            initial.type() == RuntimeValueType::integer || initial.isVector();
+        if (!hasCurve || !numericInitial) {
+            fail(
+                document,
+                std::string(pointer),
+                SceneModelErrorCode::invalidValue,
+                "Timeline animation requires a numeric scalar or vector curve"
+            );
+        }
+
+        const Json& options = requiredField(
+            document, source, "options", pointer
+        );
+        const std::string optionsPointer = childPointer(pointer, "options");
+        requireObject(
+            document,
+            options,
+            optionsPointer,
+            "Timeline animation options"
+        );
+        result.fps = numberValue(
+            document,
+            requiredField(document, options, "fps", optionsPointer),
+            childPointer(optionsPointer, "fps"),
+            "Timeline animation fps"
+        );
+        result.length = numberValue(
+            document,
+            requiredField(document, options, "length", optionsPointer),
+            childPointer(optionsPointer, "length"),
+            "Timeline animation length"
+        );
+        if (result.fps <= 0.0 || result.length < 0.0) {
+            fail(
+                document,
+                optionsPointer,
+                SceneModelErrorCode::invalidValue,
+                "Timeline animation fps must be positive and length must be non-negative"
+            );
+        }
+        const std::string mode = requiredString(
+            document, options, "mode", optionsPointer, false
+        );
+        if (mode == "loop") {
+            result.mode = TimelineAnimationMode::loop;
+        } else if (mode == "mirror") {
+            result.mode = TimelineAnimationMode::mirror;
+        } else if (mode == "single") {
+            result.mode = TimelineAnimationMode::single;
+        } else {
+            fail(
+                document,
+                childPointer(optionsPointer, "mode"),
+                SceneModelErrorCode::invalidValue,
+                "Timeline animation mode must be loop, mirror, or single"
+            );
+        }
+        result.name = optionalString(
+            document, options, "name", optionsPointer
+        ).value_or("");
+        result.startPaused = optionalBool(
+            document, options, "startpaused", optionsPointer, false
+        );
+        result.wrapLoop = optionalBool(
+            document, options, "wraploop", optionsPointer, false
+        );
+        result.relative = optionalBool(
+            document, source, "relative", pointer, false
+        );
+
+        if (const Json* parent = optionalField(options, "parent")) {
+            const std::string parentPointer = childPointer(
+                optionsPointer, "parent"
+            );
+            requireObject(
+                document,
+                *parent,
+                parentPointer,
+                "Timeline animation parent"
+            );
+            result.parent = requiredString(
+                document, *parent, "key", parentPointer, false
+            );
+        }
+        if (const Json* children = optionalField(options, "children")) {
+            const std::string childrenPointer = childPointer(
+                optionsPointer, "children"
+            );
+            requireArray(
+                document,
+                *children,
+                childrenPointer,
+                "Timeline animation children"
+            );
+            std::unordered_set<std::string> unique;
+            result.children.reserve(children->size());
+            for (std::size_t index = 0; index < children->size(); ++index) {
+                const Json& child = (*children)[index];
+                const std::string childPointerValue = childPointer(
+                    childrenPointer, index
+                );
+                requireObject(
+                    document,
+                    child,
+                    childPointerValue,
+                    "Timeline animation child"
+                );
+                std::string key = requiredString(
+                    document, child, "key", childPointerValue, false
+                );
+                if (!unique.emplace(key).second) {
+                    fail(
+                        document,
+                        childPointerValue,
+                        SceneModelErrorCode::invalidValue,
+                        "Timeline animation children must be unique"
+                    );
+                }
+                result.children.push_back(std::move(key));
+            }
+        }
+        for (const auto& curve : result.curves) {
+            if (!curve.empty() && curve.back().frame > result.length) {
+                fail(
+                    document,
+                    std::string(pointer),
+                    SceneModelErrorCode::invalidValue,
+                    "Timeline animation keyframes cannot exceed its declared length"
+                );
+            }
+        }
+        return result;
+    }
+
     DynamicValue parseDynamic(
         const Document& document,
         const Json& source,
@@ -1051,6 +1311,26 @@ private:
                             )
                         );
                     }
+                }
+            }
+            if (const Json* animation = optionalField(source, "animation")) {
+                const bool hasTimelineCurve = animation->is_object() &&
+                    std::ranges::any_of(
+                        std::array{"c0", "c1", "c2", "c3"},
+                        [&](const char* key) {
+                            return animation->contains(key);
+                        }
+                    );
+                // Scene JSON also uses an `animation` metadata object for
+                // non-timeline values. A timeline is discriminated by its
+                // component curves; options alone are not a timeline.
+                if (hasTimelineCurve) {
+                    result.animation = parseTimelineAnimation(
+                        document,
+                        *animation,
+                        childPointer(pointer, "animation"),
+                        result.value
+                    );
                 }
             }
         }
@@ -2662,6 +2942,7 @@ private:
     ) {
         requireObject(document, source, pointer, "Scene object");
         SceneObject result;
+        result.initialConfig = parseValue(document, source, pointer);
         result.base.id = requiredInt(document, source, "id", pointer);
         const Json& objectName = requiredField(document, source, "name", pointer);
         if (objectName.is_string()) {

@@ -21,6 +21,36 @@ final class ParticleExecutorTests: XCTestCase {
         let executor: WESceneFrameExecutorRef
     }
 
+    func testDynamicParticleCloneKeepsIndependentRuntimeState() throws {
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                dynamicClone: true,
+                particleVelocity: "0 0 0"
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 1.0 / 120.0)
+        try assertNoExecutionIssues(loaded.executor)
+        let firstColumns = greenColumns(
+            try readPixels(loaded.executor),
+            width: 16
+        )
+        XCTAssertTrue(firstColumns.contains { $0 < 8 })
+        XCTAssertTrue(firstColumns.contains { $0 >= 8 })
+
+        try render(loaded.executor, time: 2, delta: 1.0 / 120.0)
+        try assertNoExecutionIssues(loaded.executor)
+        let secondColumns = greenColumns(
+            try readPixels(loaded.executor),
+            width: 16
+        )
+        XCTAssertTrue(secondColumns.contains { $0 < 8 })
+        XCTAssertTrue(secondColumns.contains { $0 >= 8 })
+    }
+
     func testHealthyParticleCommitsWhenLaterTextObjectIsSkipped() throws {
         let isolated = try loadPipeline(includeText: true)
         let control = try loadPipeline(includeText: true)
@@ -36,7 +66,7 @@ final class ParticleExecutorTests: XCTestCase {
             try readPixels(control.executor)
         )
 
-        try setText(isolated.model, String(repeating: "W", count: 200))
+        try setText(isolated.model, String(repeating: "W", count: 10_000))
         try render(isolated.executor, time: 500, delta: 1.0 / 120.0)
         try render(control.executor, time: 500, delta: 1.0 / 120.0)
         XCTAssertFalse(
@@ -48,7 +78,7 @@ final class ParticleExecutorTests: XCTestCase {
             objectIndex: 1,
             objectId: 2,
             operationIndex: 1,
-            messageContains: ["exceeds its authored layout size"]
+            messageContains: ["dimensions exceed the supported limit"]
         )
 
         try setText(isolated.model, "I")
@@ -744,6 +774,38 @@ final class ParticleExecutorTests: XCTestCase {
         try assertNoExecutionIssues(loaded.executor)
     }
 
+    func testUnavailableParticleUserTextureFallsBackToMaterialTexture() throws {
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleVelocity: "0 0 0",
+                particleSecondaryTextureData: makeRGBA8Texture2x2(),
+                particleUserTextureName: "texture_that_is_not_available",
+                particleVertexShaderSource: minimalParticleVertexShader,
+                particleFragmentShaderSource: """
+                uniform sampler2D g_Texture1;
+                varying vec2 v_TexCoord;
+                void main() {
+                    vec4 sampled = texture(g_Texture1, v_TexCoord);
+                    bool ready = all(greaterThan(sampled, vec4(0.9)));
+                    gl_FragColor = ready
+                        ? vec4(0.0, 1.0, 0.0, 1.0)
+                        : vec4(1.0, 0.0, 0.0, 1.0);
+                }
+                """
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 1.0 / 120.0)
+        XCTAssertFalse(
+            greenColumns(try readPixels(loaded.executor), width: 16).isEmpty,
+            "An unavailable high-priority particle provider must leave the ordinary material texture available"
+        )
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
     func testAnimatedParticleTextureClearsUVBasisForFollowingStaticParticle() throws {
         let firstImage = Array(repeating: [UInt8](arrayLiteral: 255, 255, 255, 255), count: 4)
             .flatMap { $0 }
@@ -1352,6 +1414,7 @@ final class ParticleExecutorTests: XCTestCase {
     private func makeFixture(
         includeText: Bool,
         scriptedOrigin: Bool = false,
+        dynamicClone: Bool = false,
         stochasticParticles: Bool = false,
         projectionAuto: Bool = false,
         animationMode: String = "sequence",
@@ -1375,6 +1438,7 @@ final class ParticleExecutorTests: XCTestCase {
         particleTextureData: Data? = nil,
         particleSecondaryTextureName: String = "secondary",
         particleSecondaryTextureData: Data? = nil,
+        particleUserTextureName: String? = nil,
         includeStaticAnimationResetParticle: Bool = false,
         particleMaterialCombos: [String: Int] = [:],
         particleVertexShaderSource: String? = nil,
@@ -1437,16 +1501,33 @@ final class ParticleExecutorTests: XCTestCase {
             "type": "scene",
             "version": 2,
         ]
-        let evaluatedParticleOrigin: Any = scriptedOrigin ? [
-            "value": particleOrigin,
-            "script": """
-            let invocation = { count: 0 };
-            export function update(value) {
-                invocation.count += 1;
-                return { x: value.x + invocation.count, y: value.y, z: value.z };
-            }
-            """,
-        ] : particleOrigin
+        let evaluatedParticleOrigin: Any
+        if dynamicClone {
+            evaluatedParticleOrigin = [
+                "value": particleOrigin,
+                "script": """
+                export function init(value) {
+                    const config = thisScene.getInitialLayerConfig(thisLayer);
+                    config.origin.value = new Vec3(12, 4, 0);
+                    thisScene.createLayer(config);
+                    return value;
+                }
+                """,
+            ]
+        } else if scriptedOrigin {
+            evaluatedParticleOrigin = [
+                "value": particleOrigin,
+                "script": """
+                let invocation = { count: 0 };
+                export function update(value) {
+                    invocation.count += 1;
+                    return { x: value.x + invocation.count, y: value.y, z: value.z };
+                }
+                """,
+            ]
+        } else {
+            evaluatedParticleOrigin = particleOrigin
+        }
         var objects: [[String: Any]] = [[
             "id": 1,
             "name": "Particle",
@@ -1597,6 +1678,12 @@ final class ParticleExecutorTests: XCTestCase {
             "shader": particleShaderName,
             "textures": textureNames,
         ]
+        if let particleUserTextureName {
+            materialPass["usertextures"] = [
+                NSNull(),
+                particleUserTextureName,
+            ]
+        }
         if !particleMaterialCombos.isEmpty {
             materialPass["combos"] = particleMaterialCombos
         }

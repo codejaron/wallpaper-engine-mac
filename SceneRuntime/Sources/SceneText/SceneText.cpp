@@ -183,10 +183,10 @@ RasterizedText rasterize(const RasterRequest& request) {
         throw Error(ErrorCode::resourceLimit, "Rasterized text bitmap exceeds the supported byte limit");
     }
 
-    std::vector<std::uint8_t> bottomUp(static_cast<std::size_t>(width) * height, 0);
+    std::vector<std::uint8_t> topDown(static_cast<std::size_t>(width) * height, 0);
     auto colorSpace = owned(CGColorSpaceCreateDeviceGray());
     auto context = owned(colorSpace ? CGBitmapContextCreate(
-        bottomUp.data(), width, height, 8, width, colorSpace.get(),
+        topDown.data(), width, height, 8, width, colorSpace.get(),
         static_cast<CGBitmapInfo>(kCGImageAlphaNone)
     ) : nullptr);
     if (!context) throw Error(ErrorCode::rasterization, "CoreGraphics could not create text bitmap context");
@@ -197,12 +197,6 @@ RasterizedText rasterize(const RasterRequest& request) {
     CGContextSetTextPosition(context.get(), -minimumX, -minimumY);
     CTLineDraw(line.get(), context.get());
     CGContextFlush(context.get());
-
-    std::vector<std::uint8_t> topDown(bottomUp.size());
-    for (std::uint32_t row = 0; row < height; ++row) {
-        const auto source = bottomUp.begin() + static_cast<std::ptrdiff_t>(height - 1 - row) * width;
-        std::copy_n(source, width, topDown.begin() + static_cast<std::ptrdiff_t>(row) * width);
-    }
     return {
         .width = width,
         .height = height,

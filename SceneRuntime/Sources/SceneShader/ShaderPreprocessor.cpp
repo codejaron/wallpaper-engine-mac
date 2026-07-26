@@ -10,7 +10,6 @@
 #include <filesystem>
 #include <limits>
 #include <locale>
-#include <regex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -567,86 +566,6 @@ std::string compatibilityHeader(
     return result;
 }
 
-std::string applyLinkedVaryingCompatibility(
-    std::string vertex,
-    const std::string& fragment
-) {
-    const std::regex fragmentVec4(R"(\bvarying\s+vec4\s+([A-Za-z_][A-Za-z0-9_]*)\s*;)");
-    const std::regex fragmentVec2(R"(\bvarying\s+vec2\s+([A-Za-z_][A-Za-z0-9_]*)\s*;)");
-    const std::regex assignment(
-        R"((^|\n)([ \t]*)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;\n]+);)"
-    );
-    for (std::sregex_iterator it(fragment.begin(), fragment.end(), fragmentVec4),
-         end;
-         it != end;
-         ++it) {
-        const std::string name = (*it)[1].str();
-        const std::regex declaration(
-            "\\bvarying\\s+vec2\\s+" + name + "\\s*;"
-        );
-        if (!std::regex_search(vertex, declaration)) {
-            continue;
-        }
-        vertex = std::regex_replace(
-            vertex,
-            declaration,
-            "varying vec4 " + name + ";"
-        );
-        std::string adjusted;
-        std::size_t offset = 0;
-        for (std::sregex_iterator assignmentIt(vertex.begin(), vertex.end(), assignment);
-             assignmentIt != end;
-             ++assignmentIt) {
-            const std::smatch& match = *assignmentIt;
-            if (match[3].str() != name) {
-                continue;
-            }
-            const std::size_t position = static_cast<std::size_t>(match.position());
-            adjusted += vertex.substr(offset, position - offset);
-            adjusted += match[1].str() + match[2].str() + name + " = vec4(" +
-                match[4].str() + ", 0.0, 1.0);";
-            offset = position + static_cast<std::size_t>(match.length());
-        }
-        if (offset != 0) {
-            adjusted += vertex.substr(offset);
-            vertex = std::move(adjusted);
-        }
-    }
-    // Wallpaper Engine's shader frontend permits a vertex stage to expose a
-    // wider varying than the fragment stage consumes. GLSL requires exact
-    // interface types, so narrow the producer to the fragment's declared
-    // contract. If the vertex source truly uses the discarded components,
-    // normal compilation still fails explicitly instead of guessing values.
-    for (std::sregex_iterator it(fragment.begin(), fragment.end(), fragmentVec2),
-         end;
-         it != end;
-         ++it) {
-        const std::string name = (*it)[1].str();
-        const std::regex declaration(
-            "\\bvarying\\s+vec[34]\\s+" + name + "\\s*;"
-        );
-        vertex = std::regex_replace(
-            vertex,
-            declaration,
-            "varying vec2 " + name + ";"
-        );
-    }
-    return vertex;
-}
-
-std::string applyFragmentTexCoordCompatibility(std::string source) {
-    const std::regex wide(R"(\bvarying\s+vec[34]\s+v_TexCoord\s*;)");
-    const std::regex beforeCast(R"(\bv_TexCoord\b(\s*[-+*/]\s*CAST2\s*\())");
-    const std::regex afterCast(R"((CAST2\s*\([^)]+\)\s*[-+*/]\s*)\bv_TexCoord\b)");
-    if (!std::regex_search(source, wide) ||
-        (!std::regex_search(source, beforeCast) &&
-         !std::regex_search(source, afterCast))) {
-        return source;
-    }
-    source = std::regex_replace(source, beforeCast, "v_TexCoord.xy$1");
-    return std::regex_replace(source, afterCast, "$1v_TexCoord.xy");
-}
-
 PreprocessedShader makeShader(
     bool fragment,
     std::string source,
@@ -660,6 +579,11 @@ PreprocessedShader makeShader(
     result.name = std::move(name);
     result.combos = combos;
     result.parameters = parseParameters(source, result.name);
+    for (ShaderParameterMetadata& parameter : result.parameters) {
+        parameter.stage = fragment
+            ? ShaderParameterMetadata::Stage::fragment
+            : ShaderParameterMetadata::Stage::vertex;
+    }
     result.source = compatibilityHeader(
         fragment,
         result.combos,
@@ -750,13 +674,6 @@ PreprocessedShaderPair ShaderPreprocessor::preprocessSources(
             linkedOptions
         ),
     };
-    result.vertex.source = applyLinkedVaryingCompatibility(
-        std::move(result.vertex.source),
-        result.fragment.source
-    );
-    result.fragment.source = applyFragmentTexCoordCompatibility(
-        std::move(result.fragment.source)
-    );
     return result;
 }
 

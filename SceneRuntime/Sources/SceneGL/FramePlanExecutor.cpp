@@ -1387,10 +1387,12 @@ std::optional<int> textureSlot(std::string_view name) {
     return slot;
 }
 
-const std::string* samplerDefaultTexture(
+std::vector<std::pair<FrameTextureCandidateSource, std::string>>
+samplerDefaultTextures(
     const std::vector<ShaderParameterMetadata>& parameters,
     std::string_view name
 ) {
+    std::vector<std::pair<FrameTextureCandidateSource, std::string>> result;
     for (const auto& parameter : parameters) {
         if (parameter.name != name || !isSamplerParameter(parameter) ||
             !parameter.defaultValue) {
@@ -1398,7 +1400,13 @@ const std::string* samplerDefaultTexture(
         }
         if (const auto* value =
                 std::get_if<std::string>(&*parameter.defaultValue)) {
-            return value;
+            result.emplace_back(
+                parameter.stage == ShaderParameterMetadata::Stage::vertex
+                    ? FrameTextureCandidateSource::shaderVertexDefault
+                    : FrameTextureCandidateSource::shaderFragmentDefault,
+                *value
+            );
+            continue;
         }
         throw Error(
             ErrorCode::resourceValidation,
@@ -1406,7 +1414,7 @@ const std::string* samplerDefaultTexture(
                 "' must be a texture name"
         );
     }
-    return nullptr;
+    return result;
 }
 
 bool isOpenGLSamplerType(GLenum type) {
@@ -1507,6 +1515,12 @@ struct FramePlanExecutor::Impl final {
     struct ParticleState final {
         std::string assetIdentity;
         particle::ParticleSimulation simulation;
+    };
+
+    struct HostTextureSlot final {
+        std::optional<MediaThumbnailRGBA8> image;
+        GLuint texture = 0;
+        bool dirty = false;
     };
 
     struct PreparedUniform final {
@@ -1682,7 +1696,7 @@ struct FramePlanExecutor::Impl final {
         std::map<std::size_t, ParticleDrawBatch> particleBatches;
         const std::map<std::size_t, ParticleDrawBatch>* frozenParticleBatches =
             nullptr;
-        std::map<std::size_t, ParticleState> particleStates;
+        std::map<int, ParticleState> particleStates;
         std::map<std::string, std::string> finalAliases;
         std::vector<FrameExecutionIssue> issues;
     };
@@ -1723,6 +1737,8 @@ struct FramePlanExecutor::Impl final {
             releaseParticleGeometry(session);
             releasePuppetGeometry(session);
             session.destroyFramebuffer(particleRefractSnapshot);
+            session.destroyTexture(mediaThumbnailCurrent.texture);
+            session.destroyTexture(mediaThumbnailPrevious.texture);
         } catch (const std::exception& error) {
             std::fprintf(stderr, "FramePlanExecutor failed to release renderer resources: %s\n", error.what());
         } catch (...) {
@@ -2042,13 +2058,180 @@ struct FramePlanExecutor::Impl final {
         return found->second;
     }
 
+    HostTextureSlot& hostTextureSlot(const FrameResourceRef& ref) {
+        if (ref.kind != FrameResourceKind::hostTexture) {
+            throw Error(
+                ErrorCode::internalFailure,
+                "Resource is not a host texture"
+            );
+        }
+        if (ref.id == "$mediaThumbnail") return mediaThumbnailCurrent;
+        if (ref.id == "$mediaPreviousThumbnail") {
+            return mediaThumbnailPrevious;
+        }
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Unknown host texture resource '" + ref.id + "'"
+        );
+    }
+
+    const HostTextureSlot& hostTextureSlot(
+        const FrameResourceRef& ref
+    ) const {
+        if (ref.kind != FrameResourceKind::hostTexture) {
+            throw Error(
+                ErrorCode::internalFailure,
+                "Resource is not a host texture"
+            );
+        }
+        if (ref.id == "$mediaThumbnail") return mediaThumbnailCurrent;
+        if (ref.id == "$mediaPreviousThumbnail") {
+            return mediaThumbnailPrevious;
+        }
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Unknown host texture resource '" + ref.id + "'"
+        );
+    }
+
+    bool synchronizeHostTexture(
+        Device::Session& session,
+        HostTextureSlot& slot
+    ) {
+        if (!slot.image) {
+            session.destroyTexture(slot.texture);
+            slot.dirty = false;
+            return false;
+        }
+        if (!slot.dirty && slot.texture != 0) return true;
+
+        GLuint replacement = session.uploadRGBA8Texture(
+            slot.image->width,
+            slot.image->height,
+            slot.image->pixels
+        );
+        session.destroyTexture(slot.texture);
+        slot.texture = replacement;
+        slot.dirty = false;
+        return true;
+    }
+
+    [[nodiscard]] std::optional<FrameResourceRef> concreteTextureResource(
+        const FrameResourceRef& resource
+    ) const {
+        switch (resource.kind) {
+            case FrameResourceKind::assetTexture:
+            case FrameResourceKind::framebuffer:
+            case FrameResourceKind::hostTexture:
+                return resource;
+            case FrameResourceKind::userPropertyTexture:
+                if (resource.resolvedAssetName.empty()) return std::nullopt;
+                if (resource.resolvedAssetName == "$mediaThumbnail" ||
+                    resource.resolvedAssetName ==
+                        "$mediaPreviousThumbnail") {
+                    return FrameResourceRef{
+                        .kind = FrameResourceKind::hostTexture,
+                        .id = resource.resolvedAssetName,
+                        .logicalName = resource.resolvedAssetName,
+                    };
+                }
+                return frameAssetTextureResource(
+                    resource.resolvedAssetName
+                );
+        }
+        std::terminate();
+    }
+
+    [[nodiscard]] bool textureReady(
+        Device::Session& session,
+        const FrameResourceRef& resource,
+        const std::map<std::string, std::string>& aliases,
+        double timeSeconds
+    ) {
+        switch (resource.kind) {
+            case FrameResourceKind::framebuffer:
+                static_cast<void>(framebuffer(resource, aliases));
+                return true;
+            case FrameResourceKind::assetTexture:
+                if (!resolver().contains(
+                        resource.logicalName.empty()
+                            ? resource.id
+                            : resource.logicalName)) {
+                    return false;
+                }
+                static_cast<void>(assetTexture(
+                    session, resource, timeSeconds
+                ));
+                return true;
+            case FrameResourceKind::hostTexture:
+                // Metadata alone never makes an album cover sampleable. A
+                // host resource becomes ready only after validated pixels
+                // have reached this executor's texture store.
+                return synchronizeHostTexture(
+                    session, hostTextureSlot(resource)
+                );
+            case FrameResourceKind::userPropertyTexture:
+                throw Error(
+                    ErrorCode::internalFailure,
+                    "A user-property texture reached GPU readiness without "
+                    "being resolved to its selected provider"
+                );
+        }
+        std::terminate();
+    }
+
+    [[nodiscard]] std::optional<FrameResourceRef> selectReadyTexture(
+        Device::Session& session,
+        const std::vector<FrameTextureCandidate>& candidates,
+        const std::optional<FrameResourceRef>& previousInput,
+        const FrameResourceRef& input,
+        const std::map<std::string, std::string>& aliases,
+        double timeSeconds
+    ) {
+        for (auto candidate = candidates.rbegin();
+             candidate != candidates.rend(); ++candidate) {
+            const auto concrete = concreteTextureResource(
+                candidate->resource
+            );
+            if (concrete && textureReady(
+                    session, *concrete, aliases, timeSeconds)) {
+                return concrete;
+            }
+        }
+        if (previousInput) {
+            const auto concrete = concreteTextureResource(*previousInput);
+            if (concrete && textureReady(
+                    session, *concrete, aliases, timeSeconds)) {
+                return concrete;
+            }
+        }
+        const auto concreteInput = concreteTextureResource(input);
+        if (concreteInput && textureReady(
+                session, *concreteInput, aliases, timeSeconds)) {
+            return concreteInput;
+        }
+        return std::nullopt;
+    }
+
     GLuint texture(
         Device::Session& session,
         const FrameResourceRef& ref,
         std::size_t imageIndex = 0,
         double timeSeconds = 0.0
     ) {
-        if (ref.kind == FrameResourceKind::framebuffer) return framebuffer(ref).colorTexture;
+        if (ref.kind == FrameResourceKind::framebuffer) {
+            return framebuffer(ref).colorTexture;
+        }
+        if (ref.kind == FrameResourceKind::hostTexture) {
+            HostTextureSlot& slot = hostTextureSlot(ref);
+            if (!synchronizeHostTexture(session, slot) || slot.texture == 0) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Host texture is not ready: '" + ref.id + "'"
+                );
+            }
+            return slot.texture;
+        }
         auto& resource = assetTexture(session, ref, timeSeconds);
         if (imageIndex >= resource.images.size()) {
             throw Error(
@@ -2082,6 +2265,16 @@ struct FramePlanExecutor::Impl final {
             }
             const auto& resource = backing->second.resource;
             return {float(resource.width), float(resource.height), float(resource.width), float(resource.height)};
+        }
+        if (ref.kind == FrameResourceKind::hostTexture) {
+            const HostTextureSlot& slot = hostTextureSlot(ref);
+            if (!slot.image) return {};
+            return {
+                static_cast<float>(slot.image->width),
+                static_cast<float>(slot.image->height),
+                static_cast<float>(slot.image->width),
+                static_cast<float>(slot.image->height),
+            };
         }
         const auto found = assets.find(ref.id);
         return found == assets.end() ? std::array<float, 4>{} : found->second.resolution;
@@ -2182,10 +2375,13 @@ struct FramePlanExecutor::Impl final {
         if (pass.previousInput && matches(*pass.previousInput)) {
             return *pass.previousInput;
         }
-        for (const auto& [slot, resource] : pass.textures) {
+        for (const auto& [slot, binding] : pass.textures) {
             static_cast<void>(slot);
-            if (matches(resource)) {
-                return resource;
+            for (const FrameTextureCandidate& candidate :
+                 binding.candidates) {
+                if (matches(candidate.resource)) {
+                    return candidate.resource;
+                }
             }
         }
         if (matches(pass.destination)) {
@@ -2202,6 +2398,14 @@ struct FramePlanExecutor::Impl final {
                 "Sampler metadata default references unavailable runtime texture '" +
                     std::string(name) + "'"
             );
+        }
+        if (name == "$mediaThumbnail" ||
+            name == "$mediaPreviousThumbnail") {
+            return {
+                .kind = FrameResourceKind::hostTexture,
+                .id = std::string(name),
+                .logicalName = std::string(name),
+            };
         }
         return frameAssetTextureResource(name);
     }
@@ -2226,9 +2430,19 @@ struct FramePlanExecutor::Impl final {
                 "Particle sampler metadata default references unavailable runtime alias '_alias_lightCookie'"
             );
         }
-        for (const auto& [slot, resource] : descriptor.textures) {
+        if (descriptor.texture0.logicalName == name ||
+            descriptor.texture0.id == name) {
+            return descriptor.texture0;
+        }
+        for (const auto& [slot, binding] : descriptor.textures) {
             static_cast<void>(slot);
-            if (resource.logicalName == name || resource.id == name) return resource;
+            for (const FrameTextureCandidate& candidate :
+                 binding.candidates) {
+                if (candidate.resource.logicalName == name ||
+                    candidate.resource.id == name) {
+                    return candidate.resource;
+                }
+            }
         }
         for (const FramebufferDescriptor& framebuffer : plan.framebuffers) {
             if (framebuffer.resource.logicalName == name ||
@@ -2242,6 +2456,14 @@ struct FramePlanExecutor::Impl final {
                 "Particle sampler metadata default references unavailable runtime texture '" +
                     std::string(name) + "'"
             );
+        }
+        if (name == "$mediaThumbnail" ||
+            name == "$mediaPreviousThumbnail") {
+            return {
+                .kind = FrameResourceKind::hostTexture,
+                .id = std::string(name),
+                .logicalName = std::string(name),
+            };
         }
         return frameAssetTextureResource(name);
     }
@@ -2434,6 +2656,12 @@ struct FramePlanExecutor::Impl final {
                 renderable.color[index], "Renderable color"
             );
         }
+        // Versioned image shaders consume opacity through g_Color4, while
+        // legacy shaders consume the same layer value through g_UserAlpha.
+        result.color4Value[3] = checkedFloat(
+            renderable.color[3] * renderable.alpha,
+            "Renderable color alpha"
+        );
         std::copy_n(
             result.color4Value.begin(), 3, result.colorValue.begin()
         );
@@ -2834,49 +3062,7 @@ struct FramePlanExecutor::Impl final {
             );
         };
 
-        std::array<bool, 32> boundTextureSlots{};
-        for (const auto& [slot, ref] : pass.textures) {
-            if (slot < 0 || slot >= 32) {
-                throw Error(
-                    ErrorCode::resourceValidation,
-                    "Texture slot is outside the supported range"
-                );
-            }
-            if (ref.kind == FrameResourceKind::framebuffer &&
-                framebuffer(ref, aliases).framebuffer == destination.framebuffer) {
-                throw Error(
-                    ErrorCode::resourceValidation,
-                    "Texture slot " + std::to_string(slot) +
-                        " resolves to the render destination '" +
-                        pass.destination.logicalName + "'"
-                );
-            }
-            std::size_t imageIndex = 0;
-            GLuint assetTextureValue = 0;
-            if (slot == 0 && ref.kind == FrameResourceKind::assetTexture) {
-                result.texture0Animation = selectTexture0(ref);
-                imageIndex = result.texture0Animation.imageIndex;
-            }
-            if (ref.kind == FrameResourceKind::assetTexture) {
-                assetTextureValue = texture(session, ref, imageIndex, inputs.timeSeconds);
-            } else {
-                static_cast<void>(framebuffer(ref, aliases));
-            }
-            const std::string samplerName = "g_Texture" + std::to_string(slot);
-            result.textures.push_back({
-                .slot = slot,
-                .resource = ref,
-                .assetTexture = assetTextureValue,
-                .resolution = textureResolution(ref, aliases),
-                .samplerLocation = prepareBuiltinUniform(
-                    programResource, samplerName, GL_SAMPLER_2D
-                ),
-                .resolutionLocation = prepareBuiltinUniform(
-                    programResource, samplerName + "Resolution", GL_FLOAT_VEC4
-                ),
-            });
-            boundTextureSlots[static_cast<std::size_t>(slot)] = true;
-        }
+        std::map<int, const ActiveUniform*> activeSamplers;
         for (const ActiveUniform& uniform : programResource.uniforms) {
             if (!isOpenGLSamplerType(uniform.type)) {
                 continue;
@@ -2896,60 +3082,118 @@ struct FramePlanExecutor::Impl final {
                         "' does not follow the g_TextureN binding contract"
                 );
             }
-            if (boundTextureSlots[static_cast<std::size_t>(*slot)]) {
-                continue;
-            }
-            const std::string* defaultTexture = samplerDefaultTexture(
-                programResource.parameters, uniform.name
-            );
-            if (defaultTexture == nullptr || defaultTexture->empty()) {
+            activeSamplers.insert_or_assign(*slot, &uniform);
+        }
+
+        std::set<int> textureSlots;
+        for (const auto& [slot, binding] : pass.textures) {
+            static_cast<void>(binding);
+            if (slot < 0 || slot >= 32) {
                 throw Error(
                     ErrorCode::resourceValidation,
-                    "Active sampler '" + uniform.name + "' requires texture slot " +
-                        std::to_string(*slot) +
+                    "Texture slot is outside the supported range"
+                );
+            }
+            textureSlots.emplace(slot);
+        }
+        for (const auto& [slot, uniform] : activeSamplers) {
+            static_cast<void>(uniform);
+            textureSlots.emplace(slot);
+        }
+
+        for (const int slot : textureSlots) {
+            const std::string samplerName =
+                "g_Texture" + std::to_string(slot);
+            const auto active = activeSamplers.find(slot);
+            std::vector<FrameTextureCandidate> candidates;
+            if (active != activeSamplers.end()) {
+                for (auto& [source, name] : samplerDefaultTextures(
+                         programResource.parameters,
+                         active->second->name)) {
+                    if (name.empty()) continue;
+                    candidates.push_back({
+                        .source = source,
+                        .resource = samplerDefaultResource(
+                            plan, pass, name
+                        ),
+                    });
+                }
+            }
+            const auto authored = pass.textures.find(slot);
+            if (authored != pass.textures.end()) {
+                candidates.insert(
+                    candidates.end(),
+                    authored->second.candidates.begin(),
+                    authored->second.candidates.end()
+                );
+            }
+            const bool hasProviderContract =
+                authored != pass.textures.end() || !candidates.empty() ||
+                slot == 0;
+            if (!hasProviderContract) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active sampler '" + active->second->name +
+                        "' requires texture slot " + std::to_string(slot) +
                         ", but the frame pass provides no texture or metadata default"
                 );
             }
-            const FrameResourceRef defaultResource = samplerDefaultResource(
-                plan, pass, *defaultTexture
-            );
-            if (defaultResource.kind == FrameResourceKind::framebuffer &&
-                framebuffer(defaultResource, aliases).framebuffer ==
+
+            const std::optional<FrameResourceRef> selected =
+                selectReadyTexture(
+                    session,
+                    candidates,
+                    pass.previousInput,
+                    pass.input,
+                    aliases,
+                    inputs.timeSeconds
+                );
+            if (!selected) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Texture provider chain for slot " +
+                        std::to_string(slot) +
+                        " has no ready candidate, previous input, or input"
+                );
+            }
+            const FrameResourceRef& resource = *selected;
+            if (resource.kind == FrameResourceKind::framebuffer &&
+                framebuffer(resource, aliases).framebuffer ==
                     destination.framebuffer) {
                 throw Error(
                     ErrorCode::resourceValidation,
-                    "Active sampler '" + uniform.name +
+                    "Active sampler '" + samplerName +
                         "' resolves to the render destination '" +
-                        defaultResource.logicalName + "'"
+                        resource.logicalName + "'"
                 );
             }
             std::size_t imageIndex = 0;
             GLuint assetTextureValue = 0;
-            if (*slot == 0 &&
-                defaultResource.kind == FrameResourceKind::assetTexture) {
-                result.texture0Animation = selectTexture0(defaultResource);
+            if (slot == 0 &&
+                resource.kind == FrameResourceKind::assetTexture) {
+                result.texture0Animation = selectTexture0(resource);
                 imageIndex = result.texture0Animation.imageIndex;
             }
-            if (defaultResource.kind == FrameResourceKind::assetTexture) {
-                    assetTextureValue = texture(
-                        session, defaultResource, imageIndex, inputs.timeSeconds
-                    );
+            if (resource.kind == FrameResourceKind::assetTexture ||
+                resource.kind == FrameResourceKind::hostTexture) {
+                assetTextureValue = texture(
+                    session, resource, imageIndex, inputs.timeSeconds
+                );
             } else {
-                static_cast<void>(framebuffer(defaultResource, aliases));
+                static_cast<void>(framebuffer(resource, aliases));
             }
             result.textures.push_back({
-                .slot = *slot,
-                .resource = defaultResource,
+                .slot = slot,
+                .resource = resource,
                 .assetTexture = assetTextureValue,
-                .resolution = textureResolution(defaultResource, aliases),
+                .resolution = textureResolution(resource, aliases),
                 .samplerLocation = prepareBuiltinUniform(
-                    programResource, uniform.name, GL_SAMPLER_2D
+                    programResource, samplerName, GL_SAMPLER_2D
                 ),
                 .resolutionLocation = prepareBuiltinUniform(
-                    programResource, uniform.name + "Resolution", GL_FLOAT_VEC4
+                    programResource, samplerName + "Resolution", GL_FLOAT_VEC4
                 ),
             });
-            boundTextureSlots[static_cast<std::size_t>(*slot)] = true;
         }
         result.uniforms.texture0Translation = prepareBuiltinUniform(
             programResource, "g_Texture0Translation", GL_FLOAT_VEC2
@@ -3358,6 +3602,7 @@ struct FramePlanExecutor::Impl final {
             glDrawArrays(GL_TRIANGLES, 0, 6);
         }
         session.checkError(ErrorCode::draw, "executing frame render pass");
+
     }
 
     [[nodiscard]] PreparedDraw prepareCopy(
@@ -3390,7 +3635,15 @@ struct FramePlanExecutor::Impl final {
             .textureCoordinates = FrameTexCoordKind::full,
             .input = command.source,
             .destination = command.destination,
-            .textures = {{0, command.source}},
+            .textures = {{
+                0,
+                FrameTextureBinding{
+                    .candidates = {{
+                        .source = FrameTextureCandidateSource::bind,
+                        .resource = command.source,
+                    }},
+                },
+            }},
             .writeAlpha = true,
         };
         return prepareDraw(
@@ -3483,14 +3736,6 @@ struct FramePlanExecutor::Impl final {
             throw Error(ErrorCode::resourceValidation, "Frame text command object identity is inconsistent");
         }
         static_cast<void>(framebuffer(command.destination, aliases));
-        if (descriptor.horizontalAlignment != "center" ||
-            descriptor.verticalAlignment != "center") {
-            throw Error(
-                ErrorCode::resourceValidation,
-                "Text rendering currently requires center horizontal and vertical alignment"
-            );
-        }
-
         text::FontSource font;
         std::optional<ResolvedAsset> fontAsset;
         if (descriptor.font.starts_with("systemfont_")) {
@@ -3499,9 +3744,15 @@ struct FramePlanExecutor::Impl final {
             fontAsset = resolver().resolve(descriptor.font);
             font = text::FontSource::bytes(fontAsset->bytes);
         }
+        const auto& transform = descriptor.worldTransform;
+        const double averageScale =
+            (std::abs(transform.scale.x) + std::abs(transform.scale.y)) * 0.5;
+        const double rasterScale = averageScale > 0.0 && averageScale < 1.0
+            ? std::min(1.0 / averageScale, 32.0)
+            : 1.0;
         const auto rasterized = text::rasterize({
             .utf8 = descriptor.text,
-            .pointSize = descriptor.pointSize,
+            .pointSize = descriptor.pointSize * rasterScale,
             .font = font,
         });
         const std::array<double, 4> layoutComponents{
@@ -3516,16 +3767,52 @@ struct FramePlanExecutor::Impl final {
                 );
             }
         }
-        if (!descriptor.text.empty() &&
-            (static_cast<double>(rasterized.width) + descriptor.padding.x * 2.0 >
-                 descriptor.size.x ||
-             static_cast<double>(rasterized.height) + descriptor.padding.y * 2.0 >
-                 descriptor.size.y)) {
+        const double intrinsicWidth = static_cast<double>(rasterized.width);
+        const double intrinsicHeight = static_cast<double>(rasterized.height);
+        const double layoutWidth = descriptor.size.x > 0.0
+            ? descriptor.size.x
+            : intrinsicWidth + descriptor.padding.x * 2.0;
+        const double layoutHeight = descriptor.size.y > 0.0
+            ? descriptor.size.y
+            : intrinsicHeight + descriptor.padding.y * 2.0;
+        const auto alignmentOffset = [](
+            std::string_view alignment,
+            std::string_view leading,
+            std::string_view trailing,
+            double layoutExtent,
+            double intrinsicExtent,
+            double padding
+        ) {
+            if (alignment == leading) {
+                return -layoutExtent * 0.5 + padding;
+            }
+            if (alignment == "center") {
+                return -intrinsicExtent * 0.5;
+            }
+            if (alignment == trailing) {
+                return layoutExtent * 0.5 - padding - intrinsicExtent;
+            }
             throw Error(
                 ErrorCode::resourceValidation,
-                "Rasterized text plus padding exceeds its authored layout size"
+                "Unsupported text alignment '" + std::string(alignment) + "'"
             );
-        }
+        };
+        const double alignmentX = alignmentOffset(
+            descriptor.horizontalAlignment,
+            "left",
+            "right",
+            layoutWidth,
+            intrinsicWidth,
+            descriptor.padding.x
+        );
+        const double alignmentY = alignmentOffset(
+            descriptor.verticalAlignment,
+            "top",
+            "bottom",
+            layoutHeight,
+            intrinsicHeight,
+            descriptor.padding.y
+        );
 
         const double effectiveAlpha = descriptor.color.alpha * descriptor.alpha;
         const std::array<double, 4> colorComponents{
@@ -3546,7 +3833,6 @@ struct FramePlanExecutor::Impl final {
             color[index] = static_cast<float>(component);
         }
 
-        const auto& transform = descriptor.worldTransform;
         const float originX = static_cast<float>(
             transform.origin.x - static_cast<double>(plan.width) * 0.5
         );
@@ -3562,8 +3848,8 @@ struct FramePlanExecutor::Impl final {
             )
         );
         const Matrix alignment = translation(
-            -static_cast<float>(rasterized.width) * 0.5F,
-            -static_cast<float>(rasterized.height) * 0.5F,
+            checkedFloat(alignmentX, "Text horizontal alignment"),
+            checkedFloat(alignmentY, "Text vertical alignment"),
             0.0F
         );
         if (!camera.orthographicViewProjection) {
@@ -4036,19 +4322,19 @@ struct FramePlanExecutor::Impl final {
 
     void initializeParticleStates(
         const FramePlan& plan,
-        std::map<std::size_t, ParticleState>& working
+        std::map<int, ParticleState>& working
     ) const {
-        std::set<std::size_t> descriptorIndexes;
+        std::set<int> descriptorIds;
         for (const auto& descriptor : plan.particles) {
-            if (!descriptorIndexes.emplace(descriptor.objectIndex).second) {
+            if (!descriptorIds.emplace(descriptor.objectId).second) {
                 throw Error(
                     ErrorCode::resourceValidation,
-                    "Frame plan contains duplicate particle object indexes"
+                    "Frame plan contains duplicate particle runtime object ids"
                 );
             }
         }
         for (auto iterator = working.begin(); iterator != working.end();) {
-            if (!descriptorIndexes.contains(iterator->first)) {
+            if (!descriptorIds.contains(iterator->first)) {
                 iterator = working.erase(iterator);
             } else {
                 ++iterator;
@@ -4219,14 +4505,105 @@ struct FramePlanExecutor::Impl final {
             .operationIndex = operationIndex,
         };
         const FrameResourceRef destination = command.destination;
-        std::array<bool, 32> boundTextureSlots{};
-        for (const auto& [slot, resource] : descriptor.textures) {
+        std::map<int, const ActiveUniform*> activeSamplers;
+        for (const ActiveUniform& uniform : programResource.uniforms) {
+            if (!isOpenGLSamplerType(uniform.type)) continue;
+            if (uniform.type != GL_SAMPLER_2D) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active particle sampler '" + uniform.name +
+                        "' uses an unsupported non-2D texture type"
+                );
+            }
+            const std::optional<int> slot = textureSlot(uniform.name);
+            if (!slot) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active particle sampler '" + uniform.name +
+                        "' does not follow the g_TextureN binding contract"
+                );
+            }
+            activeSamplers.insert_or_assign(*slot, &uniform);
+        }
+
+        std::set<int> textureSlots;
+        for (const auto& [slot, binding] : descriptor.textures) {
+            static_cast<void>(binding);
             if (slot < 0 || slot >= 32) {
                 throw Error(
                     ErrorCode::resourceValidation,
                     "Particle texture slot is outside the supported range 0...31"
                 );
             }
+            textureSlots.emplace(slot);
+        }
+        for (const auto& [slot, uniform] : activeSamplers) {
+            static_cast<void>(uniform);
+            if (slot < 0 || slot >= 32) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active particle sampler slot is outside the supported range 0...31"
+                );
+            }
+            textureSlots.emplace(slot);
+        }
+
+        for (const int slot : textureSlots) {
+            const std::string samplerName =
+                "g_Texture" + std::to_string(slot);
+            const auto active = activeSamplers.find(slot);
+            std::vector<FrameTextureCandidate> candidates;
+            if (active != activeSamplers.end()) {
+                for (auto& [source, name] : samplerDefaultTextures(
+                         programResource.parameters,
+                         active->second->name)) {
+                    if (name.empty()) continue;
+                    candidates.push_back({
+                        .source = source,
+                        .resource = particleSamplerDefaultResource(
+                            plan, descriptor, name
+                        ),
+                    });
+                }
+            }
+            const auto authored = descriptor.textures.find(slot);
+            if (authored != descriptor.textures.end()) {
+                candidates.insert(
+                    candidates.end(),
+                    authored->second.candidates.begin(),
+                    authored->second.candidates.end()
+                );
+            }
+            const bool hasProviderContract =
+                authored != descriptor.textures.end() ||
+                !candidates.empty() || slot == 0;
+            if (!hasProviderContract) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active particle sampler '" + samplerName +
+                        "' requires texture slot " +
+                        std::to_string(slot) +
+                        ", but the frame pass provides no texture or metadata default"
+                );
+            }
+            const std::optional<FrameResourceRef> selected =
+                selectReadyTexture(
+                    session,
+                    candidates,
+                    std::nullopt,
+                    descriptor.texture0,
+                    aliases,
+                    inputs.timeSeconds
+                );
+            if (!selected) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Particle texture provider chain for slot " +
+                        std::to_string(slot) +
+                        " has no ready candidate or primary input"
+                );
+            }
+            const FrameResourceRef& resource = *selected;
             if (resource.id.empty()) {
                 throw Error(
                     ErrorCode::resourceValidation,
@@ -4250,6 +4627,10 @@ struct FramePlanExecutor::Impl final {
                         session, resource, imageIndex, inputs.timeSeconds
                     );
                 }
+            } else if (resource.kind == FrameResourceKind::hostTexture) {
+                assetTextureValue = texture(
+                    session, resource, 0, inputs.timeSeconds
+                );
             } else if (resource.kind == FrameResourceKind::framebuffer) {
                 const auto& source = framebuffer(resource, aliases);
                 const auto& target = framebuffer(destination, aliases);
@@ -4283,76 +4664,6 @@ struct FramePlanExecutor::Impl final {
                 ),
             };
             prepared.textures.push_back(std::move(binding));
-            boundTextureSlots[static_cast<std::size_t>(slot)] = true;
-        }
-        for (const auto& uniform : programResource.uniforms) {
-            if (!isOpenGLSamplerType(uniform.type)) continue;
-            if (uniform.type != GL_SAMPLER_2D) {
-                throw Error(
-                    ErrorCode::resourceValidation,
-                    "Active particle sampler '" + uniform.name +
-                        "' uses an unsupported non-2D texture type"
-                );
-            }
-            const std::optional<int> slot = textureSlot(uniform.name);
-            if (!slot) {
-                throw Error(
-                    ErrorCode::resourceValidation,
-                    "Active particle sampler '" + uniform.name +
-                        "' does not follow the g_TextureN binding contract"
-                );
-            }
-            if (boundTextureSlots[static_cast<std::size_t>(*slot)]) continue;
-            const std::string* defaultTexture = samplerDefaultTexture(
-                programResource.parameters, uniform.name
-            );
-            if (defaultTexture == nullptr || defaultTexture->empty()) {
-                throw Error(
-                    ErrorCode::resourceValidation,
-                    "Active particle sampler '" + uniform.name +
-                        "' requires texture slot " + std::to_string(*slot) +
-                        ", but the frame pass provides no texture or metadata default"
-                );
-            }
-            const FrameResourceRef defaultResource =
-                particleSamplerDefaultResource(plan, descriptor, *defaultTexture);
-            GLuint assetTextureValue = 0;
-            if (defaultResource.kind == FrameResourceKind::assetTexture) {
-                const std::size_t imageIndex = *slot == 0
-                    ? texture0Animation.imageIndex : 0;
-                assetTextureValue = texture(
-                    session, defaultResource, imageIndex, inputs.timeSeconds
-                );
-            } else if (defaultResource.kind == FrameResourceKind::framebuffer) {
-                const auto& source = framebuffer(defaultResource, aliases);
-                const auto& target = framebuffer(destination, aliases);
-                if (source.framebuffer == target.framebuffer && !prepared.refract) {
-                    throw Error(
-                        ErrorCode::resourceValidation,
-                        "Active particle sampler '" + uniform.name +
-                            "' resolves to the render destination without REFRACT snapshot support"
-                    );
-                }
-            } else {
-                throw Error(
-                    ErrorCode::resourceValidation,
-                    "Particle sampler metadata default resolves to an unsupported resource"
-                );
-            }
-            prepared.textures.push_back({
-                .slot = *slot,
-                .resource = defaultResource,
-                .assetTexture = assetTextureValue,
-                .resolution = textureResolution(defaultResource, aliases),
-                .samplerLocation = prepareBuiltinUniform(
-                    programResource, uniform.name, GL_SAMPLER_2D
-                ),
-                .resolutionLocation = prepareBuiltinUniform(
-                    programResource,
-                    uniform.name + "Resolution", GL_FLOAT_VEC4
-                ),
-            });
-            boundTextureSlots[static_cast<std::size_t>(*slot)] = true;
         }
         prepared.attributeLocations.fill(-1);
         prepared.uniforms.texture0Translation = prepareBuiltinUniform(
@@ -5038,9 +5349,15 @@ struct FramePlanExecutor::Impl final {
                 if (pass->previousInput) {
                     validateResource(*pass->previousInput, "Frame render previous input");
                 }
-                for (const auto& [slot, resource] : pass->textures) {
+                for (const auto& [slot, binding] : pass->textures) {
                     static_cast<void>(slot);
-                    validateResource(resource, "Frame render texture");
+                    for (const FrameTextureCandidate& candidate :
+                         binding.candidates) {
+                        validateResource(
+                            candidate.resource,
+                            "Frame render texture candidate"
+                        );
+                    }
                 }
             } else if (const auto* command =
                            std::get_if<FrameCopyCommand>(&operation)) {
@@ -5065,10 +5382,16 @@ struct FramePlanExecutor::Impl final {
                         "Frame particle command references an invalid descriptor"
                     );
                 }
-                for (const auto& [slot, resource] :
+                for (const auto& [slot, binding] :
                      plan.particles[command->particleIndex].textures) {
                     static_cast<void>(slot);
-                    validateResource(resource, "Frame particle texture");
+                    for (const FrameTextureCandidate& candidate :
+                         binding.candidates) {
+                        validateResource(
+                            candidate.resource,
+                            "Frame particle texture candidate"
+                        );
+                    }
                 }
             }
         }
@@ -5083,38 +5406,38 @@ struct FramePlanExecutor::Impl final {
         validatePlanFramebufferReferences(plan);
 
         std::vector<ObjectOperationGroup> groups;
-        std::set<std::size_t> closedObjects;
-        std::set<std::size_t> scheduledParticles;
+        std::set<int> closedObjectIds;
+        std::set<int> scheduledParticleIds;
         for (std::size_t operationIndex = 0;
              operationIndex < plan.operations.size(); ++operationIndex) {
             ObjectOperationGroup identity = operationGroup(
                 plan, plan.operations[operationIndex], operationIndex
             );
             if (groups.empty() ||
-                groups.back().objectIndex != identity.objectIndex) {
+                groups.back().objectId != identity.objectId) {
                 if (!groups.empty()) {
-                    closedObjects.emplace(groups.back().objectIndex);
+                    closedObjectIds.emplace(groups.back().objectId);
                 }
-                if (closedObjects.contains(identity.objectIndex)) {
+                if (closedObjectIds.contains(identity.objectId)) {
                     throw Error(
                         ErrorCode::resourceValidation,
-                        "Frame plan operations for object index " +
-                            std::to_string(identity.objectIndex) +
+                        "Frame plan operations for runtime object id " +
+                            std::to_string(identity.objectId) +
                             " are not contiguous"
                     );
                 }
                 groups.push_back(std::move(identity));
-            } else if (groups.back().objectId != identity.objectId) {
+            } else if (groups.back().objectIndex != identity.objectIndex) {
                 throw Error(
                     ErrorCode::resourceValidation,
-                    "Frame plan reuses an object index with inconsistent object identities"
+                    "Frame plan reuses a runtime object id with inconsistent source templates"
                 );
             }
             groups.back().operationIndexes.push_back(operationIndex);
 
             if (std::holds_alternative<FrameParticleCommand>(
                     plan.operations[operationIndex]) &&
-                !scheduledParticles.emplace(groups.back().objectIndex).second) {
+                !scheduledParticleIds.emplace(groups.back().objectId).second) {
                 throw Error(
                     ErrorCode::resourceValidation,
                     "Frame plan schedules a particle object more than once"
@@ -5307,7 +5630,7 @@ struct FramePlanExecutor::Impl final {
                     [&](const FrameExecutionIssue& issue) {
                         return issue.severity ==
                                 FramePlanIssueSeverity::skipObject &&
-                            issue.objectIndex == group.objectIndex;
+                            issue.objectId == group.objectId;
                     }
                 );
                 if (frozenIssue != frozenIssues->end()) {
@@ -5386,7 +5709,7 @@ struct FramePlanExecutor::Impl final {
                             previousState = &*candidateParticleState;
                         } else if (frozenParticleBatches == nullptr) {
                             const auto previous = result.particleStates.find(
-                                group.objectIndex
+                                group.objectId
                             );
                             if (previous != result.particleStates.end()) {
                                 previousState = &previous->second;
@@ -5475,7 +5798,7 @@ struct FramePlanExecutor::Impl final {
             }
             if (candidateParticleState) {
                 result.particleStates.insert_or_assign(
-                    group.objectIndex,
+                    group.objectId,
                     std::move(*candidateParticleState)
                 );
             }
@@ -6061,7 +6384,7 @@ struct FramePlanExecutor::Impl final {
     GLuint puppetVertexArray = 0;
     GLuint puppetVertexBuffer = 0;
     GLuint puppetElementBuffer = 0;
-    std::map<std::size_t, ParticleState> particles;
+    std::map<int, ParticleState> particles;
     std::string outputId;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
@@ -6079,6 +6402,9 @@ struct FramePlanExecutor::Impl final {
     bool pointerLeftDown = false;
     std::optional<bool> isScreensaver;
     std::optional<script::ScriptMediaSnapshot> mediaSnapshot;
+    std::optional<std::uint64_t> mediaThumbnailRevision;
+    HostTextureSlot mediaThumbnailCurrent;
+    HostTextureSlot mediaThumbnailPrevious;
     std::vector<script::ScriptSoundRuntimeSnapshot> soundRuntimeStates;
 };
 
@@ -6140,6 +6466,75 @@ void FramePlanExecutor::setMediaSnapshot(
     std::optional<script::ScriptMediaSnapshot> snapshot
 ) {
     impl_->mediaSnapshot = std::move(snapshot);
+}
+void FramePlanExecutor::setMediaThumbnail(MediaThumbnailRGBA8 thumbnail) {
+    const std::size_t expected = Impl::checkedRGBA8ByteCount(
+        thumbnail.width, thumbnail.height
+    );
+    if (thumbnail.width == 0 || thumbnail.height == 0 ||
+        thumbnail.pixels.size() != expected) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Scene media thumbnail requires non-empty tightly packed RGBA8 pixels"
+        );
+    }
+    if (expected > 256 * 1024 * 1024) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Scene media thumbnail exceeds the 256 MiB allocation limit"
+        );
+    }
+    if (impl_->mediaThumbnailRevision &&
+        thumbnail.revision < *impl_->mediaThumbnailRevision) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Scene media thumbnail revision cannot move backwards"
+        );
+    }
+    if (impl_->mediaThumbnailRevision &&
+        thumbnail.revision == *impl_->mediaThumbnailRevision) {
+        if (impl_->mediaThumbnailCurrent.image &&
+            *impl_->mediaThumbnailCurrent.image == thumbnail) {
+            return;
+        }
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Scene media thumbnail pixels are immutable within one revision"
+        );
+    }
+    if (impl_->mediaThumbnailCurrent.image) {
+        impl_->mediaThumbnailPrevious.image =
+            impl_->mediaThumbnailCurrent.image;
+        impl_->mediaThumbnailPrevious.dirty = true;
+    }
+    impl_->mediaThumbnailRevision = thumbnail.revision;
+    impl_->mediaThumbnailCurrent.image = std::move(thumbnail);
+    impl_->mediaThumbnailCurrent.dirty = true;
+}
+void FramePlanExecutor::clearMediaThumbnail(std::uint64_t revision) {
+    if (impl_->mediaThumbnailRevision &&
+        revision < *impl_->mediaThumbnailRevision) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Scene media thumbnail revision cannot move backwards"
+        );
+    }
+    if (impl_->mediaThumbnailRevision &&
+        revision == *impl_->mediaThumbnailRevision) {
+        if (!impl_->mediaThumbnailCurrent.image) return;
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Scene media thumbnail presence is immutable within one revision"
+        );
+    }
+    if (impl_->mediaThumbnailCurrent.image) {
+        impl_->mediaThumbnailPrevious.image =
+            impl_->mediaThumbnailCurrent.image;
+        impl_->mediaThumbnailPrevious.dirty = true;
+    }
+    impl_->mediaThumbnailRevision = revision;
+    impl_->mediaThumbnailCurrent.image.reset();
+    impl_->mediaThumbnailCurrent.dirty = true;
 }
 void FramePlanExecutor::setSoundRuntimeStates(
     std::vector<script::ScriptSoundRuntimeSnapshot> states

@@ -312,6 +312,7 @@ public:
         invertY(false),
         dxPositionW(false),
         enhancedMsgs(false),
+        hlslCompatibleGlsl(false),
         debugInfo(false),
         useStorageBuffer(false),
         invariantAll(false),
@@ -511,6 +512,13 @@ public:
         enhancedMsgs = true;
     }
     bool getEnhancedMsgs() const { return enhancedMsgs && getSource() == EShSourceGlsl; }
+
+    void setHlslCompatibleGlsl(bool enabled) {
+        hlslCompatibleGlsl = enabled;
+    }
+    bool usesHlslTypeSemantics() const {
+        return getSource() == EShSourceHlsl || hlslCompatibleGlsl;
+    }
 
 #ifdef ENABLE_HLSL
     void setSource(EShSource s) { source = s; }
@@ -1180,6 +1188,7 @@ protected:
     bool invertY;
     bool dxPositionW;
     bool enhancedMsgs;
+    bool hlslCompatibleGlsl;
     bool debugInfo;
     bool useStorageBuffer;
     bool invariantAll;

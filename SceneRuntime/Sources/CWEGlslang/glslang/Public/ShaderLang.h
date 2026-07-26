@@ -273,6 +273,11 @@ enum EShMessages : unsigned {
     EShMsgAbsolutePath         = (1 << 16), // Output Absolute path for messages
     EShMsgDisplayErrorColumn   = (1 << 17), // Display error message column aswell as line
     EShMsgLinkTimeOptimization = (1 << 18), // perform cross-stage optimizations during linking
+    // Parse GLSL syntax while applying HLSL scalar/vector/matrix conversion
+    // rules. Wallpaper Engine shaders are GLSL-shaped source with DirectX
+    // expression semantics, so neither pure GLSL nor the HLSL grammar is the
+    // correct frontend contract.
+    EShMsgHlslCompatibleGlsl   = (1 << 19),
     LAST_ELEMENT_MARKER(EShMsgCount),
 };
 

@@ -266,11 +266,11 @@ std::optional<std::string> primaryTextureIdentity(const ImageObject& image) {
         }
         return *slots.front().name;
     };
-    // Match FrameGraph's first-pass precedence. Instance slots fill an absent
-    // authored slot; they do not replace one already present in the material.
-    std::optional<std::string> name = slotName(pass.userTextures);
-    if (!name) name = slotName(image.instanceUserTextures);
-    if (!name) name = slotName(pass.textures);
+    // The renderable's primary image is detected only from ordinary material
+    // textures. User textures are higher-priority shader providers, but they
+    // must not replace the image source used for dimensions, animation, layer
+    // identity, or TEX0FORMAT (matching CRenderable::detectTexture()).
+    std::optional<std::string> name = slotName(pass.textures);
     if (!name) name = slotName(image.instanceTextures);
     if (!name) return std::nullopt;
     std::string path = "materials/" + *name;
@@ -303,6 +303,10 @@ std::vector<script::ScriptLayerDescriptor> sceneLayerDescriptors(
             .id = object.base.id,
             .name = object.base.name,
             .type = type,
+            .sourceObjectIndex = index,
+            .parent = object.base.parent,
+            .disablePropagation = object.base.disablePropagation,
+            .initialConfig = object.initialConfig,
         };
         const auto add = [&](std::string_view name, const DynamicValue& value) {
             descriptor.properties.emplace(
@@ -313,6 +317,11 @@ std::vector<script::ScriptLayerDescriptor> sceneLayerDescriptors(
                     objectPointer(index, name)
                 ).value
             );
+            if (value.animation) {
+                descriptor.propertyAnimations.emplace(
+                    std::string(name), *value.animation
+                );
+            }
         };
         add("origin", object.base.origin);
         add("scale", object.base.scale);
@@ -353,6 +362,58 @@ std::vector<script::ScriptLayerDescriptor> sceneLayerDescriptors(
             add("volume", sound->volume);
         }
         result.push_back(std::move(descriptor));
+    }
+    return result;
+}
+
+struct LayerDynamicPropertyRef final {
+    std::string_view name;
+    const DynamicValue* value = nullptr;
+};
+
+std::vector<LayerDynamicPropertyRef> layerDynamicProperties(
+    const SceneObject& object
+) {
+    std::vector<LayerDynamicPropertyRef> result{
+        {"origin", &object.base.origin},
+        {"scale", &object.base.scale},
+        {"angles", &object.base.angles},
+        {"visible", &object.base.visible},
+    };
+    if (const auto* image = std::get_if<ImageObject>(&object.data)) {
+        result.insert(result.end(), {
+            {"alpha", &image->alpha},
+            {"color", &image->color},
+            {"size", &image->size},
+            {"parallaxDepth", &image->parallaxDepth},
+            {"brightness", &image->brightness},
+            {"colorBlendMode", &image->colorBlendMode},
+        });
+    } else if (const auto* text = std::get_if<TextObject>(&object.data)) {
+        result.insert(result.end(), {
+            {"text", &text->text},
+            {"pointSize", &text->pointSize},
+            {"size", &text->size},
+            {"color", &text->color},
+            {"alpha", &text->alpha},
+            {"padding", &text->padding},
+            {"spacing", &text->spacing},
+        });
+    } else if (const auto* particle = std::get_if<ParticleObject>(&object.data)) {
+        result.insert(result.end(), {
+            {"parallaxDepth", &particle->parallaxDepth},
+            {"enabled", &particle->instanceOverride.enabled},
+            {"alpha", &particle->instanceOverride.alpha},
+            {"size", &particle->instanceOverride.size},
+            {"lifetime", &particle->instanceOverride.lifetime},
+            {"rate", &particle->instanceOverride.rate},
+            {"speed", &particle->instanceOverride.speed},
+            {"count", &particle->instanceOverride.count},
+            {"color", &particle->instanceOverride.color},
+            {"colorMultiplier", &particle->instanceOverride.colorMultiplier},
+        });
+    } else if (const auto* sound = std::get_if<SoundObject>(&object.data)) {
+        result.push_back({"volume", &sound->volume});
     }
     return result;
 }
@@ -1105,37 +1166,190 @@ SceneGraphSnapshot SceneGraph::snapshot(EvaluationFrame& frame) const {
     SceneGraphSnapshot result;
     result.modelRevision = frame.modelRevision();
     result.propertyValues = frame.propertyValues();
-    result.initializationOrder = initializationOrder_;
-    result.renderOrder = renderOrder_;
-    result.nodes.reserve(objects.size());
-    for (std::size_t index = 0; index < objects.size(); ++index) {
-        const ObjectBase& object = objects[index].base;
+    std::map<int, std::map<std::string, EvaluatedValue>> evaluatedProperties;
+    const auto layersBeforeEvaluation = scriptState_->layerRegistry->enumerate();
+    for (const script::ScriptLayerDescriptor& layer : layersBeforeEvaluation) {
+        if (layer.dynamic) continue;
+        if (layer.sourceObjectIndex >= objects.size()) {
+            graphError(
+                *model_, SceneModelErrorCode::danglingReference,
+                "/objects", {std::to_string(layer.id)},
+                "SceneScript layer references an unavailable source object"
+            );
+        }
+        const SceneObject& object = objects[layer.sourceObjectIndex];
+        for (const LayerDynamicPropertyRef& property :
+             layerDynamicProperties(object)) {
+            evaluatedProperties[layer.id].insert_or_assign(
+                std::string(property.name),
+                frame.evaluate(
+                    *property.value,
+                    objectPointer(layer.sourceObjectIndex, property.name),
+                    script::ScriptPropertyOwner{
+                        .layerId = layer.id,
+                        .type = script::ScriptPropertyOwnerType::layer,
+                        .property = std::string(property.name),
+                    }
+                )
+            );
+        }
+    }
+
+    const auto layers = scriptState_->layerRegistry->enumerate();
+    result.nodes.reserve(layers.size());
+    result.renderOrder.reserve(layers.size());
+    std::map<int, std::size_t> nodeIndices;
+    for (const script::ScriptLayerDescriptor& layer : layers) {
+        if (layer.sourceObjectIndex >= objects.size()) {
+            graphError(
+                *model_, SceneModelErrorCode::danglingReference,
+                "/objects", {std::to_string(layer.id)},
+                "SceneScript layer references an unavailable source object"
+            );
+        }
         SceneGraphNodeSnapshot node;
-        node.objectIndex = index;
-        node.id = object.id;
-        node.parent = object.parent;
-        node.disablePropagation = object.disablePropagation;
-        node.origin = frame.evaluate(object.origin, objectPointer(index, "origin"));
-        node.scale = frame.evaluate(object.scale, objectPointer(index, "scale"));
-        node.angles = frame.evaluate(object.angles, objectPointer(index, "angles"));
-        node.visible = frame.evaluate(object.visible, objectPointer(index, "visible"));
+        node.objectIndex = layer.sourceObjectIndex;
+        node.id = layer.id;
+        node.dynamic = layer.dynamic;
+        node.parent = layer.parent;
+        node.disablePropagation = layer.disablePropagation;
+        node.layerProperties = layer.properties;
+        const auto value = [&](std::string_view property) -> EvaluatedValue {
+            if (const auto layerValues = evaluatedProperties.find(layer.id);
+                layerValues != evaluatedProperties.end()) {
+                if (const auto found = layerValues->second.find(
+                        std::string(property)
+                    ); found != layerValues->second.end()) {
+                    return found->second;
+                }
+            }
+            const auto found = layer.properties.find(std::string(property));
+            if (found == layer.properties.end()) {
+                graphError(
+                    *model_, SceneModelErrorCode::missingField,
+                    objectPointer(layer.sourceObjectIndex, property), {},
+                    "SceneScript layer snapshot is missing property '" +
+                        std::string(property) + "'"
+                );
+            }
+            return {
+                .value = found->second,
+                .source = DynamicValueSource::literal,
+            };
+        };
+        node.origin = value("origin");
+        node.scale = value("scale");
+        node.angles = value("angles");
+        node.visible = value("visible");
         node.localTransform = {
-            .origin = vector3Value(*model_, node.origin, objectPointer(index, "origin"), "Object origin"),
-            .scale = vector3Value(*model_, node.scale, objectPointer(index, "scale"), "Object scale"),
-            .angles = vector3Value(*model_, node.angles, objectPointer(index, "angles"), "Object angles"),
+            .origin = vector3Value(
+                *model_, node.origin,
+                objectPointer(layer.sourceObjectIndex, "origin"), "Object origin"
+            ),
+            .scale = vector3Value(
+                *model_, node.scale,
+                objectPointer(layer.sourceObjectIndex, "scale"), "Object scale"
+            ),
+            .angles = vector3Value(
+                *model_, node.angles,
+                objectPointer(layer.sourceObjectIndex, "angles"), "Object angles"
+            ),
         };
         node.worldTransform = node.localTransform;
-        node.isVisible = booleanValue(*model_, node.visible, objectPointer(index, "visible"));
+        node.isVisible = booleanValue(
+            *model_, node.visible,
+            objectPointer(layer.sourceObjectIndex, "visible")
+        );
+        const std::size_t nodeIndex = result.nodes.size();
+        if (!nodeIndices.emplace(node.id, nodeIndex).second) {
+            graphError(
+                *model_, SceneModelErrorCode::duplicateId,
+                objectPointer(layer.sourceObjectIndex, "id"), {},
+                "SceneGraph snapshot contains duplicate runtime layer id"
+            );
+        }
         result.nodes.push_back(std::move(node));
     }
-    for (const std::size_t index : initializationOrder_) {
+
+    std::vector<VisitState> renderStates(
+        result.nodes.size(), VisitState::unvisited
+    );
+    const auto appendRenderNode = [&](auto&& self, std::size_t index) -> void {
+        if (renderStates[index] == VisitState::visited) return;
+        const SceneGraphNodeSnapshot& node = result.nodes[index];
+        if (renderStates[index] == VisitState::visiting) {
+            graphError(
+                *model_, SceneModelErrorCode::referenceCycle,
+                objectPointer(node.objectIndex, "dependencies"),
+                {std::to_string(node.id)},
+                "SceneScript runtime layer dependency cycle detected"
+            );
+        }
+        renderStates[index] = VisitState::visiting;
+        const SceneObject& sourceObject = objects.at(node.objectIndex);
+        for (std::size_t dependencyIndex = 0;
+             dependencyIndex < sourceObject.base.dependencies.size();
+             ++dependencyIndex) {
+            const int dependencyId =
+                sourceObject.base.dependencies[dependencyIndex].id;
+            // Self dependencies are an authored no-op. Compare against the
+            // source id so clones preserve the same behavior as their source.
+            if (dependencyId == sourceObject.base.id) continue;
+            const auto dependency = nodeIndices.find(dependencyId);
+            if (dependency == nodeIndices.end()) {
+                graphError(
+                    *model_, SceneModelErrorCode::danglingReference,
+                    objectPointer(node.objectIndex, "dependencies") + '/' +
+                        std::to_string(dependencyIndex),
+                    {std::to_string(node.id)},
+                    "SceneScript runtime layer references an unavailable dependency"
+                );
+            }
+            self(self, dependency->second);
+        }
+        renderStates[index] = VisitState::visited;
+        result.renderOrder.push_back(index);
+    };
+    // LayerRegistry order is the script-controlled stable order. Only move a
+    // dependency ahead of its consumer; otherwise preserve that order.
+    for (std::size_t index = 0; index < result.nodes.size(); ++index) {
+        appendRenderNode(appendRenderNode, index);
+    }
+
+    std::vector<VisitState> states(result.nodes.size(), VisitState::unvisited);
+    const auto resolveTransform = [&](auto&& self, std::size_t index) -> void {
+        if (states[index] == VisitState::visited) return;
+        if (states[index] == VisitState::visiting) {
+            graphError(
+                *model_, SceneModelErrorCode::referenceCycle,
+                objectPointer(result.nodes[index].objectIndex, "parent"),
+                {std::to_string(result.nodes[index].id)},
+                "SceneScript runtime layer parent cycle detected"
+            );
+        }
+        states[index] = VisitState::visiting;
         SceneGraphNodeSnapshot& node = result.nodes[index];
         if (node.parent) {
+            const auto parent = nodeIndices.find(*node.parent);
+            if (parent == nodeIndices.end()) {
+                graphError(
+                    *model_, SceneModelErrorCode::danglingReference,
+                    objectPointer(node.objectIndex, "parent"),
+                    {std::to_string(*node.parent)},
+                    "SceneScript runtime layer references an unavailable parent"
+                );
+            }
+            self(self, parent->second);
             node.worldTransform = combine(
-                result.nodes[objectIndices_.at(*node.parent)].worldTransform,
+                result.nodes[parent->second].worldTransform,
                 node.localTransform
             );
         }
+        states[index] = VisitState::visited;
+        result.initializationOrder.push_back(index);
+    };
+    for (std::size_t index = 0; index < result.nodes.size(); ++index) {
+        resolveTransform(resolveTransform, index);
     }
     // Dynamic object fields can execute SceneScript callbacks that mutate
     // texture-animation and sound state through the shared layer registry.

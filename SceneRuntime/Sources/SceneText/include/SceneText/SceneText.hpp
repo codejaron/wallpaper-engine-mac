@@ -36,10 +36,22 @@ struct FontSource final {
     [[nodiscard]] static FontSource system(std::string name);
 };
 
+enum class HorizontalAlignment {
+    left,
+    center,
+    right,
+};
+
 struct RasterRequest final {
     std::string utf8;
     double pointSize = 0.0;
     FontSource font;
+    double maximumWidth = 0.0;
+    std::size_t maximumRows = 0;
+    bool useEllipsis = false;
+    double characterSpacing = 0.0;
+    double lineSpacing = 0.0;
+    HorizontalAlignment horizontalAlignment = HorizontalAlignment::center;
 };
 
 struct RasterizedText final {
@@ -53,6 +65,8 @@ struct RasterizedText final {
     double typographicWidth = 0.0;
     double ascent = 0.0;
     double descent = 0.0;
+    std::size_t lineCount = 0;
+    bool truncated = false;
 };
 
 [[nodiscard]] RasterizedText rasterize(const RasterRequest& request);

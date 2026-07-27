@@ -84,7 +84,7 @@ The import panel now correctly handles both individual wallpaper folders and par
 
 - **Particle compatibility** — The deterministic sprite path supports box/sphere emitters, common random initializers, movement, and alpha fading. Trails/ropes, child and control-point systems, collision/boids, animated particle textures, and non-`genericparticle` multi-pass materials are not supported yet.
 - **Audio-reactive scenes** — Authored sound playback is supported, but macOS system-audio capture and Wallpaper Engine audio-input buffers are unavailable and fail explicitly.
-- **Text compatibility** — Text layers render, but non-zero character spacing and advanced row/width/ellipsis layout are not supported yet.
+- **Text compatibility** — Embedded and system fonts, multiline flow, character/line spacing, row/width limits, ellipsis, alignment, and authored transforms render natively. Text-layer effects and copy-background composition are not supported yet.
 - **Effect compatibility** — Image materials, passthrough scene-composite layers, multi-pass effects, framebuffer bindings, copy/swap/clear operations, camera parallax, and automatic projection are supported. Compose, puppet meshes, and other unmodeled effect features fail explicitly.
 - **User properties** — Boolean, slider, combo, color, and text-input values are applied live and persisted per display and Scene. Scene-texture, file, directory, and shortcut properties are currently visible but read-only.
 

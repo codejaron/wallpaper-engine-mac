@@ -186,7 +186,7 @@ final class ParticleExecutorTests: XCTestCase {
         )
     }
 
-    func testTextAnglesFollowLinuxNoRotationContract() throws {
+    func testTextAnglesApplyTheAuthoredLayerRotation() throws {
         let unrotated = try loadPipeline(
             fixture: makeFixture(
                 includeText: true,
@@ -202,7 +202,7 @@ final class ParticleExecutorTests: XCTestCase {
                 particleInstantaneousCount: 0,
                 textValue: "L",
                 textOrigin: "8 4 0",
-                textAngles: "0 0 3.141592653589793"
+                textAngles: "0 0 1.5707963267948966"
             ),
             context: nil
         )
@@ -213,10 +213,10 @@ final class ParticleExecutorTests: XCTestCase {
 
         try render(unrotated.executor, time: 1, delta: 0)
         try render(authoredRotation.executor, time: 1, delta: 0)
-        XCTAssertEqual(
+        XCTAssertNotEqual(
             try readPixels(authoredRotation.executor),
             try readPixels(unrotated.executor),
-            "Linux CText places text from origin and scale; authored angles must not rotate a date/text layer independently"
+            "Text layers use the same authored transform contract as other scene layers"
         )
     }
 

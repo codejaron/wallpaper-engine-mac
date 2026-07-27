@@ -36,6 +36,24 @@
 namespace we::scene::gl {
 namespace {
 
+constexpr double wallpaperEnginePointSizeToPixels = 4.0;
+constexpr double maximumWallpaperEngineTextPixelSize = 1024.0;
+
+double textPixelSize(double pointSize) {
+    const double scaled = pointSize * wallpaperEnginePointSizeToPixels;
+    if (!std::isfinite(scaled) || scaled <= 0.0) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Text raster point size must be finite and greater than zero"
+        );
+    }
+    return std::clamp(
+        std::round(scaled),
+        1.0,
+        maximumWallpaperEngineTextPixelSize
+    );
+}
+
 struct ActiveUniform final {
     std::string name;
     GLenum type = 0;
@@ -1718,11 +1736,34 @@ struct FramePlanExecutor::Impl final {
         std::string utf8;
         std::string font;
         double pointSize = 0.0;
+        double maximumWidth = 0.0;
+        std::size_t maximumRows = 0;
+        bool useEllipsis = false;
+        double characterSpacing = 0.0;
+        double lineSpacing = 0.0;
+        text::HorizontalAlignment horizontalAlignment =
+            text::HorizontalAlignment::center;
 
         [[nodiscard]] bool operator<(const TextRasterKey& other) const {
             if (font != other.font) return font < other.font;
             if (utf8 != other.utf8) return utf8 < other.utf8;
-            return pointSize < other.pointSize;
+            if (pointSize != other.pointSize) return pointSize < other.pointSize;
+            if (maximumWidth != other.maximumWidth) {
+                return maximumWidth < other.maximumWidth;
+            }
+            if (maximumRows != other.maximumRows) {
+                return maximumRows < other.maximumRows;
+            }
+            if (useEllipsis != other.useEllipsis) {
+                return useEllipsis < other.useEllipsis;
+            }
+            if (characterSpacing != other.characterSpacing) {
+                return characterSpacing < other.characterSpacing;
+            }
+            if (lineSpacing != other.lineSpacing) {
+                return lineSpacing < other.lineSpacing;
+            }
+            return horizontalAlignment < other.horizontalAlignment;
         }
     };
 
@@ -1834,19 +1875,37 @@ struct FramePlanExecutor::Impl final {
     }
 
     [[nodiscard]] const text::RasterizedText& cachedTextRaster(
-        const FrameTextDescriptor& descriptor,
-        double pointSize
+        const FrameTextDescriptor& descriptor
     ) {
-        if (!std::isfinite(pointSize) || pointSize <= 0.0) {
+        const double pointSize = textPixelSize(descriptor.pointSize);
+        text::HorizontalAlignment horizontalAlignment;
+        if (descriptor.horizontalAlignment == "left") {
+            horizontalAlignment = text::HorizontalAlignment::left;
+        } else if (descriptor.horizontalAlignment == "center") {
+            horizontalAlignment = text::HorizontalAlignment::center;
+        } else if (descriptor.horizontalAlignment == "right") {
+            horizontalAlignment = text::HorizontalAlignment::right;
+        } else {
             throw Error(
                 ErrorCode::resourceValidation,
-                "Text raster point size must be finite and greater than zero"
+                "Unsupported text alignment '" +
+                    descriptor.horizontalAlignment + "'"
             );
         }
+        const double maximumWidth = descriptor.limitWidth
+            ? descriptor.maxWidth : 0.0;
+        const std::size_t maximumRows = descriptor.limitRows
+            ? static_cast<std::size_t>(descriptor.maxRows) : 0;
         TextRasterKey key{
             .utf8 = descriptor.text,
             .font = descriptor.font,
             .pointSize = pointSize,
+            .maximumWidth = maximumWidth,
+            .maximumRows = maximumRows,
+            .useEllipsis = descriptor.limitUseEllipsis,
+            .characterSpacing = descriptor.spacing.x,
+            .lineSpacing = descriptor.spacing.y,
+            .horizontalAlignment = horizontalAlignment,
         };
         if (auto found = textRasters.find(key); found != textRasters.end()) {
             found->second.lastUsed = nextTextRasterUse();
@@ -1865,6 +1924,12 @@ struct FramePlanExecutor::Impl final {
             .utf8 = descriptor.text,
             .pointSize = pointSize,
             .font = font,
+            .maximumWidth = maximumWidth,
+            .maximumRows = maximumRows,
+            .useEllipsis = descriptor.limitUseEllipsis,
+            .characterSpacing = descriptor.spacing.x,
+            .lineSpacing = descriptor.spacing.y,
+            .horizontalAlignment = horizontalAlignment,
         });
         const std::size_t bytes = rasterized.coverage.size();
         if (bytes > std::numeric_limits<std::size_t>::max() -
@@ -3895,15 +3960,7 @@ struct FramePlanExecutor::Impl final {
         }
         static_cast<void>(framebuffer(command.destination, aliases));
         const auto& transform = descriptor.worldTransform;
-        const double averageScale =
-            (std::abs(transform.scale.x) + std::abs(transform.scale.y)) * 0.5;
-        const double rasterScale = averageScale > 0.0 && averageScale < 1.0
-            ? std::min(1.0 / averageScale, 32.0)
-            : 1.0;
-        const text::RasterizedText& rasterized = cachedTextRaster(
-            descriptor,
-            descriptor.pointSize * rasterScale
-        );
+        const text::RasterizedText& rasterized = cachedTextRaster(descriptor);
         const std::array<double, 4> layoutComponents{
             descriptor.size.x, descriptor.size.y,
             descriptor.padding.x, descriptor.padding.y,
@@ -3918,49 +3975,37 @@ struct FramePlanExecutor::Impl final {
         }
         const double intrinsicWidth = static_cast<double>(rasterized.width);
         const double intrinsicHeight = static_cast<double>(rasterized.height);
-        const double layoutWidth = descriptor.size.x > 0.0
-            ? descriptor.size.x
-            : intrinsicWidth + descriptor.padding.x * 2.0;
-        const double layoutHeight = descriptor.size.y > 0.0
-            ? descriptor.size.y
-            : intrinsicHeight + descriptor.padding.y * 2.0;
-        const auto alignmentOffset = [](
+        const auto anchorOffset = [](
             std::string_view alignment,
             std::string_view leading,
             std::string_view trailing,
-            double layoutExtent,
-            double intrinsicExtent,
-            double padding
+            double extent
         ) {
             if (alignment == leading) {
-                return -layoutExtent * 0.5 + padding;
+                return 0.0;
             }
             if (alignment == "center") {
-                return -intrinsicExtent * 0.5;
+                return -extent * 0.5;
             }
             if (alignment == trailing) {
-                return layoutExtent * 0.5 - padding - intrinsicExtent;
+                return -extent;
             }
             throw Error(
                 ErrorCode::resourceValidation,
                 "Unsupported text alignment '" + std::string(alignment) + "'"
             );
         };
-        const double alignmentX = alignmentOffset(
+        const double alignmentX = anchorOffset(
             descriptor.horizontalAlignment,
             "left",
             "right",
-            layoutWidth,
-            intrinsicWidth,
-            descriptor.padding.x
+            intrinsicWidth
         );
-        const double alignmentY = alignmentOffset(
+        const double alignmentY = anchorOffset(
             descriptor.verticalAlignment,
             "top",
             "bottom",
-            layoutHeight,
-            intrinsicHeight,
-            descriptor.padding.y
+            intrinsicHeight
         );
 
         const double effectiveAlpha = descriptor.color.alpha * descriptor.alpha;
@@ -3990,10 +4035,19 @@ struct FramePlanExecutor::Impl final {
         );
         const Matrix world = multiply(
             translation(originX, originY, float(transform.origin.z)),
-            scaling(
-                float(transform.scale.x),
-                float(transform.scale.y),
-                float(transform.scale.z)
+            multiply(
+                rotationZ(-checkedFloat(transform.angles.z, "Text Z angle")),
+                multiply(
+                    rotationY(checkedFloat(transform.angles.y, "Text Y angle")),
+                    multiply(
+                        rotationX(-checkedFloat(transform.angles.x, "Text X angle")),
+                        scaling(
+                            checkedFloat(transform.scale.x, "Text scale X"),
+                            checkedFloat(transform.scale.y, "Text scale Y"),
+                            checkedFloat(transform.scale.z, "Text scale Z")
+                        )
+                    )
+                )
             )
         );
         const Matrix alignment = translation(

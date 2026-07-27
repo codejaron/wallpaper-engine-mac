@@ -2064,11 +2064,12 @@ final class FrameExecutorPixelTests: XCTestCase {
         })
     }
 
-    func testTextHorizontalAlignmentUsesAuthoredLayoutBounds() throws {
+    func testTextHorizontalAlignmentUsesTheRenderedTextAsItsAnchor() throws {
         let left = try loadTextFixture(
             font: "systemfont_arial",
             horizontalAlignment: "left",
             origin: "32 32 0",
+            scale: "0.25 0.25 1",
             size: "56 40"
         )
         defer { destroy(left) }
@@ -2076,6 +2077,7 @@ final class FrameExecutorPixelTests: XCTestCase {
             font: "systemfont_arial",
             horizontalAlignment: "right",
             origin: "32 32 0",
+            scale: "0.25 0.25 1",
             size: "56 40"
         )
         defer { destroy(right) }
@@ -2096,15 +2098,16 @@ final class FrameExecutorPixelTests: XCTestCase {
                 width: Int(we_scene_frame_executor_width(right.executor))
             )
         )
-        XCTAssertLessThan(leftBounds.minX, rightBounds.minX)
-        XCTAssertLessThan(leftBounds.maxX, rightBounds.maxX)
+        XCTAssertGreaterThan(leftBounds.minX, rightBounds.minX)
+        XCTAssertGreaterThan(leftBounds.maxX, rightBounds.maxX)
     }
 
-    func testTextVerticalAlignmentUsesAuthoredLayoutBounds() throws {
+    func testTextVerticalAlignmentUsesTheRenderedTextAsItsAnchor() throws {
         let top = try loadTextFixture(
             font: "systemfont_arial",
             verticalAlignment: "top",
             origin: "32 32 0",
+            scale: "0.25 0.25 1",
             size: "40 56"
         )
         defer { destroy(top) }
@@ -2112,6 +2115,7 @@ final class FrameExecutorPixelTests: XCTestCase {
             font: "systemfont_arial",
             verticalAlignment: "bottom",
             origin: "32 32 0",
+            scale: "0.25 0.25 1",
             size: "40 56"
         )
         defer { destroy(bottom) }
@@ -2132,8 +2136,8 @@ final class FrameExecutorPixelTests: XCTestCase {
                 width: Int(we_scene_frame_executor_width(bottom.executor))
             )
         )
-        XCTAssertLessThan(topBounds.minY, bottomBounds.minY)
-        XCTAssertLessThan(topBounds.maxY, bottomBounds.maxY)
+        XCTAssertGreaterThan(topBounds.minY, bottomBounds.minY)
+        XCTAssertGreaterThan(topBounds.maxY, bottomBounds.maxY)
     }
 
     func testTextWithImplicitLayoutSizeStillRenders() throws {
@@ -2154,24 +2158,140 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
     }
 
-    func testTextRasterizationCompensatesForSmallAuthoredScale() throws {
-        let loaded = try loadTextFixture(
+    func testTextRasterizationKeepsAuthoredScaleInsteadOfCancellingIt() throws {
+        let smaller = try loadTextFixture(
             font: "systemfont_arial",
             origin: "32 32 0",
-            scale: "0.05 0.05 1",
-            size: "0 0"
+            scale: "0.25 0.25 1",
+            size: "0 0",
+            text: "WIDE"
         )
-        defer { destroy(loaded) }
+        defer { destroy(smaller) }
+        let larger = try loadTextFixture(
+            font: "systemfont_arial",
+            origin: "32 32 0",
+            scale: "0.5 0.5 1",
+            size: "0 0",
+            text: "WIDE"
+        )
+        defer { destroy(larger) }
 
-        try render(loaded.executor)
-        try assertNoExecutorIssues(loaded.executor)
-        let bounds = try XCTUnwrap(
+        try render(smaller.executor)
+        try render(larger.executor)
+        try assertNoExecutorIssues(smaller.executor)
+        try assertNoExecutorIssues(larger.executor)
+        let smallerBounds = try XCTUnwrap(
             redPixelBounds(
-                try readPixels(loaded.executor),
-                width: Int(we_scene_frame_executor_width(loaded.executor))
+                try readPixels(smaller.executor),
+                width: Int(we_scene_frame_executor_width(smaller.executor))
             )
         )
-        XCTAssertGreaterThan(bounds.pixelCount, 8)
+        let largerBounds = try XCTUnwrap(
+            redPixelBounds(
+                try readPixels(larger.executor),
+                width: Int(we_scene_frame_executor_width(larger.executor))
+            )
+        )
+        XCTAssertGreaterThan(
+            largerBounds.maxX - largerBounds.minX,
+            smallerBounds.maxX - smallerBounds.minX + 8
+        )
+        XCTAssertGreaterThan(
+            largerBounds.maxY - largerBounds.minY,
+            smallerBounds.maxY - smallerBounds.minY + 4
+        )
+    }
+
+    func testTextAppliesAuthoredRotationAroundItsOrigin() throws {
+        let unrotated = try loadTextFixture(
+            font: "systemfont_arial",
+            origin: "32 32 0",
+            scale: "0.25 0.25 1",
+            size: "0 0",
+            text: "WIDE"
+        )
+        defer { destroy(unrotated) }
+        let rotated = try loadTextFixture(
+            font: "systemfont_arial",
+            origin: "32 32 0",
+            scale: "0.25 0.25 1",
+            angles: "0 0 1.5707963267948966",
+            size: "0 0",
+            text: "WIDE"
+        )
+        defer { destroy(rotated) }
+
+        try render(unrotated.executor)
+        try render(rotated.executor)
+        let unrotatedBounds = try XCTUnwrap(
+            redPixelBounds(
+                try readPixels(unrotated.executor),
+                width: Int(we_scene_frame_executor_width(unrotated.executor))
+            )
+        )
+        let rotatedBounds = try XCTUnwrap(
+            redPixelBounds(
+                try readPixels(rotated.executor),
+                width: Int(we_scene_frame_executor_width(rotated.executor))
+            )
+        )
+        XCTAssertGreaterThan(
+            unrotatedBounds.maxX - unrotatedBounds.minX,
+            unrotatedBounds.maxY - unrotatedBounds.minY
+        )
+        XCTAssertGreaterThan(
+            rotatedBounds.maxY - rotatedBounds.minY,
+            rotatedBounds.maxX - rotatedBounds.minX
+        )
+    }
+
+    func testTextExecutorAppliesWidthRowAndEllipsisLayoutControls() throws {
+        let unbounded = try loadTextFixture(
+            font: "systemfont_arial",
+            origin: "32 32 0",
+            scale: "0.25 0.25 1",
+            size: "0 0",
+            text: "WIDE WIDE WIDE",
+            pointSize: 10
+        )
+        defer { destroy(unbounded) }
+        let constrained = try loadTextFixture(
+            font: "systemfont_arial",
+            origin: "32 32 0",
+            scale: "0.25 0.25 1",
+            size: "0 0",
+            text: "WIDE WIDE WIDE",
+            pointSize: 10,
+            maximumWidth: 100,
+            maximumRows: 2,
+            useEllipsis: true
+        )
+        defer { destroy(constrained) }
+
+        try render(unbounded.executor)
+        try render(constrained.executor)
+        try assertNoExecutorIssues(unbounded.executor)
+        try assertNoExecutorIssues(constrained.executor)
+        let unboundedBounds = try XCTUnwrap(
+            redPixelBounds(
+                try readPixels(unbounded.executor),
+                width: Int(we_scene_frame_executor_width(unbounded.executor))
+            )
+        )
+        let constrainedBounds = try XCTUnwrap(
+            redPixelBounds(
+                try readPixels(constrained.executor),
+                width: Int(we_scene_frame_executor_width(constrained.executor))
+            )
+        )
+        XCTAssertLessThan(
+            constrainedBounds.maxX - constrainedBounds.minX,
+            unboundedBounds.maxX - unboundedBounds.minX
+        )
+        XCTAssertGreaterThan(
+            constrainedBounds.maxY - constrainedBounds.minY,
+            unboundedBounds.maxY - unboundedBounds.minY
+        )
     }
 
     func testTextGlyphCoverageUsesWallpaperEngineTopLeftOrientation() throws {
@@ -2792,8 +2912,14 @@ final class FrameExecutorPixelTests: XCTestCase {
         verticalAlignment: String = "center",
         origin: String = "0 0 0",
         scale: String = "1 1 1",
+        angles: String? = nil,
         size: String = "64 64",
         text: String = "I",
+        pointSize: Double = 20,
+        spacing: String = "0 0",
+        maximumWidth: Double? = nil,
+        maximumRows: Int? = nil,
+        useEllipsis: Bool = false,
         fontData: Data? = nil
     ) throws -> RuntimePipeline {
         let root = FileManager.default.temporaryDirectory
@@ -2814,19 +2940,32 @@ final class FrameExecutorPixelTests: XCTestCase {
             "file": "scene.json", "title": "Text executor fixture",
             "type": "scene", "version": 2,
         ]
+        var textObject: [String: Any] = [
+            "alpha": 1, "color": "255 0 0 255", "font": font,
+            "horizontalalign": horizontalAlignment, "id": 1, "name": "Text",
+            "origin": origin, "padding": "0 0", "pointsize": pointSize,
+            "scale": scale, "size": size, "spacing": spacing, "text": text,
+            "verticalalign": verticalAlignment, "visible": true,
+        ]
+        if let angles {
+            textObject["angles"] = angles
+        }
+        if let maximumWidth {
+            textObject["limitwidth"] = true
+            textObject["maxwidth"] = maximumWidth
+        }
+        if let maximumRows {
+            textObject["limitrows"] = true
+            textObject["maxrows"] = maximumRows
+        }
+        textObject["limituseellipsis"] = useEllipsis
         let scene: [String: Any] = [
             "camera": ["center": "0 0 -1", "eye": "0 0 0", "up": "0 1 0"],
             "general": [
                 "clearcolor": "0 0 0 0",
                 "orthogonalprojection": ["height": 64, "width": 64],
             ],
-            "objects": [[
-                "alpha": 1, "color": "255 0 0 255", "font": font,
-                "horizontalalign": horizontalAlignment, "id": 1, "name": "Text",
-                "origin": origin, "padding": "0 0", "pointsize": 20,
-                "scale": scale, "size": size, "spacing": "0 0", "text": text,
-                "verticalalign": verticalAlignment, "visible": true,
-            ]],
+            "objects": [textObject],
             "version": 1,
         ]
         try makePackage([

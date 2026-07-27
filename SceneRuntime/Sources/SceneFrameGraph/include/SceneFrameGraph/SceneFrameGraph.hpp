@@ -226,6 +226,11 @@ struct FrameTextDescriptor {
     ObjectTransform worldTransform;
     std::string horizontalAlignment;
     std::string verticalAlignment;
+    bool limitRows = false;
+    bool limitUseEllipsis = false;
+    bool limitWidth = false;
+    int maxRows = 0;
+    double maxWidth = 0.0;
 };
 
 enum class FrameParticleRendererKind {

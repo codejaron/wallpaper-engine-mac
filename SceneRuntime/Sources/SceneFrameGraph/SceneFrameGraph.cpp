@@ -964,15 +964,6 @@ private:
                     "Perspective projection is not implemented for this layer; the Linux runtime ignores this flag"
                 );
             }
-            if (const auto* text = std::get_if<TextObject>(&object.data)) {
-                if (text->limitRows || text->limitWidth || text->limitUseEllipsis) {
-                    addIssue(
-                        FramePlanIssueCode::textRenderingUnavailable,
-                        node.id, objectPointer(node.objectIndex),
-                        "Text row limiting, width limiting, and ellipsis layout are ignored to match the Linux runtime"
-                    );
-                }
-            }
             for (const auto* value : {&node.origin, &node.scale, &node.angles, &node.visible}) {
                 if (value->source == DynamicValueSource::scriptInitial ||
                     value->source == DynamicValueSource::scriptUnavailable) {
@@ -1426,10 +1417,20 @@ private:
                 *model_, evaluate(text->spacing, base + "/spacing", node.id),
                 base + "/spacing", "Text spacing"
             );
-            if (spacing.x != 0.0 || spacing.y != 0.0) {
-                addIssue(FramePlanIssueCode::textRenderingUnavailable, node.id,
-                         base + "/spacing",
-                         "Non-zero text character or line spacing is ignored to match the Linux runtime");
+            if (text->limitRows && text->maxRows <= 0) {
+                frameError(
+                    *model_, SceneModelErrorCode::invalidValue,
+                    base + "/maxrows",
+                    "Text maximum rows must be greater than zero when row limiting is enabled"
+                );
+            }
+            if (text->limitWidth &&
+                (!std::isfinite(text->maxWidth) || text->maxWidth <= 0.0)) {
+                frameError(
+                    *model_, SceneModelErrorCode::invalidValue,
+                    base + "/maxwidth",
+                    "Text maximum width must be finite and greater than zero when width limiting is enabled"
+                );
             }
             const std::size_t descriptorIndex = plan_.texts.size();
             plan_.texts.push_back({
@@ -1450,6 +1451,11 @@ private:
                 .worldTransform = node.worldTransform,
                 .horizontalAlignment = text->horizontalAlignment,
                 .verticalAlignment = text->verticalAlignment,
+                .limitRows = text->limitRows,
+                .limitUseEllipsis = text->limitUseEllipsis,
+                .limitWidth = text->limitWidth,
+                .maxRows = text->maxRows,
+                .maxWidth = text->maxWidth,
             });
             return descriptorIndex;
     }

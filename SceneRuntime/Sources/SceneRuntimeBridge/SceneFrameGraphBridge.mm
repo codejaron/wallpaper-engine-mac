@@ -563,6 +563,11 @@ extern "C" int we_scene_frame_plan_text_info(
     };
     out_info->horizontal_alignment = value.horizontalAlignment.c_str();
     out_info->vertical_alignment = value.verticalAlignment.c_str();
+    out_info->limit_rows = value.limitRows ? 1 : 0;
+    out_info->limit_use_ellipsis = value.limitUseEllipsis ? 1 : 0;
+    out_info->limit_width = value.limitWidth ? 1 : 0;
+    out_info->max_rows = value.maxRows;
+    out_info->max_width = value.maxWidth;
     return 1;
 }
 

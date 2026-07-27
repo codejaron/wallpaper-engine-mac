@@ -3736,12 +3736,17 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
             "font": "Helvetica",
             "horizontalalign": "right",
             "id": 8,
+            "limitrows": true,
+            "limituseellipsis": true,
+            "limitwidth": true,
+            "maxrows": 2,
+            "maxwidth": 96,
             "name": "Text",
             "origin": "30 40 5",
             "padding": "3 4",
             "pointsize": 27.5,
             "size": "120 48",
-            "spacing": "0 0",
+            "spacing": "1 2",
             "text": "Frame text",
             "verticalalign": "bottom",
             "visible": true,
@@ -3773,10 +3778,17 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(descriptor.alpha, 0.75, accuracy: 1e-6)
         XCTAssertEqual(descriptor.padding_x, 3, accuracy: 1e-6)
         XCTAssertEqual(descriptor.padding_y, 4, accuracy: 1e-6)
+        XCTAssertEqual(descriptor.spacing_x, 1, accuracy: 1e-6)
+        XCTAssertEqual(descriptor.spacing_y, 2, accuracy: 1e-6)
         XCTAssertEqual(descriptor.world_transform.origin.x, 30, accuracy: 1e-6)
         XCTAssertEqual(descriptor.world_transform.origin.y, 40, accuracy: 1e-6)
         XCTAssertEqual(string(descriptor.horizontal_alignment), "right")
         XCTAssertEqual(string(descriptor.vertical_alignment), "bottom")
+        XCTAssertEqual(descriptor.limit_rows, 1)
+        XCTAssertEqual(descriptor.limit_use_ellipsis, 1)
+        XCTAssertEqual(descriptor.limit_width, 1)
+        XCTAssertEqual(descriptor.max_rows, 2)
+        XCTAssertEqual(descriptor.max_width, 96, accuracy: 1e-6)
         let allOperations = try operations(plan)
         XCTAssertEqual(allOperations.last?.kind, WE_SCENE_FRAME_OPERATION_TEXT)
         XCTAssertEqual(allOperations.last?.text_index, 0)
@@ -4305,13 +4317,15 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertTrue(try operations(plan).contains { $0.object_id == 8 })
     }
 
-    func testUnsupportedTextSpacingWarnsAndUsesTheLinuxDefaultLayout() throws {
+    func testTextFlowControlsAreExecutableWithoutCompatibilityWarnings() throws {
         var documents = syntheticDocuments()
         var scene = documents["scene.json"] as! [String: Any]
         var objects = scene["objects"] as! [[String: Any]]
         objects.append([
-            "id": 8, "name": "Text", "text": "spaced", "pointsize": 20,
-            "spacing": "1 0", "visible": true,
+            "alignment": "bottomright", "id": 8, "name": "Text",
+            "text": "spaced", "pointsize": 20,
+            "limitrows": true, "limituseellipsis": true, "limitwidth": true,
+            "maxrows": 2, "maxwidth": 80, "spacing": "1 2", "visible": true,
         ])
         scene["objects"] = objects
         documents["scene.json"] = scene
@@ -4325,11 +4339,55 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(info.text_count, 1)
         XCTAssertTrue(try operations(plan).contains { $0.object_id == 7 })
         XCTAssertTrue(try operations(plan).contains { $0.object_id == 8 })
-        let issue = try XCTUnwrap(try issues(plan).first {
+        let descriptor = try XCTUnwrap(try texts(plan).first)
+        XCTAssertEqual(descriptor.limit_rows, 1)
+        XCTAssertEqual(descriptor.limit_use_ellipsis, 1)
+        XCTAssertEqual(descriptor.limit_width, 1)
+        XCTAssertEqual(descriptor.max_rows, 2)
+        XCTAssertEqual(descriptor.max_width, 80, accuracy: 1e-6)
+        XCTAssertEqual(descriptor.spacing_x, 1, accuracy: 1e-6)
+        XCTAssertEqual(descriptor.spacing_y, 2, accuracy: 1e-6)
+        XCTAssertEqual(string(descriptor.horizontal_alignment), "right")
+        XCTAssertEqual(string(descriptor.vertical_alignment), "bottom")
+        XCTAssertFalse(try issues(plan).contains {
             $0.code == WE_SCENE_FRAME_ISSUE_TEXT_RENDERING_UNAVAILABLE &&
-                string($0.json_pointer).hasSuffix("/spacing")
+                $0.object_id == 8
         })
-        XCTAssertEqual(issue.severity, WE_SCENE_FRAME_ISSUE_WARNING)
+    }
+
+    func testEnabledTextLimitsRequirePositiveBounds() throws {
+        let cases: [(flag: String, bound: String, message: String)] = [
+            ("limitrows", "maxrows", "maximum rows"),
+            ("limitwidth", "maxwidth", "maximum width"),
+        ]
+        for testCase in cases {
+            var documents = syntheticDocuments()
+            var scene = documents["scene.json"] as! [String: Any]
+            var objects = scene["objects"] as! [[String: Any]]
+            objects.append([
+                "id": 8, "name": "Text", "pointsize": 20,
+                "text": "invalid limit", testCase.flag: true,
+                testCase.bound: 0, "visible": true,
+            ])
+            scene["objects"] = objects
+            documents["scene.json"] = scene
+            let fixture = try makeFixture(documents)
+            let loaded = try load(
+                assets: fixture.assets,
+                package: fixture.package,
+                root: fixture.root
+            )
+            defer { destroy(loaded) }
+            let plan = try createPlan(loaded.frameGraph)
+            defer { we_scene_frame_plan_destroy(plan) }
+
+            XCTAssertEqual(try planInfo(plan).text_count, 0)
+            let issue = try XCTUnwrap(try issues(plan).first {
+                $0.code == WE_SCENE_FRAME_ISSUE_OBJECT_PLANNING_FAILED &&
+                    $0.object_id == 8
+            })
+            XCTAssertTrue(string(issue.message).contains(testCase.message))
+        }
     }
 
     func testSolidLayerUsesTransparentProceduralFramebufferSource() throws {

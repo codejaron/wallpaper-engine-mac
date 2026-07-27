@@ -533,6 +533,11 @@ typedef struct WESceneFrameTextInfo {
     WESceneObjectTransform world_transform;
     const char* horizontal_alignment;
     const char* vertical_alignment;
+    int limit_rows;
+    int limit_use_ellipsis;
+    int limit_width;
+    int32_t max_rows;
+    double max_width;
 } WESceneFrameTextInfo;
 
 typedef struct WESceneFrameParticleInfo {

@@ -10,16 +10,34 @@ final class SceneTextTests: XCTestCase {
         return try Data(contentsOf: url)
     }
 
-    private func rasterize(_ text: String, pointSize: Double = 32) throws -> (WESceneTextTestBitmapRef, WESceneTextTestBitmapInfo) {
+    private func rasterize(
+        _ text: String,
+        pointSize: Double = 32,
+        maximumWidth: Double = 0,
+        maximumRows: Int = 0,
+        useEllipsis: Bool = false,
+        characterSpacing: Double = 0,
+        lineSpacing: Double = 0,
+        horizontalAlignment: Int32 = 1
+    ) throws -> (WESceneTextTestBitmapRef, WESceneTextTestBitmapInfo) {
         let font = try fontData()
         var error = [CChar](repeating: 0, count: 512)
+        var layout = WESceneTextTestLayoutOptions(
+            maximum_width: maximumWidth,
+            maximum_rows: maximumRows,
+            use_ellipsis: useEllipsis ? 1 : 0,
+            character_spacing: characterSpacing,
+            line_spacing: lineSpacing,
+            horizontal_alignment: horizontalAlignment
+        )
         let handle = font.withUnsafeBytes { bytes in
             text.withCString { utf8 in
-                we_scene_text_test_rasterize_font_bytes(
+                we_scene_text_test_rasterize_font_bytes_with_layout(
                     utf8,
                     pointSize,
                     bytes.bindMemory(to: UInt8.self).baseAddress,
                     bytes.count,
+                    &layout,
                     &error,
                     error.count
                 )
@@ -45,6 +63,99 @@ final class SceneTextTests: XCTestCase {
         XCTAssertTrue(coverage.contains { $0 != 0 })
         XCTAssertGreaterThan(info.ascent, 0)
         XCTAssertGreaterThan(info.baseline_from_top, 0)
+        XCTAssertEqual(info.line_count, 1)
+        XCTAssertEqual(info.truncated, 0)
+    }
+
+    func testExplicitLineBreakProducesMultipleRasterRows() throws {
+        let (singleHandle, singleInfo) = try rasterize("AAAA")
+        defer { we_scene_text_test_bitmap_destroy(singleHandle) }
+        let (multilineHandle, multilineInfo) = try rasterize("AA\nAA")
+        defer { we_scene_text_test_bitmap_destroy(multilineHandle) }
+
+        XCTAssertGreaterThan(multilineInfo.height, singleInfo.height)
+        XCTAssertLessThan(multilineInfo.width, singleInfo.width)
+        XCTAssertEqual(multilineInfo.line_count, 2)
+        XCTAssertEqual(multilineInfo.truncated, 0)
+    }
+
+    func testWidthLimitWrapsAtCoreTextLineBreaks() throws {
+        let (singleHandle, singleInfo) = try rasterize("AAAA AAAA")
+        defer { we_scene_text_test_bitmap_destroy(singleHandle) }
+        let (wrappedHandle, wrappedInfo) = try rasterize(
+            "AAAA AAAA",
+            maximumWidth: singleInfo.typographic_width * 0.6
+        )
+        defer { we_scene_text_test_bitmap_destroy(wrappedHandle) }
+
+        XCTAssertGreaterThan(wrappedInfo.line_count, 1)
+        XCTAssertGreaterThan(wrappedInfo.height, singleInfo.height)
+        XCTAssertLessThan(wrappedInfo.width, singleInfo.width)
+    }
+
+    func testRowLimitTruncatesAndEllipsisChangesVisibleCoverage() throws {
+        let text = "AAAA AAAA AAAA"
+        let (measuredHandle, measuredInfo) = try rasterize("AAAA")
+        defer { we_scene_text_test_bitmap_destroy(measuredHandle) }
+        let width = measuredInfo.typographic_width + 1
+        let (clippedHandle, clippedInfo) = try rasterize(
+            text,
+            maximumWidth: width,
+            maximumRows: 2
+        )
+        defer { we_scene_text_test_bitmap_destroy(clippedHandle) }
+        let (ellipsisHandle, ellipsisInfo) = try rasterize(
+            text,
+            maximumWidth: width,
+            maximumRows: 2,
+            useEllipsis: true
+        )
+        defer { we_scene_text_test_bitmap_destroy(ellipsisHandle) }
+
+        XCTAssertEqual(clippedInfo.line_count, 2)
+        XCTAssertEqual(clippedInfo.truncated, 1)
+        XCTAssertEqual(ellipsisInfo.line_count, 2)
+        XCTAssertEqual(ellipsisInfo.truncated, 1)
+        XCTAssertNotEqual(
+            Data(bytes: clippedInfo.coverage, count: clippedInfo.coverage_size),
+            Data(bytes: ellipsisInfo.coverage, count: ellipsisInfo.coverage_size)
+        )
+    }
+
+    func testCharacterAndLineSpacingChangeTheCorrespondingAxis() throws {
+        let (plainHandle, plainInfo) = try rasterize("AAAA")
+        defer { we_scene_text_test_bitmap_destroy(plainHandle) }
+        let (spacedHandle, spacedInfo) = try rasterize(
+            "AAAA", characterSpacing: 4
+        )
+        defer { we_scene_text_test_bitmap_destroy(spacedHandle) }
+        XCTAssertGreaterThan(spacedInfo.typographic_width, plainInfo.typographic_width)
+
+        let (plainLinesHandle, plainLinesInfo) = try rasterize("AA\nAA")
+        defer { we_scene_text_test_bitmap_destroy(plainLinesHandle) }
+        let (spacedLinesHandle, spacedLinesInfo) = try rasterize(
+            "AA\nAA", lineSpacing: 8
+        )
+        defer { we_scene_text_test_bitmap_destroy(spacedLinesHandle) }
+        XCTAssertGreaterThan(spacedLinesInfo.height, plainLinesInfo.height)
+    }
+
+    func testHorizontalAlignmentPositionsShortLinesInsideTheTextBlock() throws {
+        let (leftHandle, leftInfo) = try rasterize(
+            "AAAA\nA", horizontalAlignment: 0
+        )
+        defer { we_scene_text_test_bitmap_destroy(leftHandle) }
+        let (rightHandle, rightInfo) = try rasterize(
+            "AAAA\nA", horizontalAlignment: 2
+        )
+        defer { we_scene_text_test_bitmap_destroy(rightHandle) }
+
+        XCTAssertEqual(leftInfo.width, rightInfo.width)
+        XCTAssertEqual(leftInfo.height, rightInfo.height)
+        XCTAssertNotEqual(
+            Data(bytes: leftInfo.coverage, count: leftInfo.coverage_size),
+            Data(bytes: rightInfo.coverage, count: rightInfo.coverage_size)
+        )
     }
 
     func testRasterizationIsDeterministicAndIndependentOfRenderColor() throws {

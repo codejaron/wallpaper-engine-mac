@@ -3321,23 +3321,28 @@ private:
             literal(std::string("0 0")),
             DynamicValueParseMode::standard
         );
-        result.horizontalAlignment = optionalString(
-            document,
-            source,
-            "horizontalalign",
-            pointer
-        ).value_or(optionalString(
-            document,
-            source,
-            "alignment",
-            pointer
-        ).value_or("center"));
-        result.verticalAlignment = optionalString(
-            document,
-            source,
-            "verticalalign",
-            pointer
+        const std::string alignment = optionalString(
+            document, source, "alignment", pointer
         ).value_or("center");
+        const auto axisAlignment = [](
+            std::string_view combined,
+            std::string_view negative,
+            std::string_view positive
+        ) {
+            if (combined.find(negative) != std::string_view::npos) {
+                return std::string(negative);
+            }
+            if (combined.find(positive) != std::string_view::npos) {
+                return std::string(positive);
+            }
+            return std::string("center");
+        };
+        result.horizontalAlignment = optionalString(
+            document, source, "horizontalalign", pointer
+        ).value_or(axisAlignment(alignment, "left", "right"));
+        result.verticalAlignment = optionalString(
+            document, source, "verticalalign", pointer
+        ).value_or(axisAlignment(alignment, "top", "bottom"));
         result.perspective = optionalBool(
             document,
             source,

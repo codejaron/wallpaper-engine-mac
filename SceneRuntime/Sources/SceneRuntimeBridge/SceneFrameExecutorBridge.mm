@@ -1119,8 +1119,17 @@ extern "C" int we_scene_frame_executor_sound_info(
     out_info->object_id = value.objectId;
     out_info->visible = value.visible ? 1 : 0;
     out_info->source_count = value.sources.size();
-    out_info->playback_mode = value.playbackMode == FrameSoundPlaybackMode::loop
-        ? WE_SCENE_FRAME_SOUND_PLAYBACK_LOOP : WE_SCENE_FRAME_SOUND_PLAYBACK_ONCE;
+    switch (value.playbackMode) {
+        case FrameSoundPlaybackMode::loop:
+            out_info->playback_mode = WE_SCENE_FRAME_SOUND_PLAYBACK_LOOP;
+            break;
+        case FrameSoundPlaybackMode::random:
+            out_info->playback_mode = WE_SCENE_FRAME_SOUND_PLAYBACK_RANDOM;
+            break;
+        case FrameSoundPlaybackMode::single:
+            out_info->playback_mode = WE_SCENE_FRAME_SOUND_PLAYBACK_SINGLE;
+            break;
+    }
     out_info->volume = value.volume;
     out_info->start_silent = value.startSilent ? 1 : 0;
     out_info->mute_in_editor = value.muteInEditor ? 1 : 0;

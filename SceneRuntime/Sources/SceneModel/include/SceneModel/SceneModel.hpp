@@ -407,9 +407,15 @@ struct TextObject {
     double maxWidth = 0.0;
 };
 
+enum class SoundPlaybackMode {
+    loop,
+    random,
+    single,
+};
+
 struct SoundObject {
     std::vector<std::string> sounds;
-    std::optional<std::string> playbackMode;
+    SoundPlaybackMode playbackMode = SoundPlaybackMode::loop;
     DynamicValue volume;
     bool startSilent = false;
     bool muteInEditor = false;

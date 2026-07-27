@@ -2562,19 +2562,17 @@ private:
                     "Sound volume must be finite and in the range 0...1"
                 );
             }
-            FrameSoundPlaybackMode playbackMode = FrameSoundPlaybackMode::once;
-            if (sound->playbackMode && !sound->playbackMode->empty() &&
-                *sound->playbackMode != "once") {
-                if (*sound->playbackMode == "loop") {
+            FrameSoundPlaybackMode playbackMode;
+            switch (sound->playbackMode) {
+                case SoundPlaybackMode::loop:
                     playbackMode = FrameSoundPlaybackMode::loop;
-                } else {
-                    addIssue(
-                        FramePlanIssueCode::soundRuntimeUnavailable, node.id,
-                        base + "/playbackmode",
-                        "Sound playback mode '" + *sound->playbackMode +
-                            "' is not implemented by the Scene runtime"
-                    );
-                }
+                    break;
+                case SoundPlaybackMode::random:
+                    playbackMode = FrameSoundPlaybackMode::random;
+                    break;
+                case SoundPlaybackMode::single:
+                    playbackMode = FrameSoundPlaybackMode::single;
+                    break;
             }
             if (!std::isfinite(sound->minimumTime) ||
                 !std::isfinite(sound->maximumTime) ||

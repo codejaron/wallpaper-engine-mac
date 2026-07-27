@@ -3400,12 +3400,27 @@ private:
                 false
             ));
         }
-        result.playbackMode = optionalString(
+        const auto playbackMode = optionalString(
             document,
             source,
             "playbackmode",
-            pointer
+            pointer,
+            false
         );
+        if (!playbackMode || *playbackMode == "loop") {
+            result.playbackMode = SoundPlaybackMode::loop;
+        } else if (*playbackMode == "random") {
+            result.playbackMode = SoundPlaybackMode::random;
+        } else if (*playbackMode == "single") {
+            result.playbackMode = SoundPlaybackMode::single;
+        } else {
+            fail(
+                document,
+                childPointer(pointer, "playbackmode"),
+                SceneModelErrorCode::invalidValue,
+                "Sound playback mode must be loop, random, or single"
+            );
+        }
         result.volume = optionalDynamic(
             document,
             source,

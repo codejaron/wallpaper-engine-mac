@@ -36,6 +36,7 @@ typedef enum WESceneScriptTestLayerType {
     WE_SCENE_SCRIPT_TEST_LAYER_TEXT = 2,
     WE_SCENE_SCRIPT_TEST_LAYER_PARTICLE = 3,
     WE_SCENE_SCRIPT_TEST_LAYER_SOUND = 4,
+    WE_SCENE_SCRIPT_TEST_LAYER_GROUP = 5,
 } WESceneScriptTestLayerType;
 
 typedef enum WESceneScriptTestSoundRuntimeState {

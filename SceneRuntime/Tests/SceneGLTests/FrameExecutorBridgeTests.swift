@@ -3,6 +3,142 @@ import SceneRuntimeBridge
 import XCTest
 
 final class FrameExecutorBridgeTests: XCTestCase {
+    func testRenderableMayUseGroupAsRuntimeParent() throws {
+        let loaded = try loadEmptyFrameGraph(sceneObjects: [
+            [
+                "id": 139,
+                "name": "Transform group",
+                "origin": "2 3 0",
+                "scale": "2 2 1",
+                "visible": true,
+            ],
+            [
+                "id": 8,
+                "image": "models/image.json",
+                "name": "Grouped image",
+                "origin": "1 1 0",
+                "parent": 139,
+                "size": "2 2",
+                "visible": true,
+            ],
+        ])
+        defer {
+            we_scene_frame_graph_destroy(loaded.frameGraph)
+            we_scene_graph_destroy(loaded.graph)
+            we_scene_model_destroy(loaded.model)
+            we_scene_runtime_destroy(loaded.runtime)
+            try? FileManager.default.removeItem(at: loaded.root)
+        }
+
+        var error: WESceneRuntimeErrorRef?
+        guard let executor = we_scene_frame_executor_create(
+            loaded.frameGraph, &error
+        ) else {
+            throw failure("executor", error)
+        }
+        defer { we_scene_frame_executor_destroy(executor) }
+
+        var inputs = WESceneFrameInputs(
+            pointer_x: 0.5,
+            pointer_y: 0.5,
+            time_seconds: 0,
+            frame_time_seconds: 1.0 / 60.0
+        )
+        XCTAssertEqual(
+            we_scene_frame_executor_render(executor, &inputs, &error),
+            1,
+            errorMessage(error)
+        )
+    }
+
+    func testRandomAndSingleSoundModesReachFrameSnapshotWithoutRuntimeIssue() throws {
+        let modes: [(String, WESceneFrameSoundPlaybackMode)] = [
+            ("random", WE_SCENE_FRAME_SOUND_PLAYBACK_RANDOM),
+            ("single", WE_SCENE_FRAME_SOUND_PLAYBACK_SINGLE),
+        ]
+        for (mode, expectedMode) in modes {
+            let loaded = try loadEmptyFrameGraph(
+                soundOnly: true,
+                playbackMode: mode
+            )
+            defer {
+                we_scene_frame_graph_destroy(loaded.frameGraph)
+                we_scene_graph_destroy(loaded.graph)
+                we_scene_model_destroy(loaded.model)
+                we_scene_runtime_destroy(loaded.runtime)
+                try? FileManager.default.removeItem(at: loaded.root)
+            }
+
+            var error: WESceneRuntimeErrorRef?
+            guard let executor = we_scene_frame_executor_create(
+                loaded.frameGraph, &error
+            ) else {
+                throw failure("executor", error)
+            }
+            defer { we_scene_frame_executor_destroy(executor) }
+
+            var inputs = WESceneFrameInputs(
+                pointer_x: 0.5,
+                pointer_y: 0.5,
+                time_seconds: 0,
+                frame_time_seconds: 1.0 / 60.0
+            )
+            XCTAssertEqual(
+                we_scene_frame_executor_render(executor, &inputs, &error),
+                1,
+                "mode: \(mode), error: \(errorMessage(error))"
+            )
+
+            var soundCount = 0
+            XCTAssertEqual(
+                we_scene_frame_executor_sound_count(
+                    executor, &soundCount, &error
+                ),
+                1,
+                errorMessage(error)
+            )
+            XCTAssertEqual(soundCount, 1)
+
+            var sound = WESceneFrameSoundInfo()
+            XCTAssertEqual(
+                we_scene_frame_executor_sound_info(
+                    executor, 0, &sound, &error
+                ),
+                1,
+                errorMessage(error)
+            )
+            XCTAssertEqual(
+                sound.playback_mode,
+                expectedMode,
+                "mode \(mode) must cross the frame bridge unchanged"
+            )
+
+            var issueCount = 99
+            XCTAssertEqual(
+                we_scene_frame_executor_issue_count(
+                    executor, &issueCount, &error
+                ),
+                1,
+                errorMessage(error)
+            )
+            XCTAssertEqual(issueCount, 0, "mode: \(mode)")
+        }
+    }
+
+    func testUnknownSoundPlaybackModeFailsAtModelBoundary() {
+        XCTAssertThrowsError(try loadEmptyFrameGraph(
+            soundOnly: true,
+            playbackMode: "once"
+        )) { error in
+            guard case let ExecutorBridgeFailure.creation(message) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertTrue(message.contains("model:"))
+            XCTAssertTrue(message.contains("/objects/0/playbackmode"))
+            XCTAssertTrue(message.contains("loop, random, or single"))
+        }
+    }
+
     func testLightCookieSamplerMetadataResolvesTheLinuxRuntimeAlias() throws {
         let loaded = try loadLightCookieFrameGraph()
         defer {
@@ -1141,10 +1277,18 @@ final class FrameExecutorBridgeTests: XCTestCase {
         soundOnly: Bool = false,
         startSilent: Bool = false,
         projectionAuto: Bool = false,
-        soundScript: String? = nil
+        soundScript: String? = nil,
+        playbackMode: String = "loop",
+        sceneObjects: [[String: Any]]? = nil
     ) throws -> LoadedFrameGraph {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        var keepFixture = false
+        defer {
+            if !keepFixture {
+                try? FileManager.default.removeItem(at: root)
+            }
+        }
         let assets = root.appendingPathComponent("assets", isDirectory: true)
         let shaders = assets.appendingPathComponent("shaders", isDirectory: true)
         let package = root.appendingPathComponent("scene.pkg")
@@ -1164,12 +1308,14 @@ final class FrameExecutorBridgeTests: XCTestCase {
             "version": 2,
         ]
         let objects: [[String: Any]]
-        if soundOnly {
+        if let sceneObjects {
+            objects = sceneObjects
+        } else if soundOnly {
             var soundObject: [String: Any] = [
                 "id": 42,
                 "name": "Sound",
                 "sound": ["sounds/first.mp3", "sounds/second.ogg"],
-                "playbackmode": "loop",
+                "playbackmode": playbackMode,
                 "startsilent": startSilent,
                 "visible": true,
                 "volume": ["user": "volume", "value": 0.25],
@@ -1243,13 +1389,15 @@ final class FrameExecutorBridgeTests: XCTestCase {
             we_scene_runtime_destroy(runtime)
             throw failure("frame graph", error)
         }
-        return LoadedFrameGraph(
+        let loaded = LoadedFrameGraph(
             root: root,
             runtime: runtime,
             model: model,
             graph: graph,
             frameGraph: frameGraph
         )
+        keepFixture = true
+        return loaded
     }
 
     private func failure(_ phase: String, _ error: WESceneRuntimeErrorRef?) -> Error {

@@ -646,10 +646,14 @@ final class SceneRuntimeSession {
                     "Scene sound object \(info.object_id) has invalid volume \(info.volume)"
                 )
             }
-            let loop: Bool
+            let playbackMode: SceneSoundPlaybackMode
             switch info.playback_mode {
-            case WE_SCENE_FRAME_SOUND_PLAYBACK_ONCE: loop = false
-            case WE_SCENE_FRAME_SOUND_PLAYBACK_LOOP: loop = true
+            case WE_SCENE_FRAME_SOUND_PLAYBACK_LOOP:
+                playbackMode = .loop
+            case WE_SCENE_FRAME_SOUND_PLAYBACK_RANDOM:
+                playbackMode = .random
+            case WE_SCENE_FRAME_SOUND_PLAYBACK_SINGLE:
+                playbackMode = .single
             default:
                 throw SceneRuntimeSessionError.runtime(
                     "Scene sound object \(info.object_id) has an unknown playback mode"
@@ -703,16 +707,16 @@ final class SceneRuntimeSession {
                 }
                 return SceneSoundSourceSnapshot(
                     sourceIndex: sourceIndex,
-                    resource: String(cString: source),
-                    loop: loop,
-                    volume: volume,
-                    startSilent: info.start_silent == 1
+                    resource: String(cString: source)
                 )
             }
             return SceneSoundSnapshot(
                 objectId: Int(info.object_id),
                 visible: info.visible == 1,
                 sources: sources,
+                playbackMode: playbackMode,
+                volume: volume,
+                startSilent: info.start_silent == 1,
                 playbackCommand: playbackCommand,
                 minimumTime: info.minimum_time,
                 maximumTime: info.maximum_time

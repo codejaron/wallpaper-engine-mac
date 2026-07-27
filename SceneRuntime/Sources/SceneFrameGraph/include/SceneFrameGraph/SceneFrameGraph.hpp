@@ -41,7 +41,7 @@ enum class FrameOperationKind {
     text = 4,
     particle = 5,
 };
-enum class FrameSoundPlaybackMode { once, loop };
+enum class FrameSoundPlaybackMode { loop, random, single };
 enum class FrameSoundPlaybackCommandAction { play, pause, stop };
 struct FrameSoundPlaybackCommand final {
     FrameSoundPlaybackCommandAction action =
@@ -279,7 +279,7 @@ struct FrameSoundDescriptor {
     int objectId = 0;
     bool visible = false;
     std::vector<std::string> sources;
-    FrameSoundPlaybackMode playbackMode = FrameSoundPlaybackMode::once;
+    FrameSoundPlaybackMode playbackMode = FrameSoundPlaybackMode::loop;
     double volume = 1.0;
     bool startSilent = false;
     bool muteInEditor = false;

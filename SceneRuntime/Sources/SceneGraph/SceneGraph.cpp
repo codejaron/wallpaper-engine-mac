@@ -248,9 +248,6 @@ std::optional<LayerScriptOwner> layerScriptOwner(
     if (property == "opacity") property = "alpha";
     if (property == "pointsize") property = "pointSize";
     const SceneObject& object = model.project().scene.objects[objectIndex];
-    if (std::holds_alternative<GroupObject>(object.data)) {
-        return std::nullopt;
-    }
     return LayerScriptOwner{.id = object.base.id, .property = property};
 }
 
@@ -296,6 +293,8 @@ std::vector<script::ScriptLayerDescriptor> sceneLayerDescriptors(
             type = script::ScriptLayerType::particle;
         } else if (std::holds_alternative<SoundObject>(object.data)) {
             type = script::ScriptLayerType::sound;
+        } else if (std::holds_alternative<GroupObject>(object.data)) {
+            type = script::ScriptLayerType::group;
         } else {
             continue;
         }

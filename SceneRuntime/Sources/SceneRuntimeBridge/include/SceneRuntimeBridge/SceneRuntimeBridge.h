@@ -606,8 +606,9 @@ typedef struct WESceneFrameParticleEmitterInfo {
 } WESceneFrameParticleEmitterInfo;
 
 typedef enum WESceneFrameSoundPlaybackMode {
-    WE_SCENE_FRAME_SOUND_PLAYBACK_ONCE = 0,
     WE_SCENE_FRAME_SOUND_PLAYBACK_LOOP = 1,
+    WE_SCENE_FRAME_SOUND_PLAYBACK_RANDOM = 2,
+    WE_SCENE_FRAME_SOUND_PLAYBACK_SINGLE = 3,
 } WESceneFrameSoundPlaybackMode;
 
 typedef enum WESceneFrameSoundPlaybackCommandAction {

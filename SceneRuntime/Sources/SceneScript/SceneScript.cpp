@@ -3262,6 +3262,7 @@ struct ScriptInstance::Impl {
         if (descriptor->type == ScriptLayerType::text) type = "text";
         if (descriptor->type == ScriptLayerType::particle) type = "particle";
         if (descriptor->type == ScriptLayerType::sound) type = "sound";
+        if (descriptor->type == ScriptLayerType::group) type = "group";
         defineProperty(
             ctx, object, "type", JS_NewString(ctx, type), JS_PROP_ENUMERABLE
         );

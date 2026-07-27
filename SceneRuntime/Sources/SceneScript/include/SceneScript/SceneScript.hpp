@@ -181,6 +181,7 @@ enum class ScriptLayerType : std::int32_t {
     text = 2,
     particle = 3,
     sound = 4,
+    group = 5,
 };
 
 struct ScriptTextureAnimationMetadata final {

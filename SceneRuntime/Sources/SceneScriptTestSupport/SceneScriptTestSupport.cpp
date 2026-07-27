@@ -283,6 +283,9 @@ std::vector<ScriptLayerDescriptor> layersFromInputs(
             case WE_SCENE_SCRIPT_TEST_LAYER_SOUND:
                 type = ScriptLayerType::sound;
                 break;
+            case WE_SCENE_SCRIPT_TEST_LAYER_GROUP:
+                type = ScriptLayerType::group;
+                break;
             default:
                 throw std::invalid_argument("Unknown test layer type");
         }

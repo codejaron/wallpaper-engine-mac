@@ -16,6 +16,7 @@ public enum SceneAudioError: LocalizedError, Equatable {
     case stalePlaybackCommand(identifier: String, current: UInt64, received: UInt64)
     case conflictingPlaybackCommand(identifier: String, generation: UInt64)
     case invalidTimingBounds(objectId: Int, minimumTime: Double, maximumTime: Double)
+    case allCandidateAssetsFailed(objectId: Int, failures: [String])
 
     public var errorDescription: String? {
         switch self {
@@ -36,6 +37,9 @@ public enum SceneAudioError: LocalizedError, Equatable {
             return "Scene audio playback command generation \(generation) changed action for \(identifier)"
         case .invalidTimingBounds(let objectId, let minimumTime, let maximumTime):
             return "Scene sound object \(objectId) has invalid playback timing bounds \(minimumTime)...\(maximumTime)"
+        case .allCandidateAssetsFailed(let objectId, let failures):
+            return "Scene sound object \(objectId) could not load any candidate asset: " +
+                failures.joined(separator: "; ")
         }
     }
 }
@@ -43,17 +47,17 @@ public enum SceneAudioError: LocalizedError, Equatable {
 public struct SceneSoundSourceSnapshot: Equatable, Sendable {
     public let sourceIndex: Int
     public let resource: String
-    public let loop: Bool
-    public let volume: Float
-    public let startSilent: Bool
 
-    public init(sourceIndex: Int, resource: String, loop: Bool, volume: Float, startSilent: Bool) {
+    public init(sourceIndex: Int, resource: String) {
         self.sourceIndex = sourceIndex
         self.resource = resource
-        self.loop = loop
-        self.volume = volume
-        self.startSilent = startSilent
     }
+}
+
+public enum SceneSoundPlaybackMode: Int32, Equatable, Sendable {
+    case loop = 1
+    case random = 2
+    case single = 3
 }
 
 public struct SceneSoundPlaybackCommand: Equatable, Sendable {
@@ -76,6 +80,9 @@ public struct SceneSoundSnapshot: Equatable, Sendable {
     public let objectId: Int
     public let visible: Bool
     public let sources: [SceneSoundSourceSnapshot]
+    public let playbackMode: SceneSoundPlaybackMode
+    public let volume: Float
+    public let startSilent: Bool
     public let playbackCommand: SceneSoundPlaybackCommand?
     public let minimumTime: Double
     public let maximumTime: Double
@@ -84,6 +91,9 @@ public struct SceneSoundSnapshot: Equatable, Sendable {
         objectId: Int,
         visible: Bool,
         sources: [SceneSoundSourceSnapshot],
+        playbackMode: SceneSoundPlaybackMode = .loop,
+        volume: Float = 1,
+        startSilent: Bool = false,
         playbackCommand: SceneSoundPlaybackCommand? = nil,
         minimumTime: Double = 0,
         maximumTime: Double = 0
@@ -91,6 +101,9 @@ public struct SceneSoundSnapshot: Equatable, Sendable {
         self.objectId = objectId
         self.visible = visible
         self.sources = sources
+        self.playbackMode = playbackMode
+        self.volume = volume
+        self.startSilent = startSilent
         self.playbackCommand = playbackCommand
         self.minimumTime = minimumTime
         self.maximumTime = maximumTime
@@ -347,12 +360,20 @@ public final class SceneAudioPlayer: SceneAudioPlayback {
 
 @MainActor
 public final class SceneAudioController {
+    private struct ScenePolicy: Equatable {
+        let objectId: Int
+        var sources: [SceneSoundSourceSnapshot]
+        var playbackMode: SceneSoundPlaybackMode
+        var startSilent: Bool
+        var minimumTime: Double
+        var maximumTime: Double
+    }
+
     private struct AuthoringPolicy {
-        let objectId: Int?
-        let sourceIndex: Int?
-        let loop: Bool
+        var scene: ScenePolicy?
         var visible: Bool
         var startsAutomatically: Bool
+        var currentSourceOffset: Int?
     }
 
     private struct RuntimeControl {
@@ -361,11 +382,13 @@ public final class SceneAudioController {
         var resumeAfterVisibility = false
         var deferredPlayGeneration: UInt64?
         var lastAppliedCommand: SceneSoundPlaybackCommand?
+        var waitingDeadline: TimeInterval?
+        var waitingRemaining: TimeInterval?
     }
 
     private struct Entry {
-        let player: any SceneAudioPlayback
-        let resource: String?
+        var player: any SceneAudioPlayback
+        var resource: String?
         var authoring: AuthoringPolicy
         var command: SceneSoundPlaybackCommand?
         var runtime: RuntimeControl
@@ -373,16 +396,24 @@ public final class SceneAudioController {
 
     private struct Desired {
         let identifier: String
-        let source: SceneSoundSourceSnapshot
-        let objectId: Int
+        let policy: ScenePolicy
         let visible: Bool
         let volume: Float
         let command: SceneSoundPlaybackCommand?
     }
 
+    private struct PlayerSelection {
+        let player: any SceneAudioPlayback
+        let resource: String
+        let sourceOffset: Int
+    }
+
     private var players: [String: Entry] = [:]
     private var isPaused = false
     private let makePlayer: (Data, Bool, Float) throws -> any SceneAudioPlayback
+    private let currentTime: () -> TimeInterval
+    private let selectRandomSource: (Int) -> Int
+    private let randomUnit: () -> Double
 
     public convenience init() {
         self.init { data, loop, volume in
@@ -390,14 +421,28 @@ public final class SceneAudioController {
         }
     }
 
-    init(makePlayer: @escaping (Data, Bool, Float) throws -> any SceneAudioPlayback) {
+    init(
+        makePlayer: @escaping (Data, Bool, Float) throws -> any SceneAudioPlayback,
+        currentTime: @escaping () -> TimeInterval = {
+            ProcessInfo.processInfo.systemUptime
+        },
+        selectRandomSource: @escaping (Int) -> Int = {
+            Int.random(in: 0..<$0)
+        },
+        randomUnit: @escaping () -> Double = {
+            Double.random(in: 0...1)
+        }
+    ) {
         self.makePlayer = makePlayer
+        self.currentTime = currentTime
+        self.selectRandomSource = selectRandomSource
+        self.randomUnit = randomUnit
     }
 
     public var playerCount: Int { players.count }
 
-    public static func identifier(objectId: Int, sourceIndex: Int) -> String {
-        "sound:\(objectId):\(sourceIndex)"
+    public static func identifier(objectId: Int) -> String {
+        "sound:\(objectId)"
     }
 
     public func reconcile(
@@ -411,7 +456,7 @@ public final class SceneAudioController {
             masterVolume: masterVolume,
             audioOutput: audioOutput,
             loadAsset: loadAsset,
-            shouldRemoveMissing: { _ in true }
+            shouldRemoveMissing: { $0.authoring.scene != nil }
         )
     }
 
@@ -429,27 +474,48 @@ public final class SceneAudioController {
         var desiredOrder: [String] = []
         for sound in sounds {
             try validateTimingBounds(sound)
+            try validateVolume(sound.volume)
+            guard !sound.sources.isEmpty else {
+                throw SceneAudioError.allCandidateAssetsFailed(
+                    objectId: sound.objectId,
+                    failures: ["the candidate list is empty"]
+                )
+            }
             if let command = sound.playbackCommand, command.generation == 0 {
                 throw SceneAudioError.invalidPlaybackCommand(
                     "sound object \(sound.objectId) uses reserved generation 0"
                 )
             }
+            var sourceIndices: Set<Int> = []
             for source in sound.sources {
-                let identifier = Self.identifier(objectId: sound.objectId, sourceIndex: source.sourceIndex)
-                guard desired[identifier] == nil else { throw SceneAudioError.duplicateSource(identifier) }
-                try validateVolume(source.volume)
-                let volume = source.volume * masterVolume * audioOutput
-                try validateVolume(volume)
-                desired[identifier] = Desired(
-                    identifier: identifier,
-                    source: source,
-                    objectId: sound.objectId,
-                    visible: sound.visible,
-                    volume: volume,
-                    command: sound.playbackCommand
-                )
-                desiredOrder.append(identifier)
+                guard sourceIndices.insert(source.sourceIndex).inserted else {
+                    throw SceneAudioError.duplicateSource(
+                        "sound:\(sound.objectId):\(source.sourceIndex)"
+                    )
+                }
             }
+            let identifier = Self.identifier(objectId: sound.objectId)
+            guard desired[identifier] == nil else {
+                throw SceneAudioError.duplicateSource(identifier)
+            }
+            let volume = sound.volume * masterVolume * audioOutput
+            try validateVolume(volume)
+            let policy = ScenePolicy(
+                objectId: sound.objectId,
+                sources: sound.sources,
+                playbackMode: sound.playbackMode,
+                startSilent: sound.startSilent,
+                minimumTime: sound.minimumTime,
+                maximumTime: sound.maximumTime
+            )
+            desired[identifier] = Desired(
+                identifier: identifier,
+                policy: policy,
+                visible: sound.visible,
+                volume: volume,
+                command: sound.playbackCommand
+            )
+            desiredOrder.append(identifier)
         }
 
         for identifier in desiredOrder {
@@ -474,92 +540,117 @@ public final class SceneAudioController {
             }
         }
 
-        // Decode every replacement before mutating the live set. A bad asset cannot leave a
-        // partially reconciled frame behind.
-        var replacements: [String: Entry] = [:]
-        for identifier in desiredOrder {
-            guard let item = desired[identifier] else { continue }
-            let existing = players[item.identifier]
-            if existing?.resource == item.source.resource,
-               existing?.authoring.loop == item.source.loop {
-                continue
-            }
-            let data = try loadAsset(item.source.resource)
-            let player = try makePlayer(data, item.source.loop, item.volume)
-            replacements[item.identifier] = Entry(
-                player: player,
-                resource: item.source.resource,
-                authoring: AuthoringPolicy(
-                    objectId: item.objectId,
-                    sourceIndex: item.source.sourceIndex,
-                    loop: item.source.loop,
-                    visible: item.visible,
-                    startsAutomatically: !item.source.startSilent
-                ),
-                command: item.command,
-                runtime: RuntimeControl()
-            )
-        }
-
+        let originalEntries = players
+        let originalStates = players.mapValues(playerState)
         var next = players
-        for (identifier, replacement) in replacements { next[identifier] = replacement }
 
-        // Volume validation and decoding are complete, so the remaining mutations cannot fail
-        // except playback. Start replacements before stopping old players to preserve rollback.
-        let previousStates = next.mapValues {
-            SceneAudioPlayerState(
-                state: $0.player.playbackState,
-                position: $0.player.position,
-                volume: $0.player.volume,
-                loops: $0.player.loops
-            )
-        }
         do {
             for identifier in desiredOrder {
                 guard let item = desired[identifier] else { continue }
-                guard var entry = next[item.identifier] else {
-                    preconditionFailure("Decoded Scene audio replacement is missing")
+                let existing = players[identifier]
+                let existingPolicy = existing?.authoring.scene
+                let requiresReplacement = existingPolicy == nil ||
+                    existingPolicy?.sources != item.policy.sources ||
+                    existingPolicy?.playbackMode != item.policy.playbackMode
+                if requiresReplacement {
+                    let selection = try makeSelection(
+                        policy: item.policy,
+                        preferredOffset: initialSourceOffset(for: item.policy),
+                        volume: item.volume,
+                        loadAsset: loadAsset
+                    )
+                    var runtime = existing?.runtime ?? RuntimeControl()
+                    runtime.automaticStartConsumed = false
+                    runtime.resumeAfterHostPause = false
+                    runtime.resumeAfterVisibility = false
+                    runtime.deferredPlayGeneration = nil
+                    runtime.waitingDeadline = nil
+                    runtime.waitingRemaining = nil
+                    next[identifier] = Entry(
+                        player: selection.player,
+                        resource: selection.resource,
+                        authoring: AuthoringPolicy(
+                            scene: item.policy,
+                            visible: item.visible,
+                            startsAutomatically: !item.policy.startSilent,
+                            currentSourceOffset: selection.sourceOffset
+                        ),
+                        command: item.command,
+                        runtime: runtime
+                    )
                 }
+            }
+        } catch {
+            stopPlayersCreated(in: next, excluding: originalEntries)
+            throw error
+        }
+
+        for (identifier, entry) in originalEntries
+        where desired[identifier] == nil && shouldRemoveMissing(entry) {
+            next.removeValue(forKey: identifier)
+        }
+
+        do {
+            for identifier in desiredOrder {
+                guard let item = desired[identifier], var entry = next[identifier] else {
+                    preconditionFailure("Prepared Scene audio entry is missing")
+                }
+                let oldPolicy = entry.authoring.scene
                 try entry.player.setVolume(item.volume)
                 entry.authoring.visible = item.visible
-                entry.authoring.startsAutomatically = !item.source.startSilent
+                entry.authoring.startsAutomatically = !item.policy.startSilent
+                entry.authoring.scene = item.policy
                 entry.command = item.command
+
+                if let oldPolicy,
+                   (oldPolicy.minimumTime != item.policy.minimumTime ||
+                    oldPolicy.maximumTime != item.policy.maximumTime),
+                   entry.runtime.waitingDeadline != nil ||
+                    entry.runtime.waitingRemaining != nil {
+                    clearWaiting(&entry)
+                    scheduleRandomWait(&entry)
+                }
+
                 if let command = item.command,
                    command != entry.runtime.lastAppliedCommand {
-                    try apply(command, to: &entry, identifier: item.identifier)
+                    try apply(
+                        command,
+                        to: &entry,
+                        identifier: identifier,
+                        volume: item.volume,
+                        loadAsset: loadAsset
+                    )
                     entry.runtime.lastAppliedCommand = command
                 }
-                try enforcePlaybackPolicy(for: &entry, identifier: item.identifier)
-                next[item.identifier] = entry
+                try enforcePlaybackPolicy(
+                    for: &entry,
+                    identifier: identifier,
+                    volume: item.volume,
+                    loadAsset: loadAsset
+                )
+                next[identifier] = entry
             }
         } catch {
             do {
-                for (identifier, state) in previousStates {
-                    guard let entry = next[identifier] else { continue }
+                stopPlayersCreated(in: next, excluding: originalEntries)
+                for (identifier, state) in originalStates {
+                    guard let entry = originalEntries[identifier] else { continue }
                     try entry.player.restore(state)
                 }
+                players = originalEntries
             } catch let rollbackError {
                 throw SceneAudioError.rollbackFailed(rollbackError.localizedDescription)
             }
             throw error
         }
 
-        for (identifier, entry) in players where next[identifier]?.player !== entry.player {
+        for (identifier, entry) in originalEntries
+        where next[identifier]?.player !== entry.player {
             entry.player.stop()
-        }
-        for (identifier, entry) in players
-        where desired[identifier] == nil && shouldRemoveMissing(entry) {
-            entry.player.stop()
-            next.removeValue(forKey: identifier)
         }
         players = next
     }
 
-    /// Synchronizes the audio sidecar without allowing an audio failure to
-    /// invalidate its owning visual Scene session. The strict `reconcile`
-    /// path remains available to callers that need one transaction for the
-    /// complete snapshot. This boundary isolates each authored sound object so
-    /// one invalid asset cannot stop unrelated, valid playback.
     @discardableResult
     public func synchronize(
         _ sounds: [SceneSoundSnapshot],
@@ -593,7 +684,9 @@ public final class SceneAudioController {
                     masterVolume: masterVolume,
                     audioOutput: audioOutput,
                     loadAsset: loadAsset,
-                    shouldRemoveMissing: { $0.authoring.objectId == objectId }
+                    shouldRemoveMissing: {
+                        $0.authoring.scene?.objectId == objectId
+                    }
                 )
             } catch {
                 stopPlayers(forObjectId: objectId)
@@ -609,17 +702,13 @@ public final class SceneAudioController {
     }
 
     private func stopPlayers(forObjectId objectId: Int) {
-        let identifiers: [String] = players.compactMap { identifier, entry in
-            entry.authoring.objectId == objectId ? identifier : nil
-        }
-        for identifier in identifiers {
-            players.removeValue(forKey: identifier)?.player.stop()
-        }
+        let identifier = Self.identifier(objectId: objectId)
+        players.removeValue(forKey: identifier)?.player.stop()
     }
 
     private func removePlayersForMissingObjects(_ objectIds: Set<Int>) {
         let identifiers: [String] = players.compactMap { identifier, entry in
-            guard let objectId = entry.authoring.objectId,
+            guard let objectId = entry.authoring.scene?.objectId,
                   !objectIds.contains(objectId) else { return nil }
             return identifier
         }
@@ -654,11 +743,10 @@ public final class SceneAudioController {
             player: replacement,
             resource: nil,
             authoring: AuthoringPolicy(
-                objectId: nil,
-                sourceIndex: nil,
-                loop: loop,
+                scene: nil,
                 visible: true,
-                startsAutomatically: autoplay
+                startsAutomatically: autoplay,
+                currentSourceOffset: nil
             ),
             command: nil,
             runtime: runtime
@@ -666,6 +754,7 @@ public final class SceneAudioController {
     }
 
     public func setVolume(_ volume: Float, for identifier: String) throws {
+        try validateVolume(volume)
         try player(identifier).setVolume(volume)
     }
 
@@ -674,13 +763,11 @@ public final class SceneAudioController {
         isPaused = true
         for identifier in players.keys.sorted() {
             guard var entry = players[identifier] else { continue }
-            let state = entry.player.playbackState
-            if state == .playing {
+            freezeWaiting(&entry)
+            if entry.player.playbackState == .playing {
                 entry.player.pause()
-                entry.runtime.resumeAfterHostPause = playbackRequested(entry)
-            } else {
-                entry.runtime.resumeAfterHostPause = canStartOrResume(entry)
             }
+            entry.runtime.resumeAfterHostPause = canStartOrResume(entry)
             players[identifier] = entry
         }
     }
@@ -688,38 +775,41 @@ public final class SceneAudioController {
     public func resumeAll() throws {
         guard isPaused else { return }
         let previousEntries = players
-        let previousStates = players.mapValues {
-            SceneAudioPlayerState(
-                state: $0.player.playbackState,
-                position: $0.player.position,
-                volume: $0.player.volume,
-                loops: $0.player.loops
-            )
-        }
+        let previousStates = players.mapValues(playerState)
+        isPaused = false
         do {
             for identifier in players.keys.sorted() {
                 guard var entry = players[identifier],
                       entry.runtime.resumeAfterHostPause else { continue }
                 guard entry.authoring.visible, playbackRequested(entry) else {
                     entry.runtime.resumeAfterHostPause = false
-                    if playbackRequested(entry) {
-                        entry.runtime.resumeAfterVisibility = true
-                    }
+                    entry.runtime.resumeAfterVisibility = playbackRequested(entry)
                     players[identifier] = entry
                     continue
                 }
-                let restartEnded = entry.runtime.deferredPlayGeneration != nil
-                try startPlayback(
-                    for: &entry,
-                    identifier: identifier,
-                    restartEnded: restartEnded
-                )
+                let requiresLoadedTransition =
+                    entry.runtime.deferredPlayGeneration != nil &&
+                    entry.player.playbackState == .ended &&
+                    (entry.authoring.scene?.sources.count ?? 0) > 1
+                if entry.runtime.waitingRemaining != nil {
+                    resumeWaiting(&entry)
+                } else if !requiresLoadedTransition &&
+                            (entry.player.playbackState == .paused ||
+                             entry.player.playbackState == .stopped ||
+                             entry.runtime.deferredPlayGeneration != nil) {
+                    try startCurrentPlayer(
+                        for: &entry,
+                        identifier: identifier,
+                        restartEnded: entry.runtime.deferredPlayGeneration != nil
+                    )
+                    entry.runtime.deferredPlayGeneration = nil
+                }
                 entry.runtime.resumeAfterHostPause = false
-                entry.runtime.deferredPlayGeneration = nil
                 players[identifier] = entry
             }
         } catch {
             let playbackError = error
+            isPaused = true
             do {
                 for (identifier, state) in previousStates {
                     guard let entry = players[identifier] else { continue }
@@ -731,7 +821,6 @@ public final class SceneAudioController {
             }
             throw playbackError
         }
-        isPaused = false
     }
 
     public func stop(identifier: String) throws {
@@ -748,55 +837,37 @@ public final class SceneAudioController {
     }
 
     public func playerState(identifier: String) throws -> SceneAudioPlayerState {
-        let player = try player(identifier)
-        return SceneAudioPlayerState(
-            state: player.playbackState,
-            position: player.position,
-            volume: player.volume,
-            loops: player.loops
-        )
+        playerState(try entry(identifier))
     }
 
     public func playbackIntent(identifier: String) throws -> Bool {
-        guard let entry = players[identifier] else {
-            throw SceneAudioError.unknownPlayer(identifier)
-        }
+        let entry = try entry(identifier)
         return entry.authoring.visible && playbackRequested(entry)
     }
 
     public func soundRuntimeSnapshots() -> [SceneSoundRuntimeSnapshot] {
-        var grouped: [Int: [(sourceIndex: Int, state: SceneAudioPlaybackState, position: TimeInterval)]] = [:]
-        for entry in players.values {
-            guard let objectId = entry.authoring.objectId,
-                  let sourceIndex = entry.authoring.sourceIndex else { continue }
-            grouped[objectId, default: []].append((
-                sourceIndex,
-                entry.player.playbackState,
-                entry.player.position
-            ))
-        }
-        return grouped.keys.sorted().compactMap { objectId in
-            guard let sources = grouped[objectId]?.sorted(by: { $0.sourceIndex < $1.sourceIndex }),
-                  var selected = sources.first else { return nil }
-            for source in sources.dropFirst()
-            where playbackStatePriority(source.state) > playbackStatePriority(selected.state) {
-                selected = source
+        players.values.compactMap { entry in
+            guard let objectId = entry.authoring.scene?.objectId else {
+                return nil
             }
             return SceneSoundRuntimeSnapshot(
                 objectId: objectId,
-                state: selected.state,
-                position: selected.position
+                state: entry.player.playbackState,
+                position: entry.player.position
             )
-        }
+        }.sorted { $0.objectId < $1.objectId }
     }
 
     private func apply(
         _ command: SceneSoundPlaybackCommand,
         to entry: inout Entry,
-        identifier: String
+        identifier: String,
+        volume: Float,
+        loadAsset: (String) throws -> Data
     ) throws {
         switch command.action {
         case .play:
+            clearWaiting(&entry)
             if !entry.authoring.visible {
                 entry.runtime.deferredPlayGeneration = command.generation
                 entry.runtime.resumeAfterVisibility = true
@@ -807,45 +878,63 @@ public final class SceneAudioController {
                 entry.runtime.resumeAfterHostPause = true
                 return
             }
-            try startPlayback(for: &entry, identifier: identifier, restartEnded: true)
+            if entry.player.playbackState == .ended,
+               let policy = entry.authoring.scene,
+               policy.sources.count > 1 {
+                try transitionAndStart(
+                    entry: &entry,
+                    identifier: identifier,
+                    volume: volume,
+                    loadAsset: loadAsset
+                )
+            } else {
+                try startCurrentPlayer(
+                    for: &entry,
+                    identifier: identifier,
+                    restartEnded: true
+                )
+            }
             entry.runtime.deferredPlayGeneration = nil
             entry.runtime.resumeAfterHostPause = false
             entry.runtime.resumeAfterVisibility = false
         case .pause:
             clearResumeState(&entry)
+            freezeWaiting(&entry)
             if entry.player.playbackState == .playing {
                 entry.player.pause()
             }
         case .stop:
             clearResumeState(&entry)
+            clearWaiting(&entry)
             if entry.player.playbackState != .stopped {
                 entry.player.stop()
             }
+            entry.runtime.automaticStartConsumed = true
         }
     }
 
     private func enforcePlaybackPolicy(
         for entry: inout Entry,
-        identifier: String
+        identifier: String,
+        volume: Float,
+        loadAsset: (String) throws -> Data
     ) throws {
         let requested = playbackRequested(entry)
         if !entry.authoring.visible {
+            freezeWaiting(&entry)
             if entry.player.playbackState == .playing {
                 entry.player.pause()
-                entry.runtime.resumeAfterVisibility = requested
             }
-            if entry.runtime.resumeAfterHostPause {
-                entry.runtime.resumeAfterHostPause = false
-                entry.runtime.resumeAfterVisibility = requested
-            }
+            entry.runtime.resumeAfterVisibility = requested
+            entry.runtime.resumeAfterHostPause = false
             if !requested {
-                entry.runtime.resumeAfterVisibility = false
                 entry.runtime.deferredPlayGeneration = nil
             }
             return
         }
 
         if isPaused {
+            freezeWaiting(&entry)
             if entry.player.playbackState == .playing {
                 entry.player.pause()
             }
@@ -854,7 +943,22 @@ public final class SceneAudioController {
         }
 
         if entry.runtime.deferredPlayGeneration != nil {
-            try startPlayback(for: &entry, identifier: identifier, restartEnded: true)
+            if entry.player.playbackState == .ended,
+               let policy = entry.authoring.scene,
+               policy.sources.count > 1 {
+                try transitionAndStart(
+                    entry: &entry,
+                    identifier: identifier,
+                    volume: volume,
+                    loadAsset: loadAsset
+                )
+            } else {
+                try startCurrentPlayer(
+                    for: &entry,
+                    identifier: identifier,
+                    restartEnded: true
+                )
+            }
             entry.runtime.deferredPlayGeneration = nil
             entry.runtime.resumeAfterHostPause = false
             entry.runtime.resumeAfterVisibility = false
@@ -862,48 +966,265 @@ public final class SceneAudioController {
         }
 
         if entry.runtime.resumeAfterVisibility || entry.runtime.resumeAfterHostPause {
-            if requested {
-                try startPlayback(for: &entry, identifier: identifier, restartEnded: false)
-            }
             entry.runtime.resumeAfterVisibility = false
             entry.runtime.resumeAfterHostPause = false
-            return
+            if entry.runtime.waitingRemaining != nil {
+                resumeWaiting(&entry)
+            } else if requested && entry.player.playbackState == .paused {
+                try startCurrentPlayer(
+                    for: &entry,
+                    identifier: identifier,
+                    restartEnded: false
+                )
+                return
+            }
         }
 
         guard requested else {
+            freezeWaiting(&entry)
             if entry.player.playbackState == .playing {
                 entry.player.pause()
             }
             return
         }
+        if entry.command?.action == .pause || entry.command?.action == .stop {
+            return
+        }
 
-        switch entry.command?.action {
-        case .play:
-            switch entry.player.playbackState {
-            case .stopped, .paused:
-                try startPlayback(for: &entry, identifier: identifier, restartEnded: false)
-            case .playing, .ended:
-                break
+        if entry.runtime.waitingRemaining != nil {
+            resumeWaiting(&entry)
+        }
+        if let deadline = entry.runtime.waitingDeadline {
+            guard currentTime() >= deadline else { return }
+            clearWaiting(&entry)
+            if entry.player.playbackState == .ended {
+                try transitionAndStart(
+                    entry: &entry,
+                    identifier: identifier,
+                    volume: volume,
+                    loadAsset: loadAsset
+                )
+            } else {
+                try startCurrentPlayer(
+                    for: &entry,
+                    identifier: identifier,
+                    restartEnded: false
+                )
             }
-        case .pause, .stop:
-            break
-        case nil:
-            switch entry.player.playbackState {
-            case .stopped:
-                if !entry.runtime.automaticStartConsumed || entry.authoring.loop {
-                    try startPlayback(for: &entry, identifier: identifier, restartEnded: false)
+            return
+        }
+
+        switch entry.player.playbackState {
+        case .playing:
+            return
+        case .paused:
+            try startCurrentPlayer(
+                for: &entry,
+                identifier: identifier,
+                restartEnded: false
+            )
+        case .stopped:
+            if !entry.runtime.automaticStartConsumed {
+                entry.runtime.automaticStartConsumed = true
+                if let policy = entry.authoring.scene,
+                   policy.playbackMode == .random,
+                   policy.startSilent,
+                   entry.command == nil {
+                    scheduleRandomWait(&entry)
+                    if waitingDeadlineHasElapsed(entry) {
+                        clearWaiting(&entry)
+                        try startCurrentPlayer(
+                            for: &entry,
+                            identifier: identifier,
+                            restartEnded: false
+                        )
+                    }
+                } else {
+                    try startCurrentPlayer(
+                        for: &entry,
+                        identifier: identifier,
+                        restartEnded: false
+                    )
                 }
-            case .ended:
-                if entry.authoring.loop {
-                    try startPlayback(for: &entry, identifier: identifier, restartEnded: true)
+            } else if entry.player.loops {
+                try startCurrentPlayer(
+                    for: &entry,
+                    identifier: identifier,
+                    restartEnded: false
+                )
+            }
+        case .ended:
+            guard let policy = entry.authoring.scene else { return }
+            switch policy.playbackMode {
+            case .single:
+                return
+            case .loop:
+                try transitionAndStart(
+                    entry: &entry,
+                    identifier: identifier,
+                    volume: volume,
+                    loadAsset: loadAsset
+                )
+            case .random:
+                scheduleRandomWait(&entry)
+                if waitingDeadlineHasElapsed(entry) {
+                    clearWaiting(&entry)
+                    try transitionAndStart(
+                        entry: &entry,
+                        identifier: identifier,
+                        volume: volume,
+                        loadAsset: loadAsset
+                    )
                 }
-            case .playing, .paused:
-                break
             }
         }
     }
 
-    private func startPlayback(
+    private func transitionAndStart(
+        entry: inout Entry,
+        identifier: String,
+        volume: Float,
+        loadAsset: (String) throws -> Data
+    ) throws {
+        guard let policy = entry.authoring.scene else {
+            try startCurrentPlayer(
+                for: &entry,
+                identifier: identifier,
+                restartEnded: true
+            )
+            return
+        }
+        let preferredOffset = nextSourceOffset(for: entry, policy: policy)
+        if preferredOffset == entry.authoring.currentSourceOffset {
+            try startCurrentPlayer(
+                for: &entry,
+                identifier: identifier,
+                restartEnded: true
+            )
+            return
+        }
+        let selection = try makeSelection(
+            policy: policy,
+            preferredOffset: preferredOffset,
+            volume: volume,
+            loadAsset: loadAsset
+        )
+        do {
+            try selection.player.play()
+        } catch {
+            selection.player.stop()
+            throw SceneAudioError.playbackFailed(identifier)
+        }
+        entry.player = selection.player
+        entry.resource = selection.resource
+        entry.authoring.currentSourceOffset = selection.sourceOffset
+        entry.runtime.automaticStartConsumed = true
+    }
+
+    private func makeSelection(
+        policy: ScenePolicy,
+        preferredOffset: Int,
+        volume: Float,
+        loadAsset: (String) throws -> Data
+    ) throws -> PlayerSelection {
+        precondition(policy.sources.indices.contains(preferredOffset))
+        var offsets = [preferredOffset]
+        offsets.append(contentsOf: policy.sources.indices.filter {
+            $0 != preferredOffset
+        })
+        var failures: [String] = []
+        var onlyFailure: Error?
+        for offset in offsets {
+            let source = policy.sources[offset]
+            do {
+                let data = try loadAsset(source.resource)
+                let loops = policy.playbackMode == .loop &&
+                    policy.sources.count == 1
+                return PlayerSelection(
+                    player: try makePlayer(data, loops, volume),
+                    resource: source.resource,
+                    sourceOffset: offset
+                )
+            } catch {
+                onlyFailure = error
+                failures.append("\(source.resource): \(error.localizedDescription)")
+            }
+        }
+        if policy.sources.count == 1, let onlyFailure {
+            throw onlyFailure
+        }
+        throw SceneAudioError.allCandidateAssetsFailed(
+            objectId: policy.objectId,
+            failures: failures
+        )
+    }
+
+    private func initialSourceOffset(for policy: ScenePolicy) -> Int {
+        switch policy.playbackMode {
+        case .loop:
+            return 0
+        case .random, .single:
+            return randomSourceOffset(count: policy.sources.count)
+        }
+    }
+
+    private func nextSourceOffset(for entry: Entry, policy: ScenePolicy) -> Int {
+        switch policy.playbackMode {
+        case .loop:
+            return ((entry.authoring.currentSourceOffset ?? -1) + 1) %
+                policy.sources.count
+        case .random, .single:
+            return randomSourceOffset(count: policy.sources.count)
+        }
+    }
+
+    private func randomSourceOffset(count: Int) -> Int {
+        let result = selectRandomSource(count)
+        precondition((0..<count).contains(result))
+        return result
+    }
+
+    private func scheduleRandomWait(_ entry: inout Entry) {
+        guard let policy = entry.authoring.scene,
+              policy.playbackMode == .random else { return }
+        let unit = randomUnit()
+        precondition(unit.isFinite && (0...1).contains(unit))
+        let delay = policy.minimumTime +
+            (policy.maximumTime - policy.minimumTime) * unit
+        if entry.authoring.visible && !isPaused && playbackRequested(entry) {
+            entry.runtime.waitingDeadline = currentTime() + delay
+            entry.runtime.waitingRemaining = nil
+        } else {
+            entry.runtime.waitingDeadline = nil
+            entry.runtime.waitingRemaining = delay
+        }
+    }
+
+    private func freezeWaiting(_ entry: inout Entry) {
+        guard let deadline = entry.runtime.waitingDeadline else { return }
+        entry.runtime.waitingRemaining = max(0, deadline - currentTime())
+        entry.runtime.waitingDeadline = nil
+    }
+
+    private func resumeWaiting(_ entry: inout Entry) {
+        guard let remaining = entry.runtime.waitingRemaining,
+              entry.authoring.visible,
+              !isPaused,
+              playbackRequested(entry) else { return }
+        entry.runtime.waitingDeadline = currentTime() + remaining
+        entry.runtime.waitingRemaining = nil
+    }
+
+    private func clearWaiting(_ entry: inout Entry) {
+        entry.runtime.waitingDeadline = nil
+        entry.runtime.waitingRemaining = nil
+    }
+
+    private func waitingDeadlineHasElapsed(_ entry: Entry) -> Bool {
+        entry.runtime.waitingDeadline.map { $0 <= currentTime() } ?? false
+    }
+
+    private func startCurrentPlayer(
         for entry: inout Entry,
         identifier: String,
         restartEnded: Bool
@@ -930,40 +1251,68 @@ public final class SceneAudioController {
 
     private func playbackRequested(_ entry: Entry) -> Bool {
         switch entry.command?.action {
-        case .play: return true
-        case .pause, .stop: return false
-        case nil: return entry.authoring.startsAutomatically
+        case .play:
+            return true
+        case .pause, .stop:
+            return false
+        case nil:
+            if entry.authoring.scene?.playbackMode == .random {
+                return true
+            }
+            return entry.authoring.startsAutomatically
         }
     }
 
     private func canStartOrResume(_ entry: Entry) -> Bool {
         guard playbackRequested(entry) else { return false }
-        if entry.runtime.deferredPlayGeneration != nil { return true }
+        if entry.runtime.deferredPlayGeneration != nil ||
+            entry.runtime.waitingDeadline != nil ||
+            entry.runtime.waitingRemaining != nil {
+            return true
+        }
         switch entry.player.playbackState {
         case .playing, .paused:
             return true
         case .stopped:
             if entry.command?.action == .play { return true }
-            return !entry.runtime.automaticStartConsumed || entry.authoring.loop
+            return !entry.runtime.automaticStartConsumed || entry.player.loops
         case .ended:
-            return entry.authoring.loop
+            guard let mode = entry.authoring.scene?.playbackMode else {
+                return false
+            }
+            return mode == .loop || mode == .random
         }
     }
 
-    private func playbackStatePriority(_ state: SceneAudioPlaybackState) -> Int {
-        switch state {
-        case .playing: return 3
-        case .paused: return 2
-        case .ended: return 1
-        case .stopped: return 0
-        }
-    }
-
-    private func player(_ identifier: String) throws -> any SceneAudioPlayback {
+    private func entry(_ identifier: String) throws -> Entry {
         guard let entry = players[identifier] else {
             throw SceneAudioError.unknownPlayer(identifier)
         }
-        return entry.player
+        return entry
+    }
+
+    private func player(_ identifier: String) throws -> any SceneAudioPlayback {
+        try entry(identifier).player
+    }
+
+    private func playerState(_ entry: Entry) -> SceneAudioPlayerState {
+        SceneAudioPlayerState(
+            state: entry.player.playbackState,
+            position: entry.player.position,
+            volume: entry.player.volume,
+            loops: entry.player.loops
+        )
+    }
+
+    private func stopPlayersCreated(
+        in next: [String: Entry],
+        excluding original: [String: Entry]
+    ) {
+        for entry in next.values where !original.values.contains(where: {
+            $0.player === entry.player
+        }) {
+            entry.player.stop()
+        }
     }
 
     private func validateVolume(_ volume: Float) throws {
@@ -984,8 +1333,5 @@ public final class SceneAudioController {
                 maximumTime: sound.maximumTime
             )
         }
-        // linux-wallpaperengine accepts these authoring fields but does not
-        // schedule playback from them. Preserve that behavior: valid bounds
-        // remain metadata and the ordinary once/loop policy starts the source.
     }
 }

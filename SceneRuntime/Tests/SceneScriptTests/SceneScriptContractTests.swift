@@ -2211,6 +2211,61 @@ final class SceneScriptContractTests: XCTestCase {
         XCTAssertEqual(second["y"] as? Double, 20)
     }
 
+    func testGroupLayerIsAStableGenericLayerWithoutTypeSpecificSurface() throws {
+        let instance = try makeInstanceWithOwnerLayer(
+            source: """
+            const cached = thisScene.getLayer(139);
+            export function update() {
+                const byName = thisScene.getLayer("Owner");
+                const listed = thisScene.enumerateLayers();
+                const origin = cached.origin;
+                return JSON.stringify({
+                    identity: cached === thisLayer && cached === byName && listed[0] === cached,
+                    count: thisScene.getLayerCount(),
+                    id: cached.id,
+                    name: cached.name,
+                    type: cached.type,
+                    origin: [origin.x, origin.y, origin.z],
+                    visible: cached.visible,
+                    opacity: cached.opacity,
+                    hasAnimation: typeof cached.getAnimation === "function",
+                    hasTextureAnimation: "getTextureAnimation" in cached,
+                    hasText: "text" in cached,
+                    hasVolume: "volume" in cached,
+                    hasSoundControls: ["play", "pause", "stop", "isPlaying"]
+                        .some((name) => name in cached)
+                });
+            }
+            """,
+            initialJSON: #"{"x":1,"y":2,"z":3}"#,
+            ownerLayerID: 139,
+            ownerLayerType: WE_SCENE_SCRIPT_TEST_LAYER_GROUP,
+            ownerPropertiesJSON: #"{"origin":{"x":1,"y":2,"z":3},"visible":true,"alpha":0.75}"#
+        )
+        defer { we_scene_script_test_destroy(instance) }
+
+        let encoded = try XCTUnwrap(
+            try evaluate(instance, runtime: 0, frameTime: 0) as? String
+        )
+        let result = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(encoded.utf8))
+                as? [String: Any]
+        )
+        XCTAssertEqual(result["identity"] as? Bool, true)
+        XCTAssertEqual(result["count"] as? Int, 1)
+        XCTAssertEqual(result["id"] as? Int, 139)
+        XCTAssertEqual(result["name"] as? String, "Owner")
+        XCTAssertEqual(result["type"] as? String, "group")
+        XCTAssertEqual(result["origin"] as? [Int], [1, 2, 3])
+        XCTAssertEqual(result["visible"] as? Bool, true)
+        XCTAssertEqual(result["opacity"] as? Double, 0.75)
+        XCTAssertEqual(result["hasAnimation"] as? Bool, true)
+        XCTAssertEqual(result["hasTextureAnimation"] as? Bool, false)
+        XCTAssertEqual(result["hasText"] as? Bool, false)
+        XCTAssertEqual(result["hasVolume"] as? Bool, false)
+        XCTAssertEqual(result["hasSoundControls"] as? Bool, false)
+    }
+
     func testImageLayerTextureAnimationExposesMetadataAndStableIdentity() throws {
         let source = """
         const first = thisLayer.getTextureAnimation();

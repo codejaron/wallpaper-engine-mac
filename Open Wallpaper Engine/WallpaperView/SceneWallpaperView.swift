@@ -417,7 +417,7 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
     }
 }
 
-final class SceneOpenGLContainerView: NSView {
+private final class SceneOpenGLContainerView: NSView {
     var onError: ((String?) -> Void)? {
         didSet { openGLView?.onError = onError }
     }
@@ -496,10 +496,6 @@ final class SceneOpenGLContainerView: NSView {
     }
 
     func setFramesPerSecond(_ value: Double) { openGLView?.setFramesPerSecond(value) }
-
-    func forwardDesktopLeftMouseButton(isDown: Bool) {
-        openGLView?.setPointerState(active: true, leftDown: isDown)
-    }
 
     func shutdown() { openGLView?.shutdown() }
 
@@ -721,16 +717,6 @@ private final class SceneOpenGLView: NSOpenGLView {
         framesPerSecond = clamped
         previousSpanRuntimeSeconds = nil
         updateTimer()
-    }
-
-    func setPointerState(active: Bool, leftDown: Bool) {
-        guard let session else { return }
-        do {
-            try session.setPointerState(active: active, leftDown: leftDown)
-            needsDisplay = true
-        } catch {
-            failSession(error.localizedDescription)
-        }
     }
 
     override func draw(_ dirtyRect: NSRect) {

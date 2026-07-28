@@ -633,19 +633,8 @@ extern "C" int we_scene_frame_executor_set_pointer_state(
         );
         return 0;
     }
-    try {
-        executor->executor->setPointerState(active == 1, left_down == 1);
-        return 1;
-    } catch (const std::exception& error) {
-        assignExceptionError(
-            out_error, "queueing a Scene pointer state transition", error.what()
-        );
-    } catch (...) {
-        assignExceptionError(
-            out_error, "queueing a Scene pointer state transition", nullptr
-        );
-    }
-    return 0;
+    executor->executor->setPointerState(active == 1, left_down == 1);
+    return 1;
 }
 
 extern "C" int we_scene_frame_executor_set_screensaver_state(

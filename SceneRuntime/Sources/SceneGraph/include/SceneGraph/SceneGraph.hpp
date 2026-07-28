@@ -183,7 +183,6 @@ public:
     [[nodiscard]] std::vector<script::ScriptTextureAnimationSnapshot>
     textureAnimationSnapshots() const;
     [[nodiscard]] std::vector<script::ScriptSoundSnapshot> soundSnapshots() const;
-    [[nodiscard]] std::vector<int> cursorInteractiveLayerIds() const;
     [[nodiscard]] std::optional<RuntimeValue> layerProperty(
         int layerId,
         std::string_view property

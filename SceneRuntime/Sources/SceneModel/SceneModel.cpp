@@ -412,18 +412,21 @@ RuntimeValue RuntimeValue::colorString(std::string value) {
         throw std::invalid_argument("Color must contain three or four components");
     }
 
-    const bool integerColor = value.find('.') == std::string::npos;
     std::array<double, 4> components{0.0, 0.0, 0.0, 1.0};
     for (std::size_t index = 0; index < count; ++index) {
-        if (integerColor) {
-            const int component = std::stoi(tokens[index]);
-            components[index] = static_cast<double>(component) / 255.0;
-        } else {
-            const float component = std::stof(tokens[index]);
-            if (!std::isfinite(component)) {
-                throw std::invalid_argument("Invalid floating color component");
-            }
-            components[index] = static_cast<double>(component);
+        const float component = std::stof(tokens[index]);
+        if (!std::isfinite(component)) {
+            throw std::invalid_argument("Invalid floating color component");
+        }
+        components[index] = static_cast<double>(component);
+    }
+    const bool byteColor = std::any_of(
+        components.begin(), components.begin() + count,
+        [](double component) { return component > 1.0; }
+    );
+    if (byteColor) {
+        for (std::size_t index = 0; index < count; ++index) {
+            components[index] /= 255.0;
         }
     }
     return color(components);

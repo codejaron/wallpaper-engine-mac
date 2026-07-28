@@ -15,6 +15,24 @@ func makeSystemAudioTapDescription(
     return description
 }
 
+func makeSystemAudioAggregateDescription(
+    tapUUID: UUID,
+    aggregateUUID: UUID
+) -> [String: Any] {
+    [
+        kAudioAggregateDeviceNameKey: "Open Wallpaper Engine System Audio",
+        kAudioAggregateDeviceUIDKey: aggregateUUID.uuidString,
+        kAudioAggregateDeviceIsPrivateKey: true,
+        kAudioAggregateDeviceIsStackedKey: false,
+        kAudioAggregateDeviceSubDeviceListKey: [],
+        kAudioAggregateDeviceTapAutoStartKey: false,
+        kAudioAggregateDeviceTapListKey: [[
+            kAudioSubTapUIDKey: tapUUID.uuidString,
+            kAudioSubTapDriftCompensationKey: true,
+        ]],
+    ]
+}
+
 final class CoreAudioSystemCapture: @unchecked Sendable {
     private struct Resources {
         let tapID: AudioObjectID
@@ -61,15 +79,10 @@ final class CoreAudioSystemCapture: @unchecked Sendable {
         var nextResources = Resources(tapID: tapID)
         do {
             let format = try audioFormat(for: tapID)
-            let aggregateDescription: [String: Any] = [
-                kAudioAggregateDeviceNameKey: "Open Wallpaper Engine System Audio",
-                kAudioAggregateDeviceUIDKey: UUID().uuidString,
-                kAudioAggregateDeviceIsPrivateKey: true,
-                kAudioAggregateDeviceTapListKey: [[
-                    kAudioSubTapUIDKey: tapUUID.uuidString,
-                    kAudioSubTapDriftCompensationKey: true,
-                ]],
-            ]
+            let aggregateDescription = makeSystemAudioAggregateDescription(
+                tapUUID: tapUUID,
+                aggregateUUID: UUID()
+            )
 
             try requireNoError(
                 AudioHardwareCreateAggregateDevice(
@@ -81,6 +94,7 @@ final class CoreAudioSystemCapture: @unchecked Sendable {
             guard nextResources.aggregateDeviceID != kAudioObjectUnknown else {
                 throw CoreAudioSystemCaptureError.missingResource("aggregate audio device")
             }
+            try waitUntilAudioDeviceIsAlive(nextResources.aggregateDeviceID)
 
             var ioProcID: AudioDeviceIOProcID?
             try requireNoError(
@@ -237,6 +251,35 @@ private func audioFormat(for tapID: AudioObjectID) throws -> AudioStreamBasicDes
     return format
 }
 
+private func waitUntilAudioDeviceIsAlive(_ deviceID: AudioObjectID) throws {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyDeviceIsAlive,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    for _ in 0..<20 {
+        var isAlive: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioObjectGetPropertyData(
+            deviceID,
+            &address,
+            0,
+            nil,
+            &size,
+            &isAlive
+        )
+        if status == noErr, isAlive != 0 { return }
+        if status != noErr {
+            throw CoreAudioSystemCaptureError.operationFailed(
+                operation: "Checking whether the aggregate audio device is ready",
+                status: status
+            )
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    throw CoreAudioSystemCaptureError.deviceNotReady
+}
+
 private func frameCount(
     for list: UnsafeMutableAudioBufferListPointer,
     format: AudioStreamBasicDescription
@@ -271,6 +314,7 @@ private func logIfNeeded(_ status: OSStatus, operation: String, enabled: Bool) {
 
 private enum CoreAudioSystemCaptureError: LocalizedError {
     case currentProcessUnavailable
+    case deviceNotReady
     case missingResource(String)
     case unsupportedFormat(AudioFormatID)
     case operationFailed(operation: String, status: OSStatus)
@@ -279,6 +323,8 @@ private enum CoreAudioSystemCaptureError: LocalizedError {
         switch self {
         case .currentProcessUnavailable:
             return "Core Audio did not expose an object for the current process"
+        case .deviceNotReady:
+            return "The aggregate audio device did not become ready"
         case .missingResource(let resource):
             return "Core Audio reported success without creating the \(resource)"
         case .unsupportedFormat(let formatID):

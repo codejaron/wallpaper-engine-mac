@@ -43,6 +43,25 @@ struct SceneMediaContent: Equatable, Sendable {
     let highContrastColor: SceneMediaColor
 
     var hasThumbnail: Bool { thumbnail != nil }
+
+    static let stopped = SceneMediaContent(
+        playbackState: .stopped,
+        title: "",
+        artist: "",
+        contentType: "",
+        albumTitle: "",
+        subTitle: "",
+        albumArtist: "",
+        genres: "",
+        position: 0,
+        duration: 0,
+        thumbnail: nil,
+        primaryColor: .black,
+        secondaryColor: .black,
+        tertiaryColor: .black,
+        textColor: .black,
+        highContrastColor: .black
+    )
 }
 
 struct SceneMediaRevisions: Equatable, Sendable {
@@ -125,16 +144,22 @@ enum SceneMediaSnapshotProviderError: LocalizedError {
     }
 }
 
-/// Explicit host injection point for SceneScript media events. macOS has no
-/// supported public API for observing arbitrary applications' global Now
-/// Playing state, so this provider deliberately starts unavailable and never
-/// manufactures track metadata.
+/// Single host-side state source for SceneScript media events.
 @MainActor
 final class SceneMediaSnapshotProvider: ObservableObject {
     @Published private(set) var snapshot: SceneMediaProviderSnapshot =
         .unavailable(revisions: .zero)
+    @Published private(set) var inputIssue: String?
 
     private var revisions = SceneMediaRevisions.zero
+
+    func reportInputIssue(_ message: String?) {
+        guard inputIssue != message else { return }
+        inputIssue = message
+        if let message {
+            NSLog("[SceneMedia] %@", message)
+        }
+    }
 
     func publish(_ content: SceneMediaContent) throws {
         try validate(content)

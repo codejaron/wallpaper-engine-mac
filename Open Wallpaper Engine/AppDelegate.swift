@@ -11,6 +11,27 @@ import AVKit
 import SceneAudio
 import WebKit
 
+private enum ApplicationRuntimeMode: Equatable {
+    case application
+    case unitTestHost
+
+    static func current(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        loadedBundles: [Bundle] = Bundle.allBundles
+    ) -> Self {
+        if environment["OPEN_WALLPAPER_ENGINE_TEST_HOST"] == "1" ||
+            environment["XCTestConfigurationFilePath"] != nil ||
+            environment["XCTestBundlePath"] != nil ||
+            environment["XCTestSessionIdentifier"] != nil ||
+            environment["XCTestBundleInjectPath"] != nil ||
+            environment["XCInjectBundleInto"] != nil ||
+            loadedBundles.contains(where: { $0.bundleURL.pathExtension == "xctest" }) {
+            return .unitTestHost
+        }
+        return .application
+    }
+}
+
 private final class WallpaperScrollEvent: NSEvent {
     private let source: NSEvent
     private let targetWindow: NSWindow
@@ -53,6 +74,9 @@ private final class WallpaperScrollEvent: NSEvent {
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    private var runtimeMode: ApplicationRuntimeMode {
+        ApplicationRuntimeMode.current()
+    }
     
     var statusItem: NSStatusItem!
     var settingsWindow: NSWindow!
@@ -62,11 +86,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var wallpaperWindows: [String: NSWindow] = [:]
     private(set) var playbackSuppressesWallpaperWindows = false
     
-    var contentViewModel = ContentViewModel()
-    var wallpaperViewModel = WallpaperViewModel()
-    var globalSettingsViewModel = GlobalSettingsViewModel()
-    let sceneMediaSnapshotProvider = SceneMediaSnapshotProvider()
-    let sceneAudioCaptureLifecycleMonitor = SceneAudioCaptureLifecycleMonitor()
+    lazy var contentViewModel = ContentViewModel()
+    lazy var wallpaperViewModel = WallpaperViewModel()
+    lazy var globalSettingsViewModel = GlobalSettingsViewModel()
+    lazy var sceneMediaSnapshotProvider = SceneMediaSnapshotProvider()
+    lazy var sceneAudioCaptureLifecycleMonitor = SceneAudioCaptureLifecycleMonitor()
+    lazy var sceneNowPlayingMonitor = SceneNowPlayingMonitor(
+        provider: sceneMediaSnapshotProvider
+    )
     lazy var sceneAudioOwnerCoordinator = MainActor.assumeIsolated {
         SceneAudioOwnerCoordinator(mainScreenId: WallpaperViewModel.mainScreenId())
     }
@@ -79,7 +106,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared = AppDelegate()
     
     func applicationWillFinishLaunching(_ notification: Notification) {
+        guard runtimeMode == .application else { return }
         sceneAudioCaptureLifecycleMonitor.start()
+        sceneNowPlayingMonitor.start()
 
         // 创建设置视窗
         setSettingsWindow()
@@ -107,13 +136,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
-        let dockMenu = self.statusItem.menu?.copy() as! NSMenu?
+        guard runtimeMode == .application, let statusItem else { return nil }
+        let dockMenu = statusItem.menu?.copy() as! NSMenu?
         dockMenu?.items.removeLast() // Remove `Quit` menu item
         return dockMenu
     }
     
 // MARK: - delegate methods
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard runtimeMode == .application else { return }
         saveCurrentWallpaper()
         AppDelegate.shared.setPlacehoderWallpaper(with: wallpaperViewModel.currentWallpaper)
 
@@ -130,10 +161,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     func applicationDidBecomeActive(_ notification: Notification) {
+        guard runtimeMode == .application else { return }
         NSApp.activate(ignoringOtherApps: true)
     }
     
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard runtimeMode == .application else { return true }
         if !self.mainWindowController.window.isVisible && !settingsWindow.isVisible {
             self.mainWindowController.window?.makeKeyAndOrderFront(nil)
         }
@@ -142,6 +175,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        guard runtimeMode == .application else { return }
+        sceneNowPlayingMonitor.stop()
         sceneAudioCaptureLifecycleMonitor.stop()
         globalSettingsViewModel.stopPlaybackPolicyMonitoring(restorePlayback: false)
         if let eventHandler { NSEvent.removeMonitor(eventHandler) }
@@ -308,26 +343,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let mouseLocation = NSEvent.mouseLocation
         guard let targetWindow = wallpaperWindows.values.first(where: {
               $0.isVisible && $0.frame.contains(mouseLocation)
-        }) else { return }
-
-        if let sceneView = findView(
-            ofType: SceneOpenGLContainerView.self,
-            in: targetWindow.contentView
-        ) {
-            switch event.type {
-            case .leftMouseDown:
-                sceneView.forwardDesktopLeftMouseButton(isDown: true)
-            case .leftMouseUp:
-                sceneView.forwardDesktopLeftMouseButton(isDown: false)
-            default:
-                break
-            }
-        }
-
-        guard let webview = findView(
-            ofType: WKWebView.self,
-            in: targetWindow.contentView
-        ) else { return }
+        }),
+              let webview = findWebView(in: targetWindow.contentView) else { return }
 
         // Global-monitor events carry the originating application's window
         // number and location. Passing that event directly to a wallpaper
@@ -399,14 +416,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
-    private func findView<View: NSView>(
-        ofType type: View.Type,
-        in view: NSView?
-    ) -> View? {
+    private func findWebView(in view: NSView?) -> WKWebView? {
         guard let view else { return nil }
-        if let match = view as? View { return match }
+        if let webView = view as? WKWebView { return webView }
         for child in view.subviews {
-            if let match = findView(ofType: type, in: child) { return match }
+            if let webView = findWebView(in: child) { return webView }
         }
         return nil
     }

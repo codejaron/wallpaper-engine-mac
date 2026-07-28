@@ -245,33 +245,29 @@ struct CursorProjection final {
     };
 }
 
-[[nodiscard]] std::optional<CursorHit> hitTestInteractiveImage(
+[[nodiscard]] std::optional<CursorHit> hitTestSolidImage(
     const FramePlan& plan,
     const FrameImageDescriptor& image,
     FrameVector2 pointer
 ) {
-    if (!image.visible || !image.cursorInteractive) return std::nullopt;
+    if (!image.visible || !image.solid) return std::nullopt;
     const auto projection = projectCursorImage(plan, image, pointer);
     if (!projection || !projection->inside) return std::nullopt;
     return projection->hit;
 }
 
-[[nodiscard]] std::vector<CursorHit> hitTestInteractiveLayers(
+[[nodiscard]] std::optional<CursorHit> hitTestSolidLayer(
     const FramePlan& plan,
     FrameVector2 pointer
 ) {
-    // Cursor callbacks are layer-local and Wallpaper Engine scenes can place
-    // multiple scripted controls at the same geometry. Preserve front-to-back
-    // render order, but dispatch to every interactive layer under the pointer.
-    std::vector<CursorHit> hits;
-    std::set<int> seenLayerIds;
+    // FrameGraph appends image descriptors in render order. The last visible
+    // solid image is therefore the front-most hit target for 2D cursor input.
     for (auto iterator = plan.images.rbegin(); iterator != plan.images.rend(); ++iterator) {
-        if (const auto hit = hitTestInteractiveImage(plan, *iterator, pointer);
-            hit && seenLayerIds.insert(hit->layerId).second) {
-            hits.push_back(*hit);
+        if (const auto hit = hitTestSolidImage(plan, *iterator, pointer)) {
+            return hit;
         }
     }
-    return hits;
+    return std::nullopt;
 }
 
 [[nodiscard]] std::optional<CursorHit> projectCursorLayer(
@@ -6249,15 +6245,21 @@ struct FramePlanExecutor::Impl final {
         return result;
     }
 
-    void appendCursorEvents(
-        const FramePlan& previousPlan,
-        const ResolvedFrameInputs& inputs,
-        std::vector<script::ScriptCursorEvent>& events
+    [[nodiscard]] std::vector<script::ScriptCursorEvent> updateCursorEvents(
+        const FramePlan* previousPlan,
+        const ResolvedFrameInputs& inputs
     ) {
-        const std::vector<CursorHit> hits = inputs.pointerActive
-            ? hitTestInteractiveLayers(previousPlan, inputs.pointerPosition)
-            : std::vector<CursorHit>{};
-        const std::vector<CursorHit> previousTargets = cursorTargets;
+        // Cursor callbacks must be supplied before the next plan evaluates
+        // scripts, so hit testing uses the last committed plan. Do not consume
+        // button or position edges until that first plan exists; otherwise a
+        // button held during the first frame loses its cursorDown permanently.
+        if (previousPlan == nullptr) return {};
+
+        const std::optional<CursorHit> hit = inputs.pointerActive
+            ? hitTestSolidLayer(*previousPlan, inputs.pointerPosition)
+            : std::nullopt;
+        const std::optional<CursorHit> previousTarget = cursorTarget;
+        std::vector<script::ScriptCursorEvent> events;
         const auto makeEvent = [](
             script::ScriptCursorEventType type,
             const CursorHit& value
@@ -6274,38 +6276,28 @@ struct FramePlanExecutor::Impl final {
                 .hitBox = std::nullopt,
             };
         };
-        const auto targetForLayer = [](
-            const std::vector<CursorHit>& targets,
-            int layerId
-        ) -> const CursorHit* {
-            const auto found = std::find_if(
-                targets.begin(), targets.end(), [layerId](const CursorHit& target) {
-                    return target.layerId == layerId;
-                }
-            );
-            return found == targets.end() ? nullptr : &*found;
-        };
         const auto currentProjectionFor = [&](int layerId)
             -> std::optional<CursorHit> {
             return projectCursorLayer(
-                previousPlan, layerId, inputs.pointerPosition
+                *previousPlan, layerId, inputs.pointerPosition
             );
         };
         const auto eventTarget = [&](const CursorHit& fallback) {
             return currentProjectionFor(fallback.layerId).value_or(fallback);
         };
-        for (const CursorHit& previous : previousTargets) {
-            if (targetForLayer(hits, previous.layerId) == nullptr) {
+        const bool targetChanged =
+            (previousTarget ? std::optional<int>(previousTarget->layerId) : std::nullopt) !=
+            (hit ? std::optional<int>(hit->layerId) : std::nullopt);
+        if (targetChanged) {
+            if (previousTarget) {
                 events.push_back(makeEvent(
                     script::ScriptCursorEventType::leave,
-                    eventTarget(previous)
+                    eventTarget(*previousTarget)
                 ));
             }
-        }
-        for (const CursorHit& hit : hits) {
-            if (targetForLayer(previousTargets, hit.layerId) == nullptr) {
+            if (hit) {
                 events.push_back(makeEvent(
-                    script::ScriptCursorEventType::enter, hit
+                    script::ScriptCursorEventType::enter, *hit
                 ));
             }
         }
@@ -6313,106 +6305,73 @@ struct FramePlanExecutor::Impl final {
         const bool moved = hasCursorPosition &&
             inputs.pointerPosition != lastCursorPosition;
         const bool dragging = inputs.pointerLeftDown &&
-            previousPointerLeftDown && !pressedCursorTargets.empty();
+            previousPointerLeftDown && pressedCursorTarget.has_value();
         if (dragging) {
-            for (CursorHit& pressed : pressedCursorTargets) {
-                const CursorHit dragTarget = currentProjectionFor(
-                    pressed.layerId
-                ).value_or(pressed);
-                // Keep captured event coordinates current instead of freezing
-                // world/local position at the original button-down point.
-                pressed = dragTarget;
-                if (!moved) continue;
+            const CursorHit dragTarget = currentProjectionFor(
+                pressedCursorTarget->layerId
+            ).value_or(*pressedCursorTarget);
+            // Keep captured event coordinates current instead of freezing
+            // world/local position at the original button-down point.
+            pressedCursorTarget = dragTarget;
+            if (moved) {
                 events.push_back(makeEvent(
                     script::ScriptCursorEventType::move, dragTarget
                 ));
             }
-        } else if (moved) {
+        } else if (hit && moved) {
             // Crossing layers is still a move over the new target. The order
             // is deterministic: leave, enter, then move.
-            for (const CursorHit& hit : hits) {
-                events.push_back(makeEvent(
-                    script::ScriptCursorEventType::move, hit
-                ));
-            }
+            events.push_back(makeEvent(script::ScriptCursorEventType::move, *hit));
         }
 
         if (inputs.pointerLeftDown && !previousPointerLeftDown) {
-            for (const CursorHit& hit : hits) {
+            if (hit) {
                 events.push_back(makeEvent(
-                    script::ScriptCursorEventType::down, hit
+                    script::ScriptCursorEventType::down, *hit
                 ));
+                pressedCursorTarget = hit;
+            } else {
+                pressedCursorTarget.reset();
             }
-            pressedCursorTargets = hits;
         }
 
         if (!inputs.pointerLeftDown && previousPointerLeftDown) {
-            if (!pressedCursorTargets.empty()) {
+            if (pressedCursorTarget) {
                 // Button capture belongs to the pressed layer through release,
-                // even outside its bounds. Each captured layer clicks only when
-                // the release still hits that same layer.
-                for (const CursorHit& pressed : pressedCursorTargets) {
-                    const CursorHit releaseTarget = currentProjectionFor(
-                        pressed.layerId
-                    ).value_or(pressed);
+                // even outside its bounds. Click still requires releasing over
+                // that same layer.
+                const CursorHit releaseTarget = currentProjectionFor(
+                    pressedCursorTarget->layerId
+                ).value_or(*pressedCursorTarget);
+                events.push_back(makeEvent(
+                    script::ScriptCursorEventType::up, releaseTarget
+                ));
+                if (hit && hit->layerId == pressedCursorTarget->layerId) {
                     events.push_back(makeEvent(
-                        script::ScriptCursorEventType::up, releaseTarget
-                    ));
-                    if (const CursorHit* released = targetForLayer(
-                            hits, pressed.layerId
-                        )) {
-                        events.push_back(makeEvent(
-                            script::ScriptCursorEventType::click, *released
-                        ));
-                    }
-                }
-            } else {
-                // A press that began outside every interactive layer can still
-                // be released over one, matching the public cursorUp contract.
-                for (const CursorHit& hit : hits) {
-                    events.push_back(makeEvent(
-                        script::ScriptCursorEventType::up, hit
+                        script::ScriptCursorEventType::click, *hit
                     ));
                 }
+            } else if (hit) {
+                // A press that began outside any solid layer can still be
+                // released over one, matching the public cursorUp contract.
+                events.push_back(makeEvent(
+                    script::ScriptCursorEventType::up, *hit
+                ));
             }
-            pressedCursorTargets.clear();
+            pressedCursorTarget.reset();
         }
 
-        cursorTargets = hits;
+        cursorTarget = hit;
         previousPointerLeftDown = inputs.pointerLeftDown;
         hasCursorPosition = inputs.pointerActive;
         lastCursorPosition = inputs.pointerPosition;
-    }
-
-    [[nodiscard]] std::vector<script::ScriptCursorEvent> updateCursorEvents(
-        const FramePlan* previousPlan,
-        const ResolvedFrameInputs& inputs
-    ) {
-        // Cursor callbacks must be supplied before the next plan evaluates
-        // scripts, so hit testing uses the last committed plan. Do not consume
-        // button or position edges until that first plan exists; otherwise a
-        // button held during the first frame loses its cursorDown permanently.
-        if (previousPlan == nullptr) return {};
-
-        std::vector<script::ScriptCursorEvent> events;
-        for (const PointerButtonState& state : pendingPointerTransitions) {
-            ResolvedFrameInputs transitionInputs = inputs;
-            transitionInputs.pointerActive = state.active;
-            transitionInputs.pointerLeftDown = state.leftDown;
-            appendCursorEvents(*previousPlan, transitionInputs, events);
-        }
-        pendingPointerTransitions.clear();
-        // The sampled frame state also carries pointer position and active-state
-        // changes that did not produce a button transition.
-        appendCursorEvents(*previousPlan, inputs, events);
         return events;
     }
 
     void invalidateFrame() noexcept {
         lastFrame.reset();
-        cursorTargets.clear();
-        pressedCursorTargets.clear();
-        pendingPointerTransitions.clear();
+        cursorTarget.reset();
+        pressedCursorTarget.reset();
         previousPointerLeftDown = false;
         hasCursorPosition = false;
         if (device) {
@@ -6702,13 +6661,8 @@ struct FramePlanExecutor::Impl final {
     FrameVector2 parallaxDisplacement;
     FrameVector2 lastPublishedPointer;
     bool hasPublishedPointer = false;
-    std::vector<CursorHit> cursorTargets;
-    std::vector<CursorHit> pressedCursorTargets;
-    struct PointerButtonState final {
-        bool active = false;
-        bool leftDown = false;
-    };
-    std::vector<PointerButtonState> pendingPointerTransitions;
+    std::optional<CursorHit> cursorTarget;
+    std::optional<CursorHit> pressedCursorTarget;
     FrameVector2 lastCursorPosition;
     bool hasCursorPosition = false;
     bool previousPointerLeftDown = false;
@@ -6769,13 +6723,7 @@ void FramePlanExecutor::present(
         drawablePresentationViewport(drawableWidth, drawableHeight), scaling
     );
 }
-void FramePlanExecutor::setPointerState(bool active, bool leftDown) {
-    if (leftDown != impl_->pointerLeftDown) {
-        impl_->pendingPointerTransitions.push_back({
-            .active = active,
-            .leftDown = leftDown,
-        });
-    }
+void FramePlanExecutor::setPointerState(bool active, bool leftDown) noexcept {
     impl_->pointerActive = active;
     impl_->pointerLeftDown = leftDown;
 }

@@ -4,7 +4,353 @@ import WebKit
 import XCTest
 @testable import Open_Wallpaper_Engine
 
+@MainActor
+private final class TestNowPlayingSource: SceneNowPlayingSource {
+    typealias Completion = @MainActor (
+        Result<SceneNowPlayingObservation?, Error>
+    ) -> Void
+
+    var startError: Error?
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+    private(set) var fetchCount = 0
+    private var changeHandler: (@MainActor () -> Void)?
+    private var completion: Completion?
+
+    func start(changeHandler: @escaping @MainActor () -> Void) throws {
+        startCount += 1
+        if let startError { throw startError }
+        self.changeHandler = changeHandler
+    }
+
+    func stop() {
+        stopCount += 1
+    }
+
+    func fetch(completion: @escaping Completion) {
+        fetchCount += 1
+        self.completion = completion
+    }
+
+    func complete(_ result: Result<SceneNowPlayingObservation?, Error>) {
+        completion?(result)
+    }
+
+    func notifyChange() {
+        changeHandler?()
+    }
+}
+
+private enum TestNowPlayingError: LocalizedError {
+    case unavailable
+
+    var errorDescription: String? { "test source unavailable" }
+}
+
 final class PlaybackPolicyTests: XCTestCase {
+    func testNowPlayingObservationRejectsEmptyInformation() {
+        XCTAssertThrowsError(
+            try MediaRemoteNowPlayingSource.observation(
+                fromHelperPayload: NSDictionary()
+            )
+        )
+    }
+
+    func testNowPlayingObservationNormalizesMetadataAndTimeline() throws {
+        let timestamp = Date(timeIntervalSince1970: 100)
+        let observation = try XCTUnwrap(
+            try MediaRemoteNowPlayingSource.observation(
+                fromHelperPayload: [
+                    "title": "  Track  ",
+                    "artist": "Artist",
+                    "album": "Album",
+                    "genre": ["Rock", "Indie"],
+                    "mediaType": "kMRMediaRemoteNowPlayingInfoTypeAudio",
+                    "duration": 120,
+                    "elapsedTime": 10,
+                    "playbackRate": 1,
+                    "playing": true,
+                    "timestamp": ISO8601DateFormatter().string(from: timestamp),
+                ] as NSDictionary
+            )
+        )
+
+        XCTAssertEqual(observation.playbackState, .playing)
+        XCTAssertEqual(observation.title, "Track")
+        XCTAssertEqual(observation.artist, "Artist")
+        XCTAssertEqual(observation.albumTitle, "Album")
+        XCTAssertEqual(observation.contentType, "music")
+        XCTAssertEqual(observation.genres, "Rock, Indie")
+        XCTAssertEqual(
+            observation.position(at: timestamp.addingTimeInterval(3)),
+            13,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            observation.position(at: timestamp.addingTimeInterval(200)),
+            120,
+            accuracy: 0.001
+        )
+    }
+
+    func testNowPlayingObservationUsesZeroForMissingTimelineWhenPaused() throws {
+        let observation = try XCTUnwrap(
+            try MediaRemoteNowPlayingSource.observation(
+                fromHelperPayload: [
+                    "title": "Track",
+                    "playing": false,
+                ] as NSDictionary
+            )
+        )
+
+        XCTAssertEqual(observation.playbackState, .paused)
+        XCTAssertEqual(observation.duration, 0)
+        XCTAssertEqual(observation.elapsedTime, 0)
+        XCTAssertEqual(observation.position(at: Date()), 0)
+    }
+
+    func testNowPlayingObservationRejectsInvalidTimeline() {
+        XCTAssertThrowsError(
+            try MediaRemoteNowPlayingSource.observation(
+                fromHelperPayload: [
+                    "title": "Track",
+                    "playing": true,
+                    "duration": Double.infinity,
+                ] as NSDictionary
+            )
+        )
+    }
+
+    func testArtworkPaletteUsesVisibleRGBAPixels() throws {
+        let thumbnail = SceneMediaThumbnailRGBA8(
+            width: 3,
+            height: 1,
+            bytesPerRow: 12,
+            pixels: Data([
+                255, 0, 0, 255,
+                0, 255, 0, 255,
+                0, 0, 255, 255,
+            ])
+        )
+
+        let palette = try SceneMediaArtworkProcessor.palette(for: thumbnail)
+
+        XCTAssertEqual(palette.count, 3)
+        XCTAssertTrue(palette.contains(SceneMediaColor(red: 1, green: 0, blue: 0)))
+        XCTAssertTrue(palette.contains(SceneMediaColor(red: 0, green: 1, blue: 0)))
+        XCTAssertTrue(palette.contains(SceneMediaColor(red: 0, green: 0, blue: 1)))
+    }
+
+    @MainActor
+    func testMediaRemoteHelperReturnsSystemMetadataAndArtwork() async throws {
+        let source = MediaRemoteNowPlayingSource()
+        try source.start(changeHandler: {})
+        defer { source.stop() }
+        let completed = expectation(description: "MediaRemote Now Playing fetch")
+        var fetchedResult: Result<SceneNowPlayingObservation?, Error>?
+
+        source.fetch { result in
+            fetchedResult = result
+            completed.fulfill()
+        }
+
+        await fulfillment(of: [completed], timeout: 3)
+        let observation = try XCTUnwrap(fetchedResult).get()
+        guard let observation else {
+            throw XCTSkip("No system Now Playing item is currently available")
+        }
+        XCTAssertFalse(observation.title.isEmpty)
+        XCTAssertFalse(observation.artist.isEmpty)
+        let artworkData = try XCTUnwrap(observation.artworkData)
+        XCTAssertFalse(artworkData.isEmpty)
+    }
+
+    @MainActor
+    func testNowPlayingMonitorPublishesSourceMetadata() throws {
+        let provider = SceneMediaSnapshotProvider()
+        let source = TestNowPlayingSource()
+        let monitor = SceneNowPlayingMonitor(
+            provider: provider,
+            source: source,
+            timelineInterval: 3_600
+        )
+        defer { monitor.stop() }
+        let timestamp = Date()
+
+        monitor.start()
+        source.complete(.success(SceneNowPlayingObservation(
+            playbackState: .playing,
+            title: "Track",
+            artist: "Artist",
+            contentType: "music",
+            albumTitle: "Album",
+            genres: "Electronic",
+            elapsedTime: 12,
+            duration: 180,
+            timestamp: timestamp,
+            playbackRate: 1,
+            artworkData: nil
+        )))
+
+        XCTAssertEqual(source.startCount, 1)
+        XCTAssertEqual(source.fetchCount, 1)
+        guard case .available(_, let content) = provider.snapshot else {
+            return XCTFail("Expected monitor metadata to become available")
+        }
+        XCTAssertEqual(content.playbackState, .playing)
+        XCTAssertEqual(content.title, "Track")
+        XCTAssertEqual(content.artist, "Artist")
+        XCTAssertEqual(content.albumTitle, "Album")
+        XCTAssertEqual(content.genres, "Electronic")
+        XCTAssertEqual(content.position, 12, accuracy: 0.1)
+        XCTAssertNil(provider.inputIssue)
+    }
+
+    @MainActor
+    func testNowPlayingTimelineTimerDoesNotPollSystemSource() async throws {
+        let provider = SceneMediaSnapshotProvider()
+        let source = TestNowPlayingSource()
+        let monitor = SceneNowPlayingMonitor(
+            provider: provider,
+            source: source,
+            timelineInterval: 0.01
+        )
+        defer { monitor.stop() }
+
+        monitor.start()
+        source.complete(.success(SceneNowPlayingObservation(
+            playbackState: .playing,
+            title: "Track",
+            artist: "Artist",
+            contentType: "music",
+            albumTitle: "",
+            genres: "",
+            elapsedTime: 0,
+            duration: 60,
+            timestamp: Date(),
+            playbackRate: 1,
+            artworkData: nil
+        )))
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(source.fetchCount, 1)
+        source.notifyChange()
+        XCTAssertEqual(source.fetchCount, 2)
+    }
+
+    @MainActor
+    func testNowPlayingMonitorPublishesStoppedWhenSystemHasNoTrack() {
+        let provider = SceneMediaSnapshotProvider()
+        let source = TestNowPlayingSource()
+        let monitor = SceneNowPlayingMonitor(
+            provider: provider,
+            source: source,
+            timelineInterval: 3_600
+        )
+        defer { monitor.stop() }
+
+        monitor.start()
+        source.complete(.success(nil))
+
+        guard case .available(_, let content) = provider.snapshot else {
+            return XCTFail("Expected an available stopped media snapshot")
+        }
+        XCTAssertEqual(content, .stopped)
+        XCTAssertNil(provider.inputIssue)
+    }
+
+    @MainActor
+    func testNowPlayingMonitorRejectsLateFetchAfterStop() {
+        let provider = SceneMediaSnapshotProvider()
+        let source = TestNowPlayingSource()
+        let monitor = SceneNowPlayingMonitor(
+            provider: provider,
+            source: source,
+            timelineInterval: 3_600
+        )
+
+        monitor.start()
+        monitor.stop()
+        let stoppedSnapshot = provider.snapshot
+        source.complete(.success(SceneNowPlayingObservation(
+            playbackState: .playing,
+            title: "Late Track",
+            artist: "Artist",
+            contentType: "music",
+            albumTitle: "",
+            genres: "",
+            elapsedTime: 0,
+            duration: 30,
+            timestamp: Date(),
+            playbackRate: 1,
+            artworkData: nil
+        )))
+
+        XCTAssertEqual(source.stopCount, 1)
+        XCTAssertEqual(provider.snapshot, stoppedSnapshot)
+        XCTAssertNil(provider.inputIssue)
+    }
+
+    @MainActor
+    func testNowPlayingMonitorMakesStartupFailureVisible() {
+        let provider = SceneMediaSnapshotProvider()
+        let source = TestNowPlayingSource()
+        source.startError = TestNowPlayingError.unavailable
+        let monitor = SceneNowPlayingMonitor(
+            provider: provider,
+            source: source,
+            timelineInterval: 3_600
+        )
+
+        monitor.start()
+
+        guard case .unavailable = provider.snapshot else {
+            return XCTFail("Expected unavailable media after source failure")
+        }
+        XCTAssertEqual(source.startCount, 1)
+        XCTAssertEqual(source.stopCount, 1)
+        XCTAssertEqual(
+            provider.inputIssue,
+            "Now Playing unavailable: test source unavailable"
+        )
+    }
+
+    @MainActor
+    func testPublishingStoppedContentClearsTrackAndAdvancesRevisions() throws {
+        let provider = SceneMediaSnapshotProvider()
+        let playing = SceneMediaContent(
+            playbackState: .playing,
+            title: "Track",
+            artist: "Artist",
+            contentType: "music",
+            albumTitle: "Album",
+            subTitle: "",
+            albumArtist: "",
+            genres: "",
+            position: 10,
+            duration: 120,
+            thumbnail: nil,
+            primaryColor: .black,
+            secondaryColor: .black,
+            tertiaryColor: .black,
+            textColor: .black,
+            highContrastColor: .black
+        )
+        try provider.publish(playing)
+        let playingRevisions = provider.snapshot.revisions
+
+        try provider.publish(.stopped)
+
+        guard case .available(let stoppedRevisions, let content) = provider.snapshot else {
+            return XCTFail("Expected a stopped but available media snapshot")
+        }
+        XCTAssertEqual(content, .stopped)
+        XCTAssertEqual(stoppedRevisions.status, playingRevisions.status)
+        XCTAssertEqual(stoppedRevisions.metadata, playingRevisions.metadata + 1)
+        XCTAssertEqual(stoppedRevisions.playback, playingRevisions.playback + 1)
+        XCTAssertEqual(stoppedRevisions.timeline, playingRevisions.timeline + 1)
+    }
+
     @MainActor
     func testSceneMediaProviderAdvancesOnlyTheChangedEventRevision() throws {
         let provider = SceneMediaSnapshotProvider()

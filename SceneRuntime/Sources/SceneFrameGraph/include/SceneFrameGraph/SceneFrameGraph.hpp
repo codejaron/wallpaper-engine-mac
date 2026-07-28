@@ -191,12 +191,9 @@ struct FrameImageDescriptor {
     std::size_t objectIndex = 0;
     int objectId = 0;
     bool visible = false;
-    // Layer-level Solid is an explicit SceneScript cursor hit-test opt-in. It
-    // is distinct from the model's procedural `solidLayer` image source flag.
+    // Layer-level Solid flag controls SceneScript cursor hit testing. This is
+    // distinct from the model's procedural `solidLayer` image source flag.
     bool solid = false;
-    // A layer is cursor-interactive when it is explicitly solid or one of its
-    // evaluated scripts exports a cursor callback.
-    bool cursorInteractive = false;
     bool passthrough = false;
     bool fullscreen = false;
     FrameVector2 size;
@@ -423,7 +420,6 @@ private:
     SceneGraphSnapshot graphSnapshot_;
     SceneFrameInputs inputs_;
     std::map<std::string, EvaluatedValue> scriptedValues_;
-    std::vector<int> cursorInteractiveLayerIds_;
     std::vector<SceneGraph::EvaluationFrame::ScriptEvaluationStats> scriptEvaluations_;
 };
 

@@ -120,21 +120,6 @@ final class SceneRuntimeSession {
         MainActor.assumeIsolated { close() }
     }
 
-    func setPointerState(active: Bool, leftDown: Bool) throws {
-        guard let executor else {
-            throw SceneRuntimeSessionError.runtime("Scene executor is not available")
-        }
-        var error: WESceneRuntimeErrorRef?
-        guard we_scene_frame_executor_set_pointer_state(
-            executor,
-            active ? 1 : 0,
-            leftDown ? 1 : 0,
-            &error
-        ) == 1 else {
-            throw bridgeError("Updating Scene pointer state", error)
-        }
-    }
-
     func render(
         runtimeSeconds: Double,
         frameTimeSeconds: Double,
@@ -160,8 +145,15 @@ final class SceneRuntimeSession {
             time_seconds: runtimeSeconds,
             frame_time_seconds: frameTimeSeconds
         )
-        try setPointerState(active: pointerActive, leftDown: pointerLeftDown)
         var error: WESceneRuntimeErrorRef?
+        guard we_scene_frame_executor_set_pointer_state(
+            executor,
+            pointerActive ? 1 : 0,
+            pointerLeftDown ? 1 : 0,
+            &error
+        ) == 1 else {
+            throw bridgeError("Updating Scene pointer state", error)
+        }
         let soundRuntimeStates = audioController.soundRuntimeSnapshots().map {
             snapshot -> WESceneSoundRuntimeStateInput in
             let state: WESceneSoundRuntimeState

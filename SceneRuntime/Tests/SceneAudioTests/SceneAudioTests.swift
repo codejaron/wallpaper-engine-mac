@@ -145,6 +145,28 @@ final class SceneAudioTests: XCTestCase {
         XCTAssertFalse(policy.shouldRun)
     }
 
+    func testBlockingSystemAudioStartupDoesNotBlockMainActor() async throws {
+        let startupBegan = expectation(description: "Core Audio startup began")
+        let waitStartedAt = Date()
+        let task = Task { @MainActor in
+            try await performSystemAudioCaptureStartup {
+                startupBegan.fulfill()
+                Thread.sleep(forTimeInterval: 0.5)
+                return 7
+            }
+        }
+
+        await fulfillment(of: [startupBegan], timeout: 1)
+
+        XCTAssertLessThan(
+            Date().timeIntervalSince(waitStartedAt),
+            0.25,
+            "A blocking Core Audio call must not occupy MainActor"
+        )
+        let result = try await task.value
+        XCTAssertEqual(result, 7)
+    }
+
     func testSystemAudioTapIsPrivateGlobalMixExcludingCurrentProcess() {
         let processObjectID = AudioObjectID(42)
         let uuid = UUID(uuidString: "61A39357-10FE-4A51-8A92-1B96F210F890")!
@@ -161,6 +183,30 @@ final class SceneAudioTests: XCTestCase {
         XCTAssertTrue(description.isMixdown)
         XCTAssertEqual(description.muteBehavior, .unmuted)
         XCTAssertEqual(description.uuid, uuid)
+    }
+
+    func testSystemAudioAggregateStartsImmediatelyWithoutPhysicalSubdevices() throws {
+        let tapUUID = UUID(uuidString: "61A39357-10FE-4A51-8A92-1B96F210F890")!
+        let aggregateUUID = UUID(uuidString: "16CCDF99-7C31-4C8F-81C2-D7C2E8AA23CE")!
+
+        let description = makeSystemAudioAggregateDescription(
+            tapUUID: tapUUID,
+            aggregateUUID: aggregateUUID
+        )
+
+        XCTAssertEqual(description[kAudioAggregateDeviceIsPrivateKey] as? Bool, true)
+        XCTAssertEqual(description[kAudioAggregateDeviceIsStackedKey] as? Bool, false)
+        XCTAssertEqual(description[kAudioAggregateDeviceTapAutoStartKey] as? Bool, false)
+        let subdevices = try XCTUnwrap(
+            description[kAudioAggregateDeviceSubDeviceListKey] as? [Any]
+        )
+        XCTAssertTrue(subdevices.isEmpty)
+        let taps = try XCTUnwrap(
+            description[kAudioAggregateDeviceTapListKey] as? [[String: Any]]
+        )
+        XCTAssertEqual(taps.count, 1)
+        XCTAssertEqual(taps[0][kAudioSubTapUIDKey] as? String, tapUUID.uuidString)
+        XCTAssertEqual(taps[0][kAudioSubTapDriftCompensationKey] as? Bool, true)
     }
 
     func testPlanarFloatCaptureDownmixesEveryBuffer() throws {

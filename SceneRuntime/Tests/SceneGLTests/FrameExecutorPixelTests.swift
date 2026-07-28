@@ -845,6 +845,43 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
     }
 
+    func testAudioScriptMutatingOriginYKeepsRenderedXStableAcrossFrames() throws {
+        let loaded = try loadFixture(
+            fragmentSource: constantRedFragmentShader,
+            projectionWidth: 8,
+            projectionHeight: 8,
+            imageOrigin: "2 2 0",
+            imageSize: "2 2",
+            scriptedAudioOrigin: true
+        )
+        defer { destroy(loaded) }
+
+        try renderWithAudioSpectrum(
+            loaded.executor,
+            spectrum16Left: [Float](repeating: 0, count: 16)
+        )
+        let quiet = try XCTUnwrap(redPixelBounds(
+            try readPixels(loaded.executor),
+            width: 8
+        ))
+
+        var loudSpectrum = [Float](repeating: 0, count: 16)
+        loudSpectrum[0] = 1
+        try renderWithAudioSpectrum(
+            loaded.executor,
+            spectrum16Left: loudSpectrum
+        )
+        let loud = try XCTUnwrap(redPixelBounds(
+            try readPixels(loaded.executor),
+            width: 8
+        ))
+
+        XCTAssertEqual(loud.minX, quiet.minX)
+        XCTAssertEqual(loud.maxX, quiet.maxX)
+        XCTAssertNotEqual(loud.minY, quiet.minY)
+        XCTAssertNotEqual(loud.maxY, quiet.maxY)
+    }
+
     func testMediaSnapshotCopiesBorrowedStateAndDeduplicatesRevision() throws {
         let loaded = try loadFixture(
             fragmentSource: validFragmentShader,
@@ -2828,6 +2865,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         nearPlane: Double = 0,
         puppetData: Data? = nil,
         scriptedAudioAmount: Bool = false,
+        scriptedAudioOrigin: Bool = false,
         scriptedMediaAmount: Bool = false,
         textureAnimationScript: String? = nil,
         sceneTexturePropertyKey: String? = nil,
@@ -2866,6 +2904,7 @@ final class FrameExecutorPixelTests: XCTestCase {
             nearPlane: nearPlane,
             puppetData: puppetData,
             scriptedAudioAmount: scriptedAudioAmount,
+            scriptedAudioOrigin: scriptedAudioOrigin,
             scriptedMediaAmount: scriptedMediaAmount,
             textureAnimationScript: textureAnimationScript,
             sceneTexturePropertyKey: sceneTexturePropertyKey,
@@ -3185,7 +3224,11 @@ final class FrameExecutorPixelTests: XCTestCase {
 
     private func renderWithAudioSpectrum(
         _ executor: WESceneFrameExecutorRef,
-        spectrum16Left: [Float]
+        spectrum16Left: [Float],
+        pointerX: Double = 0.5,
+        pointerY: Double = 0.5,
+        timeSeconds: Double = 1.25,
+        frameTimeSeconds: Double = 1.0 / 60.0
     ) throws {
         XCTAssertEqual(spectrum16Left.count, 16)
         let spectrum16Right = [Float](repeating: 0, count: 16)
@@ -3195,10 +3238,10 @@ final class FrameExecutorPixelTests: XCTestCase {
         let spectrum64Right = [Float](repeating: 0, count: 64)
         var error: WESceneRuntimeErrorRef?
         var inputs = WESceneFrameInputs(
-            pointer_x: 0.5,
-            pointer_y: 0.5,
-            time_seconds: 1.25,
-            frame_time_seconds: 1.0 / 60.0
+            pointer_x: pointerX,
+            pointer_y: pointerY,
+            time_seconds: timeSeconds,
+            frame_time_seconds: frameTimeSeconds
         )
         let result = spectrum16Left.withUnsafeBufferPointer { left16 in
             spectrum16Right.withUnsafeBufferPointer { right16 in
@@ -3521,6 +3564,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         nearPlane: Double = 0,
         puppetData: Data? = nil,
         scriptedAudioAmount: Bool = false,
+        scriptedAudioOrigin: Bool = false,
         scriptedMediaAmount: Bool = false,
         textureAnimationScript: String? = nil,
         sceneTexturePropertyKey: String? = nil,
@@ -3703,6 +3747,18 @@ final class FrameExecutorPixelTests: XCTestCase {
             image["origin"] = [
                 "value": imageOrigin ?? defaultOrigin,
                 "script": textureAnimationScript,
+            ]
+        }
+        if scriptedAudioOrigin {
+            image["origin"] = [
+                "value": imageOrigin ?? defaultOrigin,
+                "script": """
+                const audio = engine.registerAudioBuffers(16);
+                export function update(value) {
+                    value.y = audio.average[0] * 4.0 + 2.0;
+                    return value;
+                }
+                """,
             ]
         }
         if colorBlendMode > 0 {

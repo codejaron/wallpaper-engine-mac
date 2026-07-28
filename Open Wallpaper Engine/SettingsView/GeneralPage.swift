@@ -10,10 +10,12 @@ import SwiftUI
 
 struct GeneralPage: SettingsPage {
     @ObservedObject var viewModel: GlobalSettingsViewModel
+    @ObservedObject private var mediaSnapshotProvider: SceneMediaSnapshotProvider
     @State private var assetsDirectoryIssue: String?
     
     init(globalSettings viewModel: GlobalSettingsViewModel) {
         self.viewModel = viewModel
+        mediaSnapshotProvider = AppDelegate.shared.sceneMediaSnapshotProvider
     }
     
     var body: some View {
@@ -63,6 +65,12 @@ struct GeneralPage: SettingsPage {
                 .help(
                     "Enables audio-reactive wallpaper effects and the Other Application Playing Audio rule."
                 )
+                if let issue = mediaSnapshotProvider.inputIssue {
+                    Label(issue, systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Toggle(isOn: $viewModel.settings.reloadWhenChangingOutputDevice) {
                     Text("Reload when changing output device")
                 }.disabled(true)

@@ -177,6 +177,15 @@ public struct SceneAudioCapturePolicy: Equatable, Sendable {
     }
 }
 
+func performSystemAudioCaptureStartup<T: Sendable>(
+    _ operation: @escaping @Sendable () throws -> T
+) async throws -> T {
+    try await Task.detached(
+        priority: .userInitiated,
+        operation: operation
+    ).value
+}
+
 /// One explicit claim on the process-wide system-audio stream. Scene rendering
 /// and playback-policy detection share the same capture, so neither consumer
 /// may stop it while the other one is still active.
@@ -319,6 +328,9 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
             return
         }
         if let startTask {
+            withLock {
+                if statusStorage == .idle { statusStorage = .starting }
+            }
             try await startTask.value
             return
         }
@@ -347,17 +359,21 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
 
     @MainActor
     private func startCapture(generation: UUID) async throws {
-
         do {
-            let nextCapture = CoreAudioSystemCapture { [weak self] samples in
-                self?.append(samples: samples)
+            let nextCapture = try await performSystemAudioCaptureStartup { [weak self] in
+                let capture = CoreAudioSystemCapture { [weak self] samples in
+                    self?.append(samples: samples)
+                }
+                try capture.start()
+                return capture
             }
-            try nextCapture.start()
 
             guard startGeneration == generation,
                   !Task.isCancelled,
                   capturePolicy.shouldRun else {
-                nextCapture.stop()
+                await Task.detached(priority: .utility) {
+                    nextCapture.stop()
+                }.value
                 throw CancellationError()
             }
 
@@ -371,7 +387,9 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
             }
             throw CancellationError()
         } catch {
-            guard startGeneration == generation, !Task.isCancelled else {
+            guard startGeneration == generation,
+                  !Task.isCancelled,
+                  capturePolicy.shouldRun else {
                 withLock {
                     if capture == nil { statusStorage = .idle }
                 }
@@ -410,9 +428,10 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
 
     @MainActor
     private func stopCapture() {
-        startTask?.cancel()
-        startTask = nil
-        startGeneration = nil
+        // Core Audio startup is not cancellable. Keep the in-flight task as
+        // the sole startup operation; it will observe the latest policy before
+        // publishing its capture and clean up off the main thread otherwise.
+        if startTask == nil { startGeneration = nil }
         let currentCapture = withLock { () -> CoreAudioSystemCapture? in
             let currentCapture = capture
             capture = nil
@@ -422,7 +441,11 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
             lastSignalUptime = nil
             return currentCapture
         }
-        currentCapture?.stop()
+        if let currentCapture {
+            Task.detached(priority: .utility) {
+                currentCapture.stop()
+            }
+        }
     }
 
     private func append(samples: [Float]) {

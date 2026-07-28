@@ -3826,6 +3826,49 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(descriptor.color_alpha, 1, accuracy: 1e-6)
     }
 
+    func testNormalizedIntegerUserColorRemainsWhite() throws {
+        var documents = syntheticDocuments()
+        var project = documents["project.json"] as! [String: Any]
+        var general = project["general"] as! [String: Any]
+        var properties = general["properties"] as! [String: Any]
+        properties["textColor"] = [
+            "text": "Text color", "type": "color", "value": "1 1 1",
+        ]
+        general["properties"] = properties
+        project["general"] = general
+        documents["project.json"] = project
+
+        var scene = documents["scene.json"] as! [String: Any]
+        var objects = scene["objects"] as! [[String: Any]]
+        objects.append([
+            "color": [
+                "user": "textColor", "value": "1.00000 1.00000 1.00000",
+            ],
+            "id": 8,
+            "name": "User color text",
+            "text": "white",
+            "visible": true,
+        ])
+        scene["objects"] = objects
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+        let plan = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        let descriptor = try XCTUnwrap(texts(plan).first)
+        XCTAssertEqual(descriptor.color_red, 1, accuracy: 1e-6)
+        XCTAssertEqual(descriptor.color_green, 1, accuracy: 1e-6)
+        XCTAssertEqual(descriptor.color_blue, 1, accuracy: 1e-6)
+        XCTAssertEqual(descriptor.color_alpha, 1, accuracy: 1e-6)
+    }
+
     func testNullScriptUpdateRetainsTheUpstreamStringProjection() throws {
         var documents = syntheticDocuments()
         var scene = documents["scene.json"] as! [String: Any]

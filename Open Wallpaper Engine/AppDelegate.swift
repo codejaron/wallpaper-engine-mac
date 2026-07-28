@@ -308,8 +308,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let mouseLocation = NSEvent.mouseLocation
         guard let targetWindow = wallpaperWindows.values.first(where: {
               $0.isVisible && $0.frame.contains(mouseLocation)
-        }),
-              let webview = findWebView(in: targetWindow.contentView) else { return }
+        }) else { return }
+
+        if let sceneView = findView(
+            ofType: SceneOpenGLContainerView.self,
+            in: targetWindow.contentView
+        ) {
+            switch event.type {
+            case .leftMouseDown:
+                sceneView.forwardDesktopLeftMouseButton(isDown: true)
+            case .leftMouseUp:
+                sceneView.forwardDesktopLeftMouseButton(isDown: false)
+            default:
+                break
+            }
+        }
+
+        guard let webview = findView(
+            ofType: WKWebView.self,
+            in: targetWindow.contentView
+        ) else { return }
 
         // Global-monitor events carry the originating application's window
         // number and location. Passing that event directly to a wallpaper
@@ -381,11 +399,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
-    private func findWebView(in view: NSView?) -> WKWebView? {
+    private func findView<View: NSView>(
+        ofType type: View.Type,
+        in view: NSView?
+    ) -> View? {
         guard let view else { return nil }
-        if let webView = view as? WKWebView { return webView }
+        if let match = view as? View { return match }
         for child in view.subviews {
-            if let webView = findWebView(in: child) { return webView }
+            if let match = findView(ofType: type, in: child) { return match }
         }
         return nil
     }

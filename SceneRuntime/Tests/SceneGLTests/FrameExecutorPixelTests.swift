@@ -992,7 +992,8 @@ final class FrameExecutorPixelTests: XCTestCase {
     func testParallaxSmoothsPointerAcrossFramesAndMovesImageGeometry() throws {
         let loaded = try loadFixture(
             fragmentSource: textureOnlyFragmentShader,
-            parallax: true
+            parallax: true,
+            parallaxDepth: "1 0"
         )
         defer { destroy(loaded) }
 
@@ -1033,6 +1034,31 @@ final class FrameExecutorPixelTests: XCTestCase {
             try readPixels(loaded.executor),
             [0, 0, 0, 255, 255, 0, 0, 255,
              0, 0, 0, 255, 255, 0, 0, 255]
+        )
+    }
+
+    func testZeroDepthFullscreenImageDoesNotExposeClearColorDuringParallax() throws {
+        let loaded = try loadFixture(
+            fragmentSource: constantRedFragmentShader,
+            parallax: true,
+            imageOrigin: "1 1 0",
+            imageSize: "2 2",
+            parallaxDepth: "0 0"
+        )
+        defer { destroy(loaded) }
+
+        try render(
+            loaded.executor,
+            pointerX: 1,
+            pointerY: 0.5,
+            timeSeconds: 1,
+            frameTimeSeconds: 2
+        )
+
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 0, 0, 255]),
+            "A zero-depth fullscreen background must remain fixed while parallax layers move"
         )
     }
 
@@ -1481,7 +1507,8 @@ final class FrameExecutorPixelTests: XCTestCase {
             commandMode: .proceduralClear,
             parallax: true,
             projectionAuto: true,
-            drawableSizedSolidLayer: true
+            drawableSizedSolidLayer: true,
+            parallaxDepth: "1 0"
         )
         defer { destroy(loaded) }
 
@@ -2102,7 +2129,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertGreaterThan(leftBounds.maxX, rightBounds.maxX)
     }
 
-    func testTextVerticalAlignmentUsesTheRenderedTextAsItsAnchor() throws {
+    func testTextVerticalAlignmentUsesWallpaperEngineAnchorDirection() throws {
         let top = try loadTextFixture(
             font: "systemfont_arial",
             verticalAlignment: "top",
@@ -2136,8 +2163,8 @@ final class FrameExecutorPixelTests: XCTestCase {
                 width: Int(we_scene_frame_executor_width(bottom.executor))
             )
         )
-        XCTAssertGreaterThan(topBounds.minY, bottomBounds.minY)
-        XCTAssertGreaterThan(topBounds.maxY, bottomBounds.maxY)
+        XCTAssertLessThan(topBounds.minY, bottomBounds.minY)
+        XCTAssertLessThan(topBounds.maxY, bottomBounds.maxY)
     }
 
     func testTextWithImplicitLayoutSizeStillRenders() throws {

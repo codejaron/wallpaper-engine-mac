@@ -1118,11 +1118,11 @@ final class ParticleExecutorTests: XCTestCase {
             ),
             context: nil
         )
-        // (0.65 + 0.6) * ((1 - 0.5) * 0.6) * 16 = 6 world pixels.
+        // 0.65 * ((1 - 0.5) * 0.6) * 16 = 3.12 world pixels.
         let translatedControl = try loadPipeline(
             fixture: makeFixture(
                 includeText: false,
-                particleOrigin: "7 4 0",
+                particleOrigin: "4 4 0",
                 particleScale: "2 1 1"
             ),
             context: nil

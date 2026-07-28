@@ -17,7 +17,10 @@ typedef struct WESceneTextTestBitmapInfo {
     const uint8_t* coverage;
     size_t coverage_size;
     double baseline_from_top;
+    double logical_left_from_bitmap;
+    double logical_top_from_bitmap;
     double typographic_width;
+    double typographic_height;
     double ascent;
     double descent;
     size_t line_count;

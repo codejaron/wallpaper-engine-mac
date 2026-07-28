@@ -500,11 +500,13 @@ public:
         FrameProjectionSize projectionSize,
         const SceneFrameInputs& inputs,
         SceneGraph::EvaluationFrame* evaluationFrame = nullptr,
-        const std::map<std::string, EvaluatedValue>* scriptedValues = nullptr
+        const std::map<std::string, EvaluatedValue>* scriptedValues = nullptr,
+        const std::vector<int>* cursorInteractiveLayerIds = nullptr
     )
         : model_(std::move(model)), graphSnapshot_(graphSnapshot),
           projectionSize_(projectionSize), inputs_(inputs),
-          evaluationFrame_(evaluationFrame), scriptedValues_(scriptedValues) {
+          evaluationFrame_(evaluationFrame), scriptedValues_(scriptedValues),
+          cursorInteractiveLayerIds_(cursorInteractiveLayerIds) {
         if (!model_) {
             throw SceneModelError(
                 SceneModelErrorCode::invalidValue,
@@ -3516,6 +3518,12 @@ private:
     }
 
     void finalizeScriptLayerStates() {
+        std::vector<int> evaluatedCursorLayers;
+        const std::vector<int>* cursorLayers = cursorInteractiveLayerIds_;
+        if (evaluationFrame_) {
+            evaluatedCursorLayers = evaluationFrame_->cursorInteractiveLayerIds();
+            cursorLayers = &evaluatedCursorLayers;
+        }
         const auto textureAnimations = evaluationFrame_
             ? evaluationFrame_->textureAnimationSnapshots()
             : graphSnapshot_.textureAnimations;
@@ -3531,6 +3539,10 @@ private:
                     image.solid = solid->boolean();
                 }
             }
+            image.cursorInteractive = image.solid ||
+                (cursorLayers != nullptr && std::binary_search(
+                    cursorLayers->begin(), cursorLayers->end(), image.objectId
+                ));
             const auto animation = animationsByLayer.find(image.objectId);
             if (animation == animationsByLayer.end()) continue;
             if (image.source.kind != FrameResourceKind::assetTexture ||
@@ -3992,6 +4004,7 @@ private:
     SceneFrameInputs inputs_;
     SceneGraph::EvaluationFrame* evaluationFrame_ = nullptr;
     const std::map<std::string, EvaluatedValue>* scriptedValues_ = nullptr;
+    const std::vector<int>* cursorInteractiveLayerIds_ = nullptr;
     FramePlan plan_;
     FramebufferMap sceneFramebuffers_;
     std::set<int> dependencyObjectIds_;
@@ -4160,6 +4173,7 @@ EvaluatedFramePlan SceneFrameGraph::evaluate(
         state.inputs_, evaluation.get()
     ).build();
     state.scriptedValues_ = evaluation->evaluatedScriptValues();
+    state.cursorInteractiveLayerIds_ = evaluation->cursorInteractiveLayerIds();
     state.scriptEvaluations_ = evaluation->scriptEvaluationStats();
     plan.scriptEvaluations = state.scriptEvaluations_;
     return EvaluatedFramePlan{
@@ -4180,7 +4194,8 @@ FramePlan SceneFrameGraph::reproject(
     }
     FramePlan plan = PlanBuilder(
         graph_->model(), evaluation.graphSnapshot_, projectionSize(drawableFallback),
-        evaluation.inputs_, nullptr, &evaluation.scriptedValues_
+        evaluation.inputs_, nullptr, &evaluation.scriptedValues_,
+        &evaluation.cursorInteractiveLayerIds_
     ).build();
     plan.scriptEvaluations = evaluation.scriptEvaluations_;
     return plan;

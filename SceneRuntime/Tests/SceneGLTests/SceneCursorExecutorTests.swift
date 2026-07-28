@@ -56,6 +56,218 @@ final class SceneCursorExecutorTests: XCTestCase {
         )
     }
 
+    func testPressAndReleaseBetweenFramesPreserveBothButtonEdges() throws {
+        let script = """
+        let events = 0;
+        export function cursorDown() { events += 1; }
+        export function cursorUp() { events += 2; }
+        export function cursorClick() { events += 4; }
+        export function update() {
+            const result = events;
+            events = 0;
+            return result / 255.0;
+        }
+        """
+        let loaded = try makePipeline(
+            width: 8,
+            height: 4,
+            layers: [Layer(
+                id: 1,
+                origin: "4 2 0",
+                size: "8 4",
+                solid: true,
+                script: script
+            )]
+        )
+        defer { destroy(loaded) }
+
+        _ = try render(
+            loaded, x: 0.25, y: 0.5, active: true, leftDown: false, time: 1
+        )
+        var error: WESceneRuntimeErrorRef?
+        XCTAssertEqual(
+            we_scene_frame_executor_set_pointer_state(
+                loaded.executor, 1, 1, &error
+            ),
+            1,
+            error.map { String(cString: we_scene_runtime_error_message($0)) } ?? ""
+        )
+        XCTAssertNil(error)
+        XCTAssertEqual(
+            we_scene_frame_executor_set_pointer_state(
+                loaded.executor, 1, 0, &error
+            ),
+            1,
+            error.map { String(cString: we_scene_runtime_error_message($0)) } ?? ""
+        )
+        XCTAssertNil(error)
+
+        let clicked = try render(
+            loaded, x: 0.25, y: 0.5, active: true, leftDown: false, time: 2
+        )
+        XCTAssertEqual(
+            red(clicked, x: 1, y: 2, width: 8),
+            7,
+            "A complete desktop click must not disappear between evaluated frames"
+        )
+    }
+
+    func testNonSolidLayerWithCursorCallbacksReceivesClick() throws {
+        let script = """
+        let events = 0;
+        export function cursorDown() { events += 1; }
+        export function cursorUp() { events += 2; }
+        export function cursorClick() { events += 4; }
+        export function update() {
+            const result = events;
+            events = 0;
+            return result / 255.0;
+        }
+        """
+        let loaded = try makePipeline(
+            width: 8,
+            height: 4,
+            layers: [Layer(
+                id: 1,
+                origin: "4 2 0",
+                size: "8 4",
+                solid: false,
+                script: script
+            )]
+        )
+        defer { destroy(loaded) }
+
+        _ = try render(
+            loaded, x: 0.5, y: 0.5, active: true, leftDown: false, time: 1
+        )
+        let pressed = try render(
+            loaded, x: 0.5, y: 0.5, active: true, leftDown: true, time: 2
+        )
+        XCTAssertEqual(
+            red(pressed, x: 4, y: 2, width: 8),
+            1,
+            "A cursor callback export must make its non-solid owner interactive"
+        )
+
+        let released = try render(
+            loaded, x: 0.5, y: 0.5, active: true, leftDown: false, time: 3
+        )
+        XCTAssertEqual(
+            red(released, x: 4, y: 2, width: 8),
+            6,
+            "The interactive script layer must receive up followed by click"
+        )
+    }
+
+    func testEveryOverlappingScriptInteractiveLayerReceivesClick() throws {
+        let interactiveScript = """
+        export function cursorClick() {
+            shared.cursorClicks = (shared.cursorClicks || 0) + 1;
+        }
+        export function update() { return 0.0; }
+        """
+        let observerScript = """
+        export function update() {
+            return (shared.cursorClicks || 0) / 255.0;
+        }
+        """
+        let loaded = try makePipeline(
+            width: 8,
+            height: 4,
+            layers: [
+                Layer(
+                    id: 1,
+                    origin: "4 2 0",
+                    size: "8 4",
+                    solid: false,
+                    script: interactiveScript
+                ),
+                Layer(
+                    id: 2,
+                    origin: "4 2 0",
+                    size: "8 4",
+                    solid: false,
+                    script: interactiveScript
+                ),
+                Layer(
+                    id: 3,
+                    origin: "1 2 0",
+                    size: "2 4",
+                    solid: false,
+                    script: observerScript
+                ),
+            ]
+        )
+        defer { destroy(loaded) }
+
+        _ = try render(
+            loaded, x: 0.75, y: 0.5, active: true, leftDown: false, time: 1
+        )
+        _ = try render(
+            loaded, x: 0.75, y: 0.5, active: true, leftDown: true, time: 2
+        )
+        let released = try render(
+            loaded, x: 0.75, y: 0.5, active: true, leftDown: false, time: 3
+        )
+
+        XCTAssertEqual(
+            red(released, x: 1, y: 2, width: 8),
+            2,
+            "Both fully overlapping interactive layers must receive the click"
+        )
+    }
+
+    func testPassiveNonSolidLayerDoesNotBlockInteractiveLayerBelow() throws {
+        let interactiveScript = """
+        export function cursorClick() {
+            shared.lowerLayerClicks = (shared.lowerLayerClicks || 0) + 1;
+        }
+        export function update() { return 0.0; }
+        """
+        let passiveScript = """
+        export function update() {
+            return (shared.lowerLayerClicks || 0) / 255.0;
+        }
+        """
+        let loaded = try makePipeline(
+            width: 8,
+            height: 4,
+            layers: [
+                Layer(
+                    id: 1,
+                    origin: "4 2 0",
+                    size: "8 4",
+                    solid: false,
+                    script: interactiveScript
+                ),
+                Layer(
+                    id: 2,
+                    origin: "4 2 0",
+                    size: "8 4",
+                    solid: false,
+                    script: passiveScript
+                ),
+            ]
+        )
+        defer { destroy(loaded) }
+
+        _ = try render(
+            loaded, x: 0.5, y: 0.5, active: true, leftDown: false, time: 1
+        )
+        _ = try render(
+            loaded, x: 0.5, y: 0.5, active: true, leftDown: true, time: 2
+        )
+        let released = try render(
+            loaded, x: 0.5, y: 0.5, active: true, leftDown: false, time: 3
+        )
+
+        XCTAssertEqual(
+            red(released, x: 4, y: 2, width: 8),
+            1,
+            "A passive non-solid script must not intercept the lower layer's click"
+        )
+    }
+
     func testCursorWorldPositionAndLeftButtonUseTheCurrentProjection() throws {
         let inputScript = """
         export function update() {
@@ -92,7 +304,7 @@ final class SceneCursorExecutorTests: XCTestCase {
         )
     }
 
-    func testFrontmostSolidLayerWinsAndNonSolidLayerFallsThrough() throws {
+    func testEveryOverlappingInteractiveLayerReceivesEnterRegardlessOfSolidFlag() throws {
         let solidTop = try makePipeline(
             width: 8,
             height: 4,
@@ -115,11 +327,15 @@ final class SceneCursorExecutorTests: XCTestCase {
         let topHit = try render(
             solidTop, x: 0.75, y: 0.5, active: true, leftDown: false, time: 2
         )
-        XCTAssertEqual(red(topHit, x: 1, y: 2, width: 8), 0)
+        XCTAssertEqual(
+            red(topHit, x: 1, y: 2, width: 8),
+            1,
+            "The lower interactive layer must not lose an overlapping hit"
+        )
         XCTAssertEqual(
             red(topHit, x: 6, y: 2, width: 8),
             1,
-            "Only the last rendered solid image under the pointer may receive enter"
+            "The upper solid layer must receive enter"
         )
 
         let nonSolidTop = try makePipeline(
@@ -147,9 +363,13 @@ final class SceneCursorExecutorTests: XCTestCase {
         XCTAssertEqual(
             red(fallthroughHit, x: 1, y: 2, width: 8),
             1,
-            "A visible non-solid layer must not block the solid layer below it"
+            "A non-solid script layer must not block the interactive layer below it"
         )
-        XCTAssertEqual(red(fallthroughHit, x: 6, y: 2, width: 8), 0)
+        XCTAssertEqual(
+            red(fallthroughHit, x: 6, y: 2, width: 8),
+            1,
+            "Cursor callback exports make the non-solid layer interactive"
+        )
     }
 
     func testRotatedAlignedLayerUsesTheInverseRenderedTransform() throws {

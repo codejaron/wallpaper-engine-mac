@@ -62,7 +62,12 @@ struct RasterizedText final {
     // are deliberately applied by the renderer so they do not invalidate this bitmap.
     std::vector<std::uint8_t> coverage;
     double baselineFromTop = 0.0;
+    // Logical layout bounds stay independent from glyph image overhang so the
+    // object anchor does not move when the rendered characters change.
+    double logicalLeftFromBitmap = 0.0;
+    double logicalTopFromBitmap = 0.0;
     double typographicWidth = 0.0;
+    double typographicHeight = 0.0;
     double ascent = 0.0;
     double descent = 0.0;
     std::size_t lineCount = 0;

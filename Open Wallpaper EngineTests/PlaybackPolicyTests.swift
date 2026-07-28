@@ -148,6 +148,42 @@ final class PlaybackPolicyTests: XCTestCase {
         )
     }
 
+    func testScenePresentationDefaultsToCompleteFrameStretch() {
+        XCTAssertEqual(GlobalSettings().scenePresentationScaling, .stretch)
+    }
+
+    func testLegacyAspectFillDefaultMigratesToCompleteFrameStretch() throws {
+        let data = try XCTUnwrap(
+            #"{"scenePresentationScaling":"aspectFill"}"#.data(using: .utf8)
+        )
+
+        let settings = try JSONDecoder().decode(GlobalSettings.self, from: data)
+
+        XCTAssertEqual(settings.scenePresentationScaling, .stretch)
+    }
+
+    func testLegacyAspectFitSelectionIsPreserved() throws {
+        let data = try XCTUnwrap(
+            #"{"scenePresentationScaling":"aspectFit"}"#.data(using: .utf8)
+        )
+
+        let settings = try JSONDecoder().decode(GlobalSettings.self, from: data)
+
+        XCTAssertEqual(settings.scenePresentationScaling, .aspectFit)
+    }
+
+    func testVersionedExplicitAspectFillSelectionIsPreserved() throws {
+        var settings = GlobalSettings()
+        settings.scenePresentationScaling = .aspectFill
+
+        let restored = try JSONDecoder().decode(
+            GlobalSettings.self,
+            from: JSONEncoder().encode(settings)
+        )
+
+        XCTAssertEqual(restored.scenePresentationScaling, .aspectFill)
+    }
+
     func testDisplaySleepAppliesAnUnconditionalPause() {
         var state = PlaybackPolicyState()
 

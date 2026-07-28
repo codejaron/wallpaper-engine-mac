@@ -63,6 +63,18 @@ final class SceneTextTests: XCTestCase {
         XCTAssertTrue(coverage.contains { $0 != 0 })
         XCTAssertGreaterThan(info.ascent, 0)
         XCTAssertGreaterThan(info.baseline_from_top, 0)
+        XCTAssertGreaterThanOrEqual(info.logical_left_from_bitmap, 0)
+        XCTAssertGreaterThanOrEqual(info.logical_top_from_bitmap, 0)
+        XCTAssertGreaterThan(info.typographic_width, 0)
+        XCTAssertGreaterThan(info.typographic_height, 0)
+        XCTAssertLessThanOrEqual(
+            info.logical_left_from_bitmap + info.typographic_width,
+            Double(info.width)
+        )
+        XCTAssertLessThanOrEqual(
+            info.logical_top_from_bitmap + info.typographic_height,
+            Double(info.height)
+        )
         XCTAssertEqual(info.line_count, 1)
         XCTAssertEqual(info.truncated, 0)
     }

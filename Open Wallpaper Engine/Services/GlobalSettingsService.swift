@@ -63,6 +63,7 @@ enum GSLogLevel: String, CaseIterable, Identifiable, Codable {
 }
 
 struct GlobalSettings: Codable, Equatable {
+    private static let currentScenePresentationSettingsVersion = 1
     
     // MARK: Playback
     var otherApplicationFocused = GSPlayback.keepRunning
@@ -82,8 +83,10 @@ struct GlobalSettings: Codable, Equatable {
     // MARK: Scene presentation
     // Per-screen rendering remains the default. Span mode opts into a shared
     // virtual canvas whose slices are presented by each display window.
-    var scenePresentationScaling = GSScenePresentationScaling.aspectFill
+    var scenePresentationScaling = GSScenePresentationScaling.stretch
     var sceneSpanAcrossScreens = false
+    private var scenePresentationSettingsVersion =
+        Self.currentScenePresentationSettingsVersion
     
     // MARK: Automatic Setup
     var autoStart = false
@@ -122,7 +125,8 @@ struct GlobalSettings: Codable, Equatable {
         case otherApplicationFocused, otherApplicationFullscreen,
              otherApplicationPlayingAudio, laptopOnBattery
         case antiAliasing, postProcessing, textureResolution, reflections, fps
-        case scenePresentationScaling, sceneSpanAcrossScreens
+        case scenePresentationScaling, sceneSpanAcrossScreens,
+             scenePresentationSettingsVersion
         case autoStart, safeMode, language
         case adjustMenuBarTint, appearance
         case audioOutput, systemAudioCaptureEnabled,
@@ -143,8 +147,10 @@ struct GlobalSettings: Codable, Equatable {
         textureResolution = .automatic
         reflections = false
         fps = 30
-        scenePresentationScaling = .aspectFill
+        scenePresentationScaling = .stretch
         sceneSpanAcrossScreens = false
+        scenePresentationSettingsVersion =
+            Self.currentScenePresentationSettingsVersion
         autoStart = false
         safeMode = false
         language = .followSystem
@@ -192,12 +198,28 @@ struct GlobalSettings: Codable, Equatable {
             Bool.self, forKey: .reflections
         ) ?? false
         fps = try container.decodeIfPresent(Double.self, forKey: .fps) ?? 30
-        scenePresentationScaling = try container.decodeIfPresent(
-            GSScenePresentationScaling.self, forKey: .scenePresentationScaling
-        ) ?? .aspectFill
+        let storedScenePresentationVersion = try container.decodeIfPresent(
+            Int.self, forKey: .scenePresentationSettingsVersion
+        ) ?? 0
+        let storedScenePresentationScaling = try container.decodeIfPresent(
+            GSScenePresentationScaling.self,
+            forKey: .scenePresentationScaling
+        )
+        // Builds predating this version persisted aspectFill as the implicit
+        // default, which cropped authored content at narrower display ratios.
+        // Migrate that unversioned state once; versioned user selections remain
+        // authoritative, including an explicit aspectFill choice.
+        if storedScenePresentationVersion == 0 &&
+            storedScenePresentationScaling == .aspectFill {
+            scenePresentationScaling = .stretch
+        } else {
+            scenePresentationScaling = storedScenePresentationScaling ?? .stretch
+        }
         sceneSpanAcrossScreens = try container.decodeIfPresent(
             Bool.self, forKey: .sceneSpanAcrossScreens
         ) ?? false
+        scenePresentationSettingsVersion =
+            Self.currentScenePresentationSettingsVersion
         autoStart = try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
         safeMode = try container.decodeIfPresent(Bool.self, forKey: .safeMode) ?? false
         language = try container.decodeIfPresent(

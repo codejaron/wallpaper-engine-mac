@@ -415,6 +415,9 @@ RasterizedText rasterize(const RasterRequest& request) {
     for (const LineLayout& line : lines) {
         typographicWidth = std::max(typographicWidth, line.width);
     }
+    const double typographicHeight =
+        baseLineHeight +
+        static_cast<double>(lines.size() - 1) * lineAdvance;
 
     double minimumX = 0.0;
     double maximumX = typographicWidth;
@@ -494,7 +497,10 @@ RasterizedText rasterize(const RasterRequest& request) {
         .bytesPerRow = width,
         .coverage = std::move(topDown),
         .baselineFromTop = maximumY,
+        .logicalLeftFromBitmap = -minimumX,
+        .logicalTopFromBitmap = maximumY - fontAscent,
         .typographicWidth = typographicWidth,
+        .typographicHeight = typographicHeight,
         .ascent = fontAscent,
         .descent = fontDescent,
         .lineCount = lines.size(),

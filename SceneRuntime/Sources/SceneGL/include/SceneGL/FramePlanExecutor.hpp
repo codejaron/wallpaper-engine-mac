@@ -159,9 +159,9 @@ public:
         const PresentationViewport& viewport,
         PresentationScaling scaling
     );
-    // Updates the sampled desktop pointer button state used to produce
-    // SceneScript cursor events on the next evaluated frame.
-    void setPointerState(bool active, bool leftDown) noexcept;
+    // Updates the sampled desktop pointer state and preserves every left-button
+    // edge until SceneScript cursor events can be evaluated.
+    void setPointerState(bool active, bool leftDown);
     void setScreensaverState(bool isScreensaver) noexcept;
     void setMediaSnapshot(
         std::optional<script::ScriptMediaSnapshot> snapshot

@@ -830,28 +830,36 @@ struct SceneGraph::EvaluationFrame::Impl final {
                 }
                 instance.script->updateProperties(std::move(scriptProperties));
             }
+            RuntimeValue evaluated = instance.script->evaluate({
+                .runtimeSeconds = inputs.runtimeSeconds,
+                .frameTimeSeconds = inputs.frameTimeSeconds,
+                .timeOfDay = inputs.timeOfDay,
+                .isScreensaver = inputs.isScreensaver,
+                .audioSpectrum = inputs.audioSpectrum,
+                .sceneSnapshot = inputs.sceneSnapshot,
+                .userProperties = userProperties,
+                .pointerX = inputs.pointerX,
+                .pointerY = inputs.pointerY,
+                .cursorWorldPosition = inputs.cursorWorldPosition,
+                .pointerLeftDown = inputs.pointerLeftDown,
+                .cursorEvents = inputs.cursorEvents,
+                .mediaSnapshot = inputs.mediaSnapshot,
+            });
+            if (owner.layerId && instance.script->hasCursorCallbacks()) {
+                cursorInteractiveLayerIds.insert(*owner.layerId);
+            }
             EvaluatedValue result{
-                .value = instance.script->evaluate({
-                    .runtimeSeconds = inputs.runtimeSeconds,
-                    .frameTimeSeconds = inputs.frameTimeSeconds,
-                    .timeOfDay = inputs.timeOfDay,
-                    .isScreensaver = inputs.isScreensaver,
-                    .audioSpectrum = inputs.audioSpectrum,
-                    .sceneSnapshot = inputs.sceneSnapshot,
-                    .userProperties = userProperties,
-                    .pointerX = inputs.pointerX,
-                    .pointerY = inputs.pointerY,
-                    .cursorWorldPosition = inputs.cursorWorldPosition,
-                    .pointerLeftDown = inputs.pointerLeftDown,
-                    .cursorEvents = inputs.cursorEvents,
-                    .mediaSnapshot = inputs.mediaSnapshot,
-                }),
+                .value = std::move(evaluated),
                 .source = DynamicValueSource::script,
             };
             values.emplace(pointer, result);
             return result;
         } catch (const script::ScriptError& error) {
             if (error.code() == script::ScriptErrorCode::audioInputUnavailable) {
+                if (owner.layerId && instance.script &&
+                    instance.script->hasCursorCallbacks()) {
+                    cursorInteractiveLayerIds.insert(*owner.layerId);
+                }
                 EvaluatedValue unavailable{
                     .value = instance.script->currentValue(),
                     .source = DynamicValueSource::scriptUnavailable,
@@ -876,6 +884,7 @@ struct SceneGraph::EvaluationFrame::Impl final {
     std::shared_ptr<const script::ScriptUserPropertiesSnapshot> userProperties;
     std::map<std::string, EvaluatedValue> values;
     std::map<std::string, EvaluationFrame::ScriptEvaluationStats> scriptStats;
+    std::set<int> cursorInteractiveLayerIds;
     std::set<std::string> evaluating;
 };
 
@@ -1143,6 +1152,13 @@ SceneGraph::EvaluationFrame::textureAnimationSnapshots() const {
 std::vector<script::ScriptSoundSnapshot>
 SceneGraph::EvaluationFrame::soundSnapshots() const {
     return impl_->graph.scriptState_->layerRegistry->soundSnapshots();
+}
+
+std::vector<int> SceneGraph::EvaluationFrame::cursorInteractiveLayerIds() const {
+    return {
+        impl_->cursorInteractiveLayerIds.begin(),
+        impl_->cursorInteractiveLayerIds.end(),
+    };
 }
 
 std::optional<RuntimeValue> SceneGraph::EvaluationFrame::layerProperty(

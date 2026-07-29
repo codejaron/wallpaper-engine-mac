@@ -1942,8 +1942,8 @@ final class SceneScriptContractTests: XCTestCase {
         first.right16[1] = 0.3
         first.left32[31] = 0.4
         first.right32[31] = 0.8
-        first.left64[63] = -0.2
-        first.right64[63] = 0.6
+        first.left64[63] = 0.0
+        first.right64[63] = 0.4
         let firstValue = try XCTUnwrap(
             try evaluate(
                 instance, runtime: 0, frameTime: 0, audio: first

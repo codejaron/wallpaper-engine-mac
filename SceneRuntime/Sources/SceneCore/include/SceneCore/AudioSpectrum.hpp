@@ -7,10 +7,9 @@
 
 namespace we::scene {
 
-// One immutable host-provided Wallpaper Engine audio analysis frame. The
-// Linux runtime publishes the same mono spectrum to both channel names, but
-// keeping the channels distinct preserves the authored shader contract and
-// allows a native host to provide stereo analysis later.
+// One immutable host-provided Wallpaper Engine audio analysis frame. Every
+// resolution covers low-to-high frequencies across the complete spectrum and
+// preserves the left and right channels independently.
 struct AudioSpectrumFrame final {
     std::array<float, 16> spectrum16Left{};
     std::array<float, 16> spectrum16Right{};
@@ -20,18 +19,18 @@ struct AudioSpectrumFrame final {
     std::array<float, 64> spectrum64Right{};
 };
 
-[[nodiscard]] inline bool audioSpectrumIsFinite(
+[[nodiscard]] inline bool audioSpectrumIsValid(
     const AudioSpectrumFrame& frame
 ) noexcept {
-    const auto finite = [](const auto& values) {
+    const auto valid = [](const auto& values) {
         return std::all_of(
             values.begin(), values.end(),
-            [](float value) { return std::isfinite(value); }
+            [](float value) { return std::isfinite(value) && value >= 0.0F; }
         );
     };
-    return finite(frame.spectrum16Left) && finite(frame.spectrum16Right) &&
-        finite(frame.spectrum32Left) && finite(frame.spectrum32Right) &&
-        finite(frame.spectrum64Left) && finite(frame.spectrum64Right);
+    return valid(frame.spectrum16Left) && valid(frame.spectrum16Right) &&
+        valid(frame.spectrum32Left) && valid(frame.spectrum32Right) &&
+        valid(frame.spectrum64Left) && valid(frame.spectrum64Right);
 }
 
 }  // namespace we::scene

@@ -15,6 +15,7 @@
 #include <new>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -487,6 +488,7 @@ struct PlanCheckpoint {
     std::size_t framebufferCount = 0;
     std::size_t imageCount = 0;
     std::size_t textCount = 0;
+    std::size_t textEffectCount = 0;
     std::size_t particleCount = 0;
     std::size_t soundCount = 0;
     std::size_t operationCount = 0;
@@ -500,11 +502,13 @@ public:
         FrameProjectionSize projectionSize,
         const SceneFrameInputs& inputs,
         SceneGraph::EvaluationFrame* evaluationFrame = nullptr,
-        const std::map<std::string, EvaluatedValue>* scriptedValues = nullptr
+        const std::map<std::string, EvaluatedValue>* scriptedValues = nullptr,
+        const std::vector<int>* cursorInteractiveLayerIds = nullptr
     )
         : model_(std::move(model)), graphSnapshot_(graphSnapshot),
           projectionSize_(projectionSize), inputs_(inputs),
-          evaluationFrame_(evaluationFrame), scriptedValues_(scriptedValues) {
+          evaluationFrame_(evaluationFrame), scriptedValues_(scriptedValues),
+          cursorInteractiveLayerIds_(cursorInteractiveLayerIds) {
         if (!model_) {
             throw SceneModelError(
                 SceneModelErrorCode::invalidValue,
@@ -887,6 +891,7 @@ private:
             .framebufferCount = plan_.framebuffers.size(),
             .imageCount = plan_.images.size(),
             .textCount = plan_.texts.size(),
+            .textEffectCount = plan_.textEffects.size(),
             .particleCount = plan_.particles.size(),
             .soundCount = plan_.sounds.size(),
             .operationCount = plan_.operations.size(),
@@ -902,6 +907,7 @@ private:
         );
         plan_.images.resize(value.imageCount);
         plan_.texts.resize(value.textCount);
+        plan_.textEffects.resize(value.textEffectCount);
         plan_.particles.resize(value.particleCount);
         plan_.sounds.resize(value.soundCount);
         plan_.operations.resize(value.operationCount);
@@ -1482,6 +1488,7 @@ private:
         }
 
         const FrameTextDescriptor& descriptor = plan_.texts.at(textIndex);
+        const std::size_t firstFramebufferIndex = plan_.framebuffers.size();
         const double layerWidth = descriptor.size.x > 0.0
             ? descriptor.size.x
             : static_cast<double>(plan_.width);
@@ -1613,6 +1620,78 @@ private:
             .currentMain = compositeA.resource,
             .currentSub = compositeB.resource,
         });
+
+        std::map<std::string, FrameTextEffectFramebufferDescriptor>
+            effectFramebufferSizing;
+        for (std::size_t effectIndex = 0;
+             effectIndex < text->effects.size(); ++effectIndex) {
+            const ImageEffect& effectInstance = text->effects[effectIndex];
+            if (!effectInstance.effect) {
+                throw std::logic_error(
+                    "Text effect definition disappeared after scheduling"
+                );
+            }
+            const Effect& effect = *effectInstance.effect;
+            std::map<std::string, std::size_t> finalDefinitionIndexes;
+            for (std::size_t index = 0;
+                 index < effect.framebuffers.size(); ++index) {
+                finalDefinitionIndexes.insert_or_assign(
+                    effect.framebuffers[index].name, index
+                );
+            }
+            for (std::size_t index = 0;
+                 index < effect.framebuffers.size(); ++index) {
+                const FramebufferDefinition& definition =
+                    effect.framebuffers[index];
+                if (finalDefinitionIndexes.at(definition.name) != index) {
+                    continue;
+                }
+                FrameTextEffectFramebufferDescriptor sizing;
+                if (definition.width || definition.height) {
+                    sizing.sizing = FrameTextEffectFramebufferSizing::fixed;
+                } else if (definition.fit) {
+                    sizing.sizing = FrameTextEffectFramebufferSizing::fit;
+                    sizing.value = static_cast<double>(*definition.fit);
+                } else {
+                    sizing.sizing = FrameTextEffectFramebufferSizing::relative;
+                    sizing.value = definition.scale;
+                }
+                const std::string id =
+                    "object:" + std::to_string(node.id) + ":effect:" +
+                    std::to_string(effectIndex) + ':' + definition.name;
+                effectFramebufferSizing.insert_or_assign(
+                    id, std::move(sizing)
+                );
+            }
+        }
+
+        FrameTextEffectDescriptor effect{
+            .textIndex = textIndex,
+            .imageIndex = imageIndex,
+        };
+        effect.framebuffers.reserve(
+            plan_.framebuffers.size() - firstFramebufferIndex
+        );
+        for (std::size_t index = firstFramebufferIndex;
+             index < plan_.framebuffers.size(); ++index) {
+            FrameTextEffectFramebufferDescriptor sizing{
+                .framebufferIndex = index,
+            };
+            if (index >= firstFramebufferIndex + 3) {
+                const auto found = effectFramebufferSizing.find(
+                    plan_.framebuffers[index].resource.id
+                );
+                if (found == effectFramebufferSizing.end()) {
+                    throw std::logic_error(
+                        "Text effect framebuffer has no dynamic sizing contract"
+                    );
+                }
+                sizing = found->second;
+                sizing.framebufferIndex = index;
+            }
+            effect.framebuffers.push_back(std::move(sizing));
+        }
+        plan_.textEffects.push_back(std::move(effect));
     }
 
     [[nodiscard]] particle::Vector3 concreteParticleVector(
@@ -3678,6 +3757,12 @@ private:
     }
 
     void finalizeScriptLayerStates() {
+        std::vector<int> evaluatedCursorLayers;
+        const std::vector<int>* cursorLayers = cursorInteractiveLayerIds_;
+        if (evaluationFrame_) {
+            evaluatedCursorLayers = evaluationFrame_->cursorInteractiveLayerIds();
+            cursorLayers = &evaluatedCursorLayers;
+        }
         const auto textureAnimations = evaluationFrame_
             ? evaluationFrame_->textureAnimationSnapshots()
             : graphSnapshot_.textureAnimations;
@@ -3693,6 +3778,10 @@ private:
                     image.solid = solid->boolean();
                 }
             }
+            image.cursorInteractive = image.solid ||
+                (cursorLayers != nullptr && std::binary_search(
+                    cursorLayers->begin(), cursorLayers->end(), image.objectId
+                ));
             const auto animation = animationsByLayer.find(image.objectId);
             if (animation == animationsByLayer.end()) continue;
             if (image.source.kind != FrameResourceKind::assetTexture ||
@@ -4154,6 +4243,7 @@ private:
     SceneFrameInputs inputs_;
     SceneGraph::EvaluationFrame* evaluationFrame_ = nullptr;
     const std::map<std::string, EvaluatedValue>* scriptedValues_ = nullptr;
+    const std::vector<int>* cursorInteractiveLayerIds_ = nullptr;
     FramePlan plan_;
     FramebufferMap sceneFramebuffers_;
     std::set<int> dependencyObjectIds_;
@@ -4322,6 +4412,7 @@ EvaluatedFramePlan SceneFrameGraph::evaluate(
         state.inputs_, evaluation.get()
     ).build();
     state.scriptedValues_ = evaluation->evaluatedScriptValues();
+    state.cursorInteractiveLayerIds_ = evaluation->cursorInteractiveLayerIds();
     state.scriptEvaluations_ = evaluation->scriptEvaluationStats();
     plan.scriptEvaluations = state.scriptEvaluations_;
     return EvaluatedFramePlan{
@@ -4342,7 +4433,8 @@ FramePlan SceneFrameGraph::reproject(
     }
     FramePlan plan = PlanBuilder(
         graph_->model(), evaluation.graphSnapshot_, projectionSize(drawableFallback),
-        evaluation.inputs_, nullptr, &evaluation.scriptedValues_
+        evaluation.inputs_, nullptr, &evaluation.scriptedValues_,
+        &evaluation.cursorInteractiveLayerIds_
     ).build();
     plan.scriptEvaluations = evaluation.scriptEvaluations_;
     return plan;

@@ -4904,6 +4904,7 @@ struct ScriptInstance::Impl {
         nextTimerId = 0;
         started = false;
         hasUpdate = false;
+        hasCursorCallbacks = false;
         layerContractUsed = false;
         layerTextDirty = false;
         layerMutationUsed = false;
@@ -5552,6 +5553,40 @@ struct ScriptInstance::Impl {
         );
     }
 
+    bool detectCursorCallbacks(JSValueConst nameSpace) {
+        constexpr std::array<const char*, 6> callbackNames{
+            "cursorEnter",
+            "cursorLeave",
+            "cursorMove",
+            "cursorDown",
+            "cursorUp",
+            "cursorClick",
+        };
+        bool found = false;
+        for (const char* name : callbackNames) {
+            JSOwner callback(ctx, JS_GetPropertyStr(ctx, nameSpace, name));
+            if (JS_IsException(callback.value)) {
+                jsError(
+                    ctx,
+                    ScriptErrorCode::exception,
+                    std::string("reading ") + name
+                );
+            }
+            if (JS_IsUndefined(callback.value) || JS_IsNull(callback.value)) {
+                continue;
+            }
+            if (!JS_IsFunction(ctx, callback.value)) {
+                throw ScriptError(
+                    ScriptErrorCode::invalidResultType,
+                    std::string("Module export ") + name +
+                        " must be a function"
+                );
+            }
+            found = true;
+        }
+        return found;
+    }
+
     static bool finiteCursorEvent(const ScriptCursorEvent& event) noexcept {
         return std::isfinite(event.worldX) && std::isfinite(event.worldY) &&
             std::isfinite(event.worldZ) && std::isfinite(event.localX) &&
@@ -5870,7 +5905,10 @@ struct ScriptInstance::Impl {
     }
 
     void dispatchCursorEvents(const std::vector<ScriptCursorEvent>& events) {
-        if (events.empty() || module == nullptr || !owner.layerId) return;
+        if (events.empty() || module == nullptr || !owner.layerId ||
+            !hasCursorCallbacks) {
+            return;
+        }
         JSOwner nameSpace(ctx, JS_GetModuleNamespace(ctx, module));
         if (JS_IsException(nameSpace.value)) {
             jsError(ctx, ScriptErrorCode::exception, "reading SceneScript module namespace");
@@ -6165,7 +6203,7 @@ struct ScriptInstance::Impl {
             (inputs.timeOfDay &&
                 (!std::isfinite(*inputs.timeOfDay) || *inputs.timeOfDay < 0.0 || *inputs.timeOfDay > 1.0)) ||
             (inputs.audioSpectrum &&
-                !audioSpectrumIsFinite(*inputs.audioSpectrum)) ||
+                !audioSpectrumIsValid(*inputs.audioSpectrum)) ||
             (inputs.sceneSnapshot &&
                 !finiteSceneSnapshot(*inputs.sceneSnapshot)) ||
             !std::isfinite(inputs.pointerX) || !std::isfinite(inputs.pointerY) ||
@@ -6265,6 +6303,7 @@ struct ScriptInstance::Impl {
                 // update below.
                 dispatchUserProperties();
                 hasUpdate = !JS_IsUndefined(update) && JS_IsFunction(ctx, update);
+                hasCursorCallbacks = detectCursorCallbacks(nameSpace.value);
                 started = true;
             } else {
                 // Property changes are staged by updateProperties() before
@@ -6435,6 +6474,7 @@ struct ScriptInstance::Impl {
     std::optional<std::string> condition;
     bool started = false;
     bool hasUpdate = false;
+    bool hasCursorCallbacks = false;
     bool layerContractUsed = false;
     bool layerTextDirty = false;
     bool layerMutationUsed = false;
@@ -6477,6 +6517,10 @@ RuntimeValue ScriptInstance::evaluate(const ScriptFrameInputs& inputs) {
 }
 RuntimeValue ScriptInstance::currentValue() const {
     return impl_->currentValue();
+}
+bool ScriptInstance::hasCursorCallbacks() const {
+    std::lock_guard lock(impl_->runtime->mutex);
+    return impl_->hasCursorCallbacks;
 }
 void ScriptInstance::updateCurrent(RuntimeValue value) {
     impl_->updateCurrent(std::move(value));

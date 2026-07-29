@@ -54,6 +54,68 @@ double textPixelSize(double pointSize) {
     );
 }
 
+struct TextLayout final {
+    double alignmentX = 0.0;
+    double alignmentY = 0.0;
+};
+
+[[nodiscard]] TextLayout textLayout(
+    const FrameTextDescriptor& descriptor,
+    const text::RasterizedText& rasterized
+) {
+    const std::array<double, 4> layoutComponents{
+        descriptor.size.x, descriptor.size.y,
+        descriptor.padding.x, descriptor.padding.y,
+    };
+    for (const double component : layoutComponents) {
+        if (!std::isfinite(component) || component < 0.0) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Text size and padding must be finite non-negative values"
+            );
+        }
+    }
+
+    const double logicalLeft = rasterized.logicalLeftFromBitmap;
+    const double logicalTop = rasterized.logicalTopFromBitmap;
+    const double logicalWidth = rasterized.typographicWidth;
+    const double logicalHeight = rasterized.typographicHeight;
+    const auto horizontalAnchor = [logicalLeft, logicalWidth](
+        std::string_view alignment
+    ) {
+        if (alignment == "left") return -logicalLeft;
+        if (alignment == "center") {
+            return -(logicalLeft + logicalWidth * 0.5);
+        }
+        if (alignment == "right") {
+            return -(logicalLeft + logicalWidth);
+        }
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Unsupported text alignment '" + std::string(alignment) + "'"
+        );
+    };
+    const auto verticalAnchor = [logicalTop, logicalHeight](
+        std::string_view alignment
+    ) {
+        if (alignment == "top") {
+            return -(logicalTop + logicalHeight);
+        }
+        if (alignment == "center") {
+            return -(logicalTop + logicalHeight * 0.5);
+        }
+        if (alignment == "bottom") return -logicalTop;
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Unsupported text alignment '" + std::string(alignment) + "'"
+        );
+    };
+    return {
+        .alignmentX = horizontalAnchor(descriptor.horizontalAlignment),
+        .alignmentY = verticalAnchor(descriptor.verticalAlignment),
+    };
+}
+
 struct ActiveUniform final {
     std::string name;
     GLenum type = 0;
@@ -245,29 +307,33 @@ struct CursorProjection final {
     };
 }
 
-[[nodiscard]] std::optional<CursorHit> hitTestSolidImage(
+[[nodiscard]] std::optional<CursorHit> hitTestInteractiveImage(
     const FramePlan& plan,
     const FrameImageDescriptor& image,
     FrameVector2 pointer
 ) {
-    if (!image.visible || !image.solid) return std::nullopt;
+    if (!image.visible || !image.cursorInteractive) return std::nullopt;
     const auto projection = projectCursorImage(plan, image, pointer);
     if (!projection || !projection->inside) return std::nullopt;
     return projection->hit;
 }
 
-[[nodiscard]] std::optional<CursorHit> hitTestSolidLayer(
+[[nodiscard]] std::vector<CursorHit> hitTestInteractiveLayers(
     const FramePlan& plan,
     FrameVector2 pointer
 ) {
-    // FrameGraph appends image descriptors in render order. The last visible
-    // solid image is therefore the front-most hit target for 2D cursor input.
+    // Cursor callbacks are layer-local. Preserve front-to-back render order,
+    // but dispatch to every interactive layer under the pointer; overlapping
+    // controls keep independent SceneScript state in Wallpaper Engine.
+    std::vector<CursorHit> hits;
+    std::set<int> seenLayerIds;
     for (auto iterator = plan.images.rbegin(); iterator != plan.images.rend(); ++iterator) {
-        if (const auto hit = hitTestSolidImage(plan, *iterator, pointer)) {
-            return hit;
+        if (const auto hit = hitTestInteractiveImage(plan, *iterator, pointer);
+            hit && seenLayerIds.insert(hit->layerId).second) {
+            hits.push_back(*hit);
         }
     }
-    return std::nullopt;
+    return hits;
 }
 
 [[nodiscard]] std::optional<CursorHit> projectCursorLayer(
@@ -1956,6 +2022,179 @@ struct FramePlanExecutor::Impl final {
         }
         textRasterBytes += bytes;
         return inserted->second.rasterized;
+    }
+
+    [[nodiscard]] static std::uint32_t paddedTextEffectDimension(
+        std::uint32_t rasterDimension,
+        double padding,
+        std::string_view name
+    ) {
+        const double value = static_cast<double>(rasterDimension) +
+            padding * 2.0;
+        if (!std::isfinite(value) || value < 1.0 ||
+            value > static_cast<double>(
+                std::numeric_limits<std::uint32_t>::max()
+            )) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Text effect " + std::string(name) +
+                    " must resolve to a finite positive 32-bit value"
+            );
+        }
+        return static_cast<std::uint32_t>(std::ceil(value));
+    }
+
+    [[nodiscard]] static std::uint32_t scaledTextEffectDimension(
+        double value,
+        std::string_view name
+    ) {
+        if (!std::isfinite(value) || value <= 0.0 ||
+            value > static_cast<double>(
+                std::numeric_limits<std::uint32_t>::max()
+            )) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Text effect " + std::string(name) +
+                    " must resolve to a finite positive 32-bit value"
+            );
+        }
+        return std::max<std::uint32_t>(
+            1,
+            static_cast<std::uint32_t>(std::floor(value))
+        );
+    }
+
+    void resolveTextEffectGeometry(FramePlan& plan) {
+        for (const FrameTextEffectDescriptor& effect : plan.textEffects) {
+            if (effect.textIndex >= plan.texts.size() ||
+                effect.imageIndex >= plan.images.size()) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Text effect descriptor references an invalid text or image"
+                );
+            }
+            const FrameTextDescriptor& textDescriptor =
+                plan.texts[effect.textIndex];
+            FrameImageDescriptor& imageDescriptor =
+                plan.images[effect.imageIndex];
+            if (textDescriptor.objectId != imageDescriptor.objectId) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Text effect proxy object identity is inconsistent"
+                );
+            }
+
+            const text::RasterizedText& rasterized = cachedTextRaster(
+                textDescriptor
+            );
+            const TextLayout layout = textLayout(
+                textDescriptor, rasterized
+            );
+            const std::uint32_t layerWidth = paddedTextEffectDimension(
+                rasterized.width,
+                textDescriptor.padding.x,
+                "width"
+            );
+            const std::uint32_t layerHeight = paddedTextEffectDimension(
+                rasterized.height,
+                textDescriptor.padding.y,
+                "height"
+            );
+            std::set<std::size_t> resolvedFramebufferIndexes;
+            for (const FrameTextEffectFramebufferDescriptor& sizing :
+                 effect.framebuffers) {
+                if (sizing.framebufferIndex >= plan.framebuffers.size() ||
+                    !resolvedFramebufferIndexes.emplace(
+                        sizing.framebufferIndex
+                    ).second) {
+                    throw Error(
+                        ErrorCode::resourceValidation,
+                        "Text effect descriptor references an invalid or duplicate framebuffer"
+                    );
+                }
+                FramebufferDescriptor& framebuffer =
+                    plan.framebuffers[sizing.framebufferIndex];
+                switch (sizing.sizing) {
+                    case FrameTextEffectFramebufferSizing::relative:
+                        if (!std::isfinite(sizing.value) ||
+                            sizing.value <= 0.0) {
+                            throw Error(
+                                ErrorCode::resourceValidation,
+                                "Text effect framebuffer scale must be finite and positive"
+                            );
+                        }
+                        framebuffer.width = scaledTextEffectDimension(
+                            static_cast<double>(layerWidth) / sizing.value,
+                            "framebuffer width"
+                        );
+                        framebuffer.height = scaledTextEffectDimension(
+                            static_cast<double>(layerHeight) / sizing.value,
+                            "framebuffer height"
+                        );
+                        break;
+                    case FrameTextEffectFramebufferSizing::fit: {
+                        if (!std::isfinite(sizing.value) ||
+                            sizing.value <= 0.0) {
+                            throw Error(
+                                ErrorCode::resourceValidation,
+                                "Text effect framebuffer fit must be finite and positive"
+                            );
+                        }
+                        const double fitScale = sizing.value /
+                            static_cast<double>(
+                                std::max(layerWidth, layerHeight)
+                            );
+                        framebuffer.width = scaledTextEffectDimension(
+                            static_cast<double>(layerWidth) * fitScale,
+                            "framebuffer width"
+                        );
+                        framebuffer.height = scaledTextEffectDimension(
+                            static_cast<double>(layerHeight) * fitScale,
+                            "framebuffer height"
+                        );
+                        break;
+                    }
+                    case FrameTextEffectFramebufferSizing::fixed:
+                        break;
+                }
+            }
+
+            imageDescriptor.size = {
+                .x = static_cast<double>(layerWidth),
+                .y = static_cast<double>(layerHeight),
+            };
+            imageDescriptor.worldTransform = textDescriptor.worldTransform;
+
+            // The source bitmap starts at the authored padding inside its
+            // effect framebuffer. Move the generated image proxy to the exact
+            // center of that padded bitmap rectangle after applying the text
+            // layer's scale and Z rotation. This factors the direct text
+            // transform without changing alignment when the string changes.
+            const double localCenterX = layout.alignmentX -
+                textDescriptor.padding.x +
+                static_cast<double>(layerWidth) * 0.5;
+            const double localCenterY = layout.alignmentY -
+                textDescriptor.padding.y +
+                static_cast<double>(layerHeight) * 0.5;
+            const double scaledCenterX = localCenterX *
+                textDescriptor.worldTransform.scale.x;
+            const double scaledCenterY = localCenterY *
+                textDescriptor.worldTransform.scale.y;
+            const double angle = textDescriptor.worldTransform.angles.z;
+            if (!std::isfinite(scaledCenterX) ||
+                !std::isfinite(scaledCenterY) || !std::isfinite(angle)) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Text effect transform must contain only finite values"
+                );
+            }
+            const double cosine = std::cos(angle);
+            const double sine = std::sin(angle);
+            imageDescriptor.worldTransform.origin.x +=
+                cosine * scaledCenterX + sine * scaledCenterY;
+            imageDescriptor.worldTransform.origin.y +=
+                -sine * scaledCenterX + cosine * scaledCenterY;
+        }
     }
 
     void trimTextRasterCache() {
@@ -3972,58 +4211,7 @@ struct FramePlanExecutor::Impl final {
         );
         const auto& transform = descriptor.worldTransform;
         const text::RasterizedText& rasterized = cachedTextRaster(descriptor);
-        const std::array<double, 4> layoutComponents{
-            descriptor.size.x, descriptor.size.y,
-            descriptor.padding.x, descriptor.padding.y,
-        };
-        for (const double component : layoutComponents) {
-            if (!std::isfinite(component) || component < 0.0) {
-                throw Error(
-                    ErrorCode::resourceValidation,
-                    "Text size and padding must be finite non-negative values"
-                );
-            }
-        }
-        const double logicalLeft = rasterized.logicalLeftFromBitmap;
-        const double logicalTop = rasterized.logicalTopFromBitmap;
-        const double logicalWidth = rasterized.typographicWidth;
-        const double logicalHeight = rasterized.typographicHeight;
-        const auto horizontalAnchor = [logicalLeft, logicalWidth](
-            std::string_view alignment
-        ) {
-            if (alignment == "left") return -logicalLeft;
-            if (alignment == "center") {
-                return -(logicalLeft + logicalWidth * 0.5);
-            }
-            if (alignment == "right") {
-                return -(logicalLeft + logicalWidth);
-            }
-            throw Error(
-                ErrorCode::resourceValidation,
-                "Unsupported text alignment '" + std::string(alignment) + "'"
-            );
-        };
-        const auto verticalAnchor = [logicalTop, logicalHeight](
-            std::string_view alignment
-        ) {
-            if (alignment == "top") {
-                return -(logicalTop + logicalHeight);
-            }
-            if (alignment == "center") {
-                return -(logicalTop + logicalHeight * 0.5);
-            }
-            if (alignment == "bottom") return -logicalTop;
-            throw Error(
-                ErrorCode::resourceValidation,
-                "Unsupported text alignment '" + std::string(alignment) + "'"
-            );
-        };
-        const double alignmentX = horizontalAnchor(
-            descriptor.horizontalAlignment
-        );
-        const double alignmentY = verticalAnchor(
-            descriptor.verticalAlignment
-        );
+        const TextLayout layout = textLayout(descriptor, rasterized);
 
         const double effectiveAlpha = descriptor.color.alpha * descriptor.alpha;
         const std::array<double, 4> colorComponents{
@@ -4045,8 +4233,8 @@ struct FramePlanExecutor::Impl final {
         }
 
         const Matrix alignment = translation(
-            checkedFloat(alignmentX, "Text horizontal alignment"),
-            checkedFloat(alignmentY, "Text vertical alignment"),
+            checkedFloat(layout.alignmentX, "Text horizontal alignment"),
+            checkedFloat(layout.alignmentY, "Text vertical alignment"),
             0.0F
         );
         Matrix modelViewProjection;
@@ -4058,9 +4246,10 @@ struct FramePlanExecutor::Impl final {
             );
             modelViewProjection = multiply(
                 localProjection,
-                multiply(
-                    translation(width * 0.5F, height * 0.5F, 0.0F),
-                    alignment
+                translation(
+                    checkedFloat(descriptor.padding.x, "Text padding X"),
+                    checkedFloat(descriptor.padding.y, "Text padding Y"),
+                    0.0F
                 )
             );
         } else {
@@ -6272,21 +6461,15 @@ struct FramePlanExecutor::Impl final {
         return result;
     }
 
-    [[nodiscard]] std::vector<script::ScriptCursorEvent> updateCursorEvents(
-        const FramePlan* previousPlan,
-        const ResolvedFrameInputs& inputs
+    void appendCursorEvents(
+        const FramePlan& previousPlan,
+        const ResolvedFrameInputs& inputs,
+        std::vector<script::ScriptCursorEvent>& events
     ) {
-        // Cursor callbacks must be supplied before the next plan evaluates
-        // scripts, so hit testing uses the last committed plan. Do not consume
-        // button or position edges until that first plan exists; otherwise a
-        // button held during the first frame loses its cursorDown permanently.
-        if (previousPlan == nullptr) return {};
-
-        const std::optional<CursorHit> hit = inputs.pointerActive
-            ? hitTestSolidLayer(*previousPlan, inputs.pointerPosition)
-            : std::nullopt;
-        const std::optional<CursorHit> previousTarget = cursorTarget;
-        std::vector<script::ScriptCursorEvent> events;
+        const std::vector<CursorHit> hits = inputs.pointerActive
+            ? hitTestInteractiveLayers(previousPlan, inputs.pointerPosition)
+            : std::vector<CursorHit>{};
+        const std::vector<CursorHit> previousTargets = cursorTargets;
         const auto makeEvent = [](
             script::ScriptCursorEventType type,
             const CursorHit& value
@@ -6303,28 +6486,38 @@ struct FramePlanExecutor::Impl final {
                 .hitBox = std::nullopt,
             };
         };
+        const auto targetForLayer = [](
+            const std::vector<CursorHit>& targets,
+            int layerId
+        ) -> const CursorHit* {
+            const auto found = std::find_if(
+                targets.begin(), targets.end(), [layerId](const CursorHit& target) {
+                    return target.layerId == layerId;
+                }
+            );
+            return found == targets.end() ? nullptr : &*found;
+        };
         const auto currentProjectionFor = [&](int layerId)
             -> std::optional<CursorHit> {
             return projectCursorLayer(
-                *previousPlan, layerId, inputs.pointerPosition
+                previousPlan, layerId, inputs.pointerPosition
             );
         };
         const auto eventTarget = [&](const CursorHit& fallback) {
             return currentProjectionFor(fallback.layerId).value_or(fallback);
         };
-        const bool targetChanged =
-            (previousTarget ? std::optional<int>(previousTarget->layerId) : std::nullopt) !=
-            (hit ? std::optional<int>(hit->layerId) : std::nullopt);
-        if (targetChanged) {
-            if (previousTarget) {
+        for (const CursorHit& previous : previousTargets) {
+            if (targetForLayer(hits, previous.layerId) == nullptr) {
                 events.push_back(makeEvent(
                     script::ScriptCursorEventType::leave,
-                    eventTarget(*previousTarget)
+                    eventTarget(previous)
                 ));
             }
-            if (hit) {
+        }
+        for (const CursorHit& hit : hits) {
+            if (targetForLayer(previousTargets, hit.layerId) == nullptr) {
                 events.push_back(makeEvent(
-                    script::ScriptCursorEventType::enter, *hit
+                    script::ScriptCursorEventType::enter, hit
                 ));
             }
         }
@@ -6332,73 +6525,105 @@ struct FramePlanExecutor::Impl final {
         const bool moved = hasCursorPosition &&
             inputs.pointerPosition != lastCursorPosition;
         const bool dragging = inputs.pointerLeftDown &&
-            previousPointerLeftDown && pressedCursorTarget.has_value();
+            previousPointerLeftDown && !pressedCursorTargets.empty();
         if (dragging) {
-            const CursorHit dragTarget = currentProjectionFor(
-                pressedCursorTarget->layerId
-            ).value_or(*pressedCursorTarget);
-            // Keep captured event coordinates current instead of freezing
-            // world/local position at the original button-down point.
-            pressedCursorTarget = dragTarget;
-            if (moved) {
+            for (CursorHit& pressed : pressedCursorTargets) {
+                const CursorHit dragTarget = currentProjectionFor(
+                    pressed.layerId
+                ).value_or(pressed);
+                // Keep captured event coordinates current instead of freezing
+                // world/local position at the original button-down point.
+                pressed = dragTarget;
+                if (!moved) continue;
                 events.push_back(makeEvent(
                     script::ScriptCursorEventType::move, dragTarget
                 ));
             }
-        } else if (hit && moved) {
+        } else if (moved) {
             // Crossing layers is still a move over the new target. The order
             // is deterministic: leave, enter, then move.
-            events.push_back(makeEvent(script::ScriptCursorEventType::move, *hit));
+            for (const CursorHit& hit : hits) {
+                events.push_back(makeEvent(
+                    script::ScriptCursorEventType::move, hit
+                ));
+            }
         }
 
         if (inputs.pointerLeftDown && !previousPointerLeftDown) {
-            if (hit) {
+            for (const CursorHit& hit : hits) {
                 events.push_back(makeEvent(
-                    script::ScriptCursorEventType::down, *hit
+                    script::ScriptCursorEventType::down, hit
                 ));
-                pressedCursorTarget = hit;
-            } else {
-                pressedCursorTarget.reset();
             }
+            pressedCursorTargets = hits;
         }
 
         if (!inputs.pointerLeftDown && previousPointerLeftDown) {
-            if (pressedCursorTarget) {
+            if (!pressedCursorTargets.empty()) {
                 // Button capture belongs to the pressed layer through release,
-                // even outside its bounds. Click still requires releasing over
-                // that same layer.
-                const CursorHit releaseTarget = currentProjectionFor(
-                    pressedCursorTarget->layerId
-                ).value_or(*pressedCursorTarget);
-                events.push_back(makeEvent(
-                    script::ScriptCursorEventType::up, releaseTarget
-                ));
-                if (hit && hit->layerId == pressedCursorTarget->layerId) {
+                // even outside its bounds. Each captured layer clicks only when
+                // the release still hits that same layer.
+                for (const CursorHit& pressed : pressedCursorTargets) {
+                    const CursorHit releaseTarget = currentProjectionFor(
+                        pressed.layerId
+                    ).value_or(pressed);
                     events.push_back(makeEvent(
-                        script::ScriptCursorEventType::click, *hit
+                        script::ScriptCursorEventType::up, releaseTarget
+                    ));
+                    if (const CursorHit* released = targetForLayer(
+                            hits, pressed.layerId
+                        )) {
+                        events.push_back(makeEvent(
+                            script::ScriptCursorEventType::click, *released
+                        ));
+                    }
+                }
+            } else {
+                // A press that began outside every interactive layer can still
+                // be released over one, matching the public cursorUp contract.
+                for (const CursorHit& hit : hits) {
+                    events.push_back(makeEvent(
+                        script::ScriptCursorEventType::up, hit
                     ));
                 }
-            } else if (hit) {
-                // A press that began outside any solid layer can still be
-                // released over one, matching the public cursorUp contract.
-                events.push_back(makeEvent(
-                    script::ScriptCursorEventType::up, *hit
-                ));
             }
-            pressedCursorTarget.reset();
+            pressedCursorTargets.clear();
         }
 
-        cursorTarget = hit;
+        cursorTargets = hits;
         previousPointerLeftDown = inputs.pointerLeftDown;
         hasCursorPosition = inputs.pointerActive;
         lastCursorPosition = inputs.pointerPosition;
+    }
+
+    [[nodiscard]] std::vector<script::ScriptCursorEvent> updateCursorEvents(
+        const FramePlan* previousPlan,
+        const ResolvedFrameInputs& inputs
+    ) {
+        // Cursor callbacks are evaluated against the last committed plan. Keep
+        // queued button edges until that plan exists so a complete click cannot
+        // disappear between two rendered frames.
+        if (previousPlan == nullptr) return {};
+
+        std::vector<script::ScriptCursorEvent> events;
+        for (const PointerButtonState& state : pendingPointerTransitions) {
+            ResolvedFrameInputs transitionInputs = inputs;
+            transitionInputs.pointerActive = state.active;
+            transitionInputs.pointerLeftDown = state.leftDown;
+            appendCursorEvents(*previousPlan, transitionInputs, events);
+        }
+        pendingPointerTransitions.clear();
+        // The sampled frame state also carries position and active-state changes
+        // that did not produce a button transition.
+        appendCursorEvents(*previousPlan, inputs, events);
         return events;
     }
 
     void invalidateFrame() noexcept {
         lastFrame.reset();
-        cursorTarget.reset();
-        pressedCursorTarget.reset();
+        cursorTargets.clear();
+        pressedCursorTargets.clear();
+        pendingPointerTransitions.clear();
         previousPointerLeftDown = false;
         hasCursorPosition = false;
         if (device) {
@@ -6462,22 +6687,11 @@ struct FramePlanExecutor::Impl final {
                 );
             }
             if (inputs.audioSpectrum) {
-                const auto requireFinite = [](const auto& values) {
-                    return std::all_of(
-                        values.begin(), values.end(),
-                        [](float value) { return std::isfinite(value); }
-                    );
-                };
                 const AudioSpectrumFrame& audio = *inputs.audioSpectrum;
-                if (!requireFinite(audio.spectrum16Left) ||
-                    !requireFinite(audio.spectrum16Right) ||
-                    !requireFinite(audio.spectrum32Left) ||
-                    !requireFinite(audio.spectrum32Right) ||
-                    !requireFinite(audio.spectrum64Left) ||
-                    !requireFinite(audio.spectrum64Right)) {
+                if (!audioSpectrumIsValid(audio)) {
                     throw Error(
                         ErrorCode::invalidArgument,
-                        "Audio spectrum frame must contain only finite values"
+                        "Audio spectrum frame must contain only finite non-negative values"
                     );
                 }
             }
@@ -6513,6 +6727,7 @@ struct FramePlanExecutor::Impl final {
                 },
                 projectionFallback
             );
+            resolveTextEffectGeometry(evaluated.plan);
             const FramePlan& plan = evaluated.plan;
             const std::vector<ObjectOperationGroup> groups =
                 objectOperationGroups(plan);
@@ -6565,13 +6780,14 @@ struct FramePlanExecutor::Impl final {
                  height == presentation.canvasHeight)) {
                 return;
             }
-            const FramePlan replayPlan = frameGraph->reproject(
+            FramePlan replayPlan = frameGraph->reproject(
                 lastFrame->evaluation,
                 FrameProjectionSize{
                     .width = presentation.canvasWidth,
                     .height = presentation.canvasHeight,
                 }
             );
+            resolveTextEffectGeometry(replayPlan);
             const std::vector<ObjectOperationGroup> groups =
                 objectOperationGroups(replayPlan);
             const PreparedCamera camera = prepareCamera(replayPlan);
@@ -6688,8 +6904,13 @@ struct FramePlanExecutor::Impl final {
     FrameVector2 parallaxDisplacement;
     FrameVector2 lastPublishedPointer;
     bool hasPublishedPointer = false;
-    std::optional<CursorHit> cursorTarget;
-    std::optional<CursorHit> pressedCursorTarget;
+    std::vector<CursorHit> cursorTargets;
+    std::vector<CursorHit> pressedCursorTargets;
+    struct PointerButtonState final {
+        bool active = false;
+        bool leftDown = false;
+    };
+    std::vector<PointerButtonState> pendingPointerTransitions;
     FrameVector2 lastCursorPosition;
     bool hasCursorPosition = false;
     bool previousPointerLeftDown = false;
@@ -6750,7 +6971,13 @@ void FramePlanExecutor::present(
         drawablePresentationViewport(drawableWidth, drawableHeight), scaling
     );
 }
-void FramePlanExecutor::setPointerState(bool active, bool leftDown) noexcept {
+void FramePlanExecutor::setPointerState(bool active, bool leftDown) {
+    if (leftDown != impl_->pointerLeftDown) {
+        impl_->pendingPointerTransitions.push_back({
+            .active = active,
+            .leftDown = leftDown,
+        });
+    }
     impl_->pointerActive = active;
     impl_->pointerLeftDown = leftDown;
 }

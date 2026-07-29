@@ -2137,6 +2137,77 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertEqual(maximumHiddenRed, 0)
     }
 
+    func testTextEffectFitsLongLeftTopAlignedContentWithPaddingAndRotation() throws {
+        let arguments = (
+            font: "systemfont_arial",
+            horizontalAlignment: "left",
+            verticalAlignment: "top",
+            origin: "72 72 0",
+            scale: "0.65 0.65 1",
+            angles: "0 0 0.2",
+            size: "24 18",
+            padding: "12 8",
+            text: "Dynamic title ABC 123",
+            pointSize: 24.0,
+            canvasWidth: 256,
+            canvasHeight: 144
+        )
+        let direct = try loadTextFixture(
+            font: arguments.font,
+            horizontalAlignment: arguments.horizontalAlignment,
+            verticalAlignment: arguments.verticalAlignment,
+            origin: arguments.origin,
+            scale: arguments.scale,
+            angles: arguments.angles,
+            size: arguments.size,
+            padding: arguments.padding,
+            text: arguments.text,
+            pointSize: arguments.pointSize,
+            effectAlpha: nil,
+            canvasWidth: arguments.canvasWidth,
+            canvasHeight: arguments.canvasHeight
+        )
+        defer { destroy(direct) }
+        let effected = try loadTextFixture(
+            font: arguments.font,
+            horizontalAlignment: arguments.horizontalAlignment,
+            verticalAlignment: arguments.verticalAlignment,
+            origin: arguments.origin,
+            scale: arguments.scale,
+            angles: arguments.angles,
+            size: arguments.size,
+            padding: arguments.padding,
+            text: arguments.text,
+            pointSize: arguments.pointSize,
+            effectAlpha: 1,
+            canvasWidth: arguments.canvasWidth,
+            canvasHeight: arguments.canvasHeight
+        )
+        defer { destroy(effected) }
+
+        try render(direct.executor)
+        try render(effected.executor)
+        try assertNoExecutorIssues(direct.executor)
+        try assertNoExecutorIssues(effected.executor)
+        let directBounds = try XCTUnwrap(redPixelBounds(
+            try readPixels(direct.executor),
+            width: arguments.canvasWidth
+        ))
+        let effectBounds = try XCTUnwrap(redPixelBounds(
+            try readPixels(effected.executor),
+            width: arguments.canvasWidth
+        ))
+        XCTAssertGreaterThan(
+            directBounds.maxX - directBounds.minX,
+            80,
+            "The raster must expand beyond the authored placeholder size"
+        )
+        XCTAssertEqual(effectBounds.minX, directBounds.minX, accuracy: 2)
+        XCTAssertEqual(effectBounds.maxX, directBounds.maxX, accuracy: 2)
+        XCTAssertEqual(effectBounds.minY, directBounds.minY, accuracy: 2)
+        XCTAssertEqual(effectBounds.maxY, directBounds.maxY, accuracy: 2)
+    }
+
     func testRasterizedTextReusesImmutableFontAssetAcrossFrames() throws {
         let fixtureFont = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -3029,6 +3100,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         scale: String = "1 1 1",
         angles: String? = nil,
         size: String = "64 64",
+        padding: String = "0 0",
         text: String = "I",
         pointSize: Double = 20,
         spacing: String = "0 0",
@@ -3036,7 +3108,9 @@ final class FrameExecutorPixelTests: XCTestCase {
         maximumRows: Int? = nil,
         useEllipsis: Bool = false,
         fontData: Data? = nil,
-        effectAlpha: Double? = nil
+        effectAlpha: Double? = nil,
+        canvasWidth: Int = 64,
+        canvasHeight: Int = 64
     ) throws -> RuntimePipeline {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -3059,7 +3133,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         var textObject: [String: Any] = [
             "alpha": 1, "color": "255 0 0 255", "font": font,
             "horizontalalign": horizontalAlignment, "id": 1, "name": "Text",
-            "origin": origin, "padding": "0 0", "pointsize": pointSize,
+            "origin": origin, "padding": padding, "pointsize": pointSize,
             "scale": scale, "size": size, "spacing": spacing, "text": text,
             "verticalalign": verticalAlignment, "visible": true,
         ]
@@ -3089,7 +3163,10 @@ final class FrameExecutorPixelTests: XCTestCase {
             "camera": ["center": "0 0 -1", "eye": "0 0 0", "up": "0 1 0"],
             "general": [
                 "clearcolor": "0 0 0 0",
-                "orthogonalprojection": ["height": 64, "width": 64],
+                "orthogonalprojection": [
+                    "height": canvasHeight,
+                    "width": canvasWidth,
+                ],
             ],
             "objects": [textObject],
             "version": 1,

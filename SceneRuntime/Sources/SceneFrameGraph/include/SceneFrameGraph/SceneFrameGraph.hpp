@@ -191,9 +191,14 @@ struct FrameImageDescriptor {
     std::size_t objectIndex = 0;
     int objectId = 0;
     bool visible = false;
-    // Layer-level Solid flag controls SceneScript cursor hit testing. This is
-    // distinct from the model's procedural `solidLayer` image source flag.
+    // Layer-level Solid is an explicit SceneScript cursor hit-test opt-in. It
+    // is distinct from the model's procedural `solidLayer` image source flag.
     bool solid = false;
+    // Runtime callback exports are also an interaction opt-in. Published
+    // scenes exist where the editor serialized the callback binding without a
+    // redundant Solid field, so capability must be resolved after scripts are
+    // initialized rather than inferred from JSON alone.
+    bool cursorInteractive = false;
     bool passthrough = false;
     bool fullscreen = false;
     FrameVector2 size;
@@ -349,6 +354,32 @@ struct FrameTextCommand {
     bool localSpace = false;
 };
 
+// Text effects enter the ordinary image pipeline through a generated proxy
+// image. Its framebuffer geometry cannot be fixed while the frame graph is
+// built because scripted media text may change its raster bounds every frame.
+// The executor resolves this relationship after rasterization and before any
+// framebuffer allocation.
+enum class FrameTextEffectFramebufferSizing {
+    relative,
+    fit,
+    fixed,
+};
+
+struct FrameTextEffectFramebufferDescriptor {
+    std::size_t framebufferIndex = 0;
+    FrameTextEffectFramebufferSizing sizing =
+        FrameTextEffectFramebufferSizing::relative;
+    // Relative sizing stores the authored divisor. Fit sizing stores the
+    // authored maximum dimension. Fixed sizing ignores this value.
+    double value = 1.0;
+};
+
+struct FrameTextEffectDescriptor {
+    std::size_t textIndex = 0;
+    std::size_t imageIndex = 0;
+    std::vector<FrameTextEffectFramebufferDescriptor> framebuffers;
+};
+
 struct FrameParticleCommand {
     std::size_t particleIndex = 0;
     int objectId = 0;
@@ -382,6 +413,7 @@ struct FramePlan {
     std::vector<FramebufferDescriptor> framebuffers;
     std::vector<FrameImageDescriptor> images;
     std::vector<FrameTextDescriptor> texts;
+    std::vector<FrameTextEffectDescriptor> textEffects;
     std::vector<FrameParticleDescriptor> particles;
     std::vector<FrameSoundDescriptor> sounds;
     std::vector<FrameOperation> operations;
@@ -424,6 +456,7 @@ private:
     SceneGraphSnapshot graphSnapshot_;
     SceneFrameInputs inputs_;
     std::map<std::string, EvaluatedValue> scriptedValues_;
+    std::vector<int> cursorInteractiveLayerIds_;
     std::vector<SceneGraph::EvaluationFrame::ScriptEvaluationStats> scriptEvaluations_;
 };
 

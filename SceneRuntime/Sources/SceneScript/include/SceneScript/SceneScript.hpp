@@ -478,6 +478,9 @@ public:
     // init and before the frame's update callback.
     [[nodiscard]] RuntimeValue evaluate(const ScriptFrameInputs& inputs);
     [[nodiscard]] RuntimeValue currentValue() const;
+    // True after module initialization finds at least one cursor callback
+    // export. Module exports are immutable for the instance lifetime.
+    [[nodiscard]] bool hasCursorCallbacks() const;
 
     // Mirrors an upstream DynamicValue connection update. This replaces the
     // script's current value without recreating its module or rerunning init.

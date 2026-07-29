@@ -6,7 +6,7 @@ func makeSystemAudioTapDescription(
     uuid: UUID
 ) -> CATapDescription {
     let description = CATapDescription(
-        monoGlobalTapButExcludeProcesses: [processObjectID]
+        stereoGlobalTapButExcludeProcesses: [processObjectID]
     )
     description.name = "Open Wallpaper Engine System Audio"
     description.uuid = uuid
@@ -32,6 +32,10 @@ func makeSystemAudioAggregateDescription(
 }
 
 final class CoreAudioSystemCapture: @unchecked Sendable {
+    private static let bufferFrameSize = UInt32(
+        WallpaperEngineAudioSpectrumAnalyzer.sampleCount
+    )
+
     private struct Resources {
         let tapID: AudioObjectID
         var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
@@ -43,11 +47,11 @@ final class CoreAudioSystemCapture: @unchecked Sendable {
         label: "com.winddog.wallpaper-engine.system-audio-tap",
         qos: .userInteractive
     )
-    private let sampleHandler: @Sendable ([Float]) -> Void
+    private let sampleHandler: @Sendable (CapturedAudioSamples) -> Void
     private let lock = NSLock()
     private var resources: Resources?
 
-    init(sampleHandler: @escaping @Sendable ([Float]) -> Void) {
+    init(sampleHandler: @escaping @Sendable (CapturedAudioSamples) -> Void) {
         self.sampleHandler = sampleHandler
     }
 
@@ -93,6 +97,11 @@ final class CoreAudioSystemCapture: @unchecked Sendable {
                 throw CoreAudioSystemCaptureError.missingResource("aggregate audio device")
             }
             try waitUntilAudioDeviceIsAlive(nextResources.aggregateDeviceID)
+            try configureAggregateDevice(
+                nextResources.aggregateDeviceID,
+                sampleRate: format.mSampleRate,
+                bufferFrameSize: Self.bufferFrameSize
+            )
 
             var ioProcID: AudioDeviceIOProcID?
             try requireNoError(
@@ -242,11 +251,55 @@ private func audioFormat(for tapID: AudioObjectID) throws -> AudioStreamBasicDes
         operation: "Reading the system-audio tap format"
     )
     guard format.mFormatID == kAudioFormatLinearPCM,
+          format.mSampleRate.isFinite,
+          format.mSampleRate > 0,
           format.mBytesPerFrame > 0,
-          format.mChannelsPerFrame > 0 else {
+          format.mChannelsPerFrame == 1 || format.mChannelsPerFrame == 2 else {
         throw CoreAudioSystemCaptureError.unsupportedFormat(format.mFormatID)
     }
     return format
+}
+
+private func configureAggregateDevice(
+    _ deviceID: AudioObjectID,
+    sampleRate: Double,
+    bufferFrameSize: UInt32
+) throws {
+    var sampleRateAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyNominalSampleRate,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var configuredSampleRate = Float64(sampleRate)
+    try requireNoError(
+        AudioObjectSetPropertyData(
+            deviceID,
+            &sampleRateAddress,
+            0,
+            nil,
+            UInt32(MemoryLayout<Float64>.size),
+            &configuredSampleRate
+        ),
+        operation: "Configuring the aggregate audio sample rate"
+    )
+
+    var bufferSizeAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyBufferFrameSize,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var configuredBufferFrameSize = bufferFrameSize
+    try requireNoError(
+        AudioObjectSetPropertyData(
+            deviceID,
+            &bufferSizeAddress,
+            0,
+            nil,
+            UInt32(MemoryLayout<UInt32>.size),
+            &configuredBufferFrameSize
+        ),
+        operation: "Configuring the aggregate audio buffer frame size"
+    )
 }
 
 private func waitUntilAudioDeviceIsAlive(_ deviceID: AudioObjectID) throws {

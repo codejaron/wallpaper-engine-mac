@@ -105,19 +105,66 @@ final class SceneAudioTests: XCTestCase {
         XCTAssertNil(coordinator.ownerScreenId)
     }
 
-    func testLinuxSpectrumUsesLatestWindowAndKeepsStereoArraysBound() {
-        let analyzer = LinuxAudioSpectrumAnalyzer()
-        let dc = [Float](repeating: 1, count: LinuxAudioSpectrumAnalyzer.sampleCount)
+    func testSpectrumPreservesStereoAndMapsBothEndsOfTheAudibleRange() {
+        let analyzer = WallpaperEngineAudioSpectrumAnalyzer()
+        let sampleRate = 48_000.0
+        func tone(_ frequency: Double, amplitude: Float) -> [Float] {
+            (0..<WallpaperEngineAudioSpectrumAnalyzer.sampleCount).map { index in
+                amplitude * sin(
+                    2 * Float.pi * Float(frequency) * Float(index) /
+                        Float(sampleRate)
+                )
+            }
+        }
+        let left = tone(120, amplitude: 0.5)
+        let right = tone(10_000, amplitude: 0.5)
+        var frame = SceneAudioSpectrumFrame.zero
+        for _ in 0..<8 {
+            frame = analyzer.push(
+                left: left,
+                right: right,
+                sampleRate: sampleRate
+            )
+        }
 
-        let first = analyzer.push(samples: dc)
-        XCTAssertEqual(first, .zero)
+        for values in [
+            frame.spectrum16Left, frame.spectrum16Right,
+            frame.spectrum32Left, frame.spectrum32Right,
+            frame.spectrum64Left, frame.spectrum64Right,
+        ] {
+            XCTAssertTrue(values.allSatisfy { $0.isFinite && $0 >= 0 })
+        }
+        XCTAssertNotEqual(frame.spectrum64Left, frame.spectrum64Right)
+        XCTAssertLessThan(try XCTUnwrap(frame.spectrum64Left.firstIndex(of: frame.spectrum64Left.max()!)), 20)
+        XCTAssertGreaterThan(try XCTUnwrap(frame.spectrum64Right.firstIndex(of: frame.spectrum64Right.max()!)), 48)
+        XCTAssertLessThan(try XCTUnwrap(frame.spectrum16Left.firstIndex(of: frame.spectrum16Left.max()!)), 6)
+        XCTAssertGreaterThan(try XCTUnwrap(frame.spectrum16Right.firstIndex(of: frame.spectrum16Right.max()!)), 11)
+    }
 
-        let second = analyzer.push(samples: dc)
-        XCTAssertEqual(second.spectrum64Left, second.spectrum64Right)
-        XCTAssertEqual(second.spectrum32Left, second.spectrum32Right)
-        XCTAssertEqual(second.spectrum16Left, second.spectrum16Right)
-        XCTAssertEqual(second.spectrum64Left[0], 0.3, accuracy: 0.0001)
-        XCTAssertTrue(second.spectrum64Left.allSatisfy(\.isFinite))
+    func testSpectrumIsNotUpperClampedAndSilenceReleasesToZero() {
+        let analyzer = WallpaperEngineAudioSpectrumAnalyzer()
+        let sampleRate = 48_000.0
+        let loud = (0..<WallpaperEngineAudioSpectrumAnalyzer.sampleCount).map { index in
+            Float(2) * sin(2 * Float.pi * 1_000 * Float(index) / Float(sampleRate))
+        }
+        var frame = SceneAudioSpectrumFrame.zero
+        for _ in 0..<20 {
+            frame = analyzer.push(left: loud, right: loud, sampleRate: sampleRate)
+        }
+        XCTAssertGreaterThan(frame.spectrum64Left.max() ?? 0, 1)
+
+        let silence = [Float](
+            repeating: 0,
+            count: WallpaperEngineAudioSpectrumAnalyzer.sampleCount
+        )
+        for _ in 0..<60 {
+            frame = analyzer.push(
+                left: silence,
+                right: silence,
+                sampleRate: sampleRate
+            )
+        }
+        XCTAssertLessThan(frame.spectrum64Left.max() ?? 1, 0.001)
     }
 
     func testCapturePolicyRequiresPermissionActiveSessionAndDemand() {
@@ -179,7 +226,7 @@ final class SceneAudioTests: XCTestCase {
         XCTAssertEqual(description.processes, [processObjectID])
         XCTAssertTrue(description.isExclusive)
         XCTAssertTrue(description.isPrivate)
-        XCTAssertTrue(description.isMono)
+        XCTAssertFalse(description.isMono)
         XCTAssertTrue(description.isMixdown)
         XCTAssertEqual(description.muteBehavior, .unmuted)
         XCTAssertEqual(description.uuid, uuid)
@@ -206,7 +253,7 @@ final class SceneAudioTests: XCTestCase {
         XCTAssertEqual(taps[0][kAudioSubTapDriftCompensationKey] as? Bool, true)
     }
 
-    func testPlanarFloatCaptureDownmixesEveryBuffer() throws {
+    func testPlanarFloatCapturePreservesStereoBuffers() throws {
         var left: [Float] = [1, -1, 0.5]
         var right: [Float] = [0, 0.5, -0.5]
         let format = AudioStreamBasicDescription(
@@ -246,12 +293,12 @@ final class SceneAudioTests: XCTestCase {
         }
 
         let values = try XCTUnwrap(decoded)
-        XCTAssertEqual(values[0], 0.5, accuracy: 0.0001)
-        XCTAssertEqual(values[1], -0.25, accuracy: 0.0001)
-        XCTAssertEqual(values[2], 0, accuracy: 0.0001)
+        XCTAssertEqual(values.sampleRate, 44_100)
+        XCTAssertEqual(values.left, left)
+        XCTAssertEqual(values.right, right)
     }
 
-    func testInterleavedSignedIntegerCaptureDownmixesChannels() throws {
+    func testInterleavedSignedIntegerCapturePreservesStereoChannels() throws {
         var interleaved: [Int16] = [Int16.max, 0, Int16.min + 1, Int16.max]
         let format = AudioStreamBasicDescription(
             mSampleRate: 44_100,
@@ -281,8 +328,10 @@ final class SceneAudioTests: XCTestCase {
         }
 
         let values = try XCTUnwrap(decoded)
-        XCTAssertEqual(values[0], 0.5, accuracy: 0.0001)
-        XCTAssertEqual(values[1], 0, accuracy: 0.0001)
+        XCTAssertEqual(values.left[0], 1, accuracy: 0.0001)
+        XCTAssertEqual(values.right[0], 0, accuracy: 0.0001)
+        XCTAssertEqual(values.left[1], -1, accuracy: 0.0001)
+        XCTAssertEqual(values.right[1], 1, accuracy: 0.0001)
     }
 
     func testPlayerDecodesWaveAndPreservesLoopAndVolume() throws {

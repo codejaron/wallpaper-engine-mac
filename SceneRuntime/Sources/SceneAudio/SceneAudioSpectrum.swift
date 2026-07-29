@@ -3,9 +3,9 @@ import AudioToolbox
 import Foundation
 
 /// The six fixed-size spectrum arrays exposed by Wallpaper Engine shaders.
-/// Values are deliberately kept as signed floating point values. The Linux
-/// recorder does not clamp the logarithmic result at zero, so negative values
-/// are part of the wire contract.
+/// Wallpaper Engine defines every array as a positive low-to-high frequency
+/// spectrum with independent left and right channels. Values usually sit in
+/// 0...1 but are intentionally not upper-clamped.
 public struct SceneAudioSpectrumFrame: Equatable, Sendable {
     public static let zero = SceneAudioSpectrumFrame(
         spectrum16Left: Array(repeating: 0, count: 16),
@@ -46,22 +46,40 @@ public struct SceneAudioSpectrumFrame: Equatable, Sendable {
     }
 }
 
-/// Linux-compatible FFT reduction and attack/release smoothing.
-///
-/// `push(samples:)` intentionally returns the values *before* the newly
-/// received FFT destination is applied. This is the order used by the pinned
-/// linux-wallpaperengine recorder: move the current arrays first, then compute
-/// the destination for the next update.
-public final class LinuxAudioSpectrumAnalyzer: @unchecked Sendable {
+private func maximumSpectrumLevel(
+    _ frame: SceneAudioSpectrumFrame
+) -> Float {
+    var peak: Float = 0
+    for values in [
+        frame.spectrum16Left,
+        frame.spectrum16Right,
+        frame.spectrum32Left,
+        frame.spectrum32Right,
+        frame.spectrum64Left,
+        frame.spectrum64Right,
+    ] {
+        peak = max(peak, values.max() ?? 0)
+    }
+    return peak
+}
+
+/// Produces Wallpaper Engine's documented stereo 16/32/64-band contract from
+/// PCM windows. Every resolution divides the complete audible spectrum rather
+/// than truncating the FFT or overwriting coarser buckets.
+public final class WallpaperEngineAudioSpectrumAnalyzer: @unchecked Sendable {
     public static let sampleCount = 1024
 
+    private struct ChannelState {
+        var spectrum16 = [Float](repeating: 0, count: 16)
+        var spectrum32 = [Float](repeating: 0, count: 32)
+        var spectrum64 = [Float](repeating: 0, count: 64)
+    }
+
     private let transform: vDSP.DiscreteFourierTransform<Float>
-    private var current16 = [Float](repeating: 0, count: 16)
-    private var current32 = [Float](repeating: 0, count: 32)
-    private var current64 = [Float](repeating: 0, count: 64)
-    private var destination16 = [Float](repeating: 0, count: 16)
-    private var destination32 = [Float](repeating: 0, count: 32)
-    private var destination64 = [Float](repeating: 0, count: 64)
+    private let window: [Float]
+    private let magnitudeNormalization: Float
+    private var leftState = ChannelState()
+    private var rightState = ChannelState()
 
     public init() {
         do {
@@ -77,76 +95,188 @@ public final class LinuxAudioSpectrumAnalyzer: @unchecked Sendable {
             // if a future SDK changes that invariant.
             preconditionFailure("Unable to create 1024-point audio FFT: \(error)")
         }
+        window = (0..<Self.sampleCount).map { index in
+            let phase = 2 * Float.pi * Float(index) /
+                Float(Self.sampleCount - 1)
+            return 0.5 - 0.5 * cos(phase)
+        }
+        magnitudeNormalization = 2 / window.reduce(0, +)
     }
 
-    /// Feed one complete mono window. Incomplete windows are rejected rather
-    /// than padded with fabricated samples.
+    public func reset() {
+        leftState = ChannelState()
+        rightState = ChannelState()
+    }
+
+    /// Feed one complete stereo window. A genuinely mono source is duplicated
+    /// by the decoder before this boundary; incomplete or mismatched windows
+    /// are programming errors and are never padded with fabricated samples.
     @discardableResult
-    public func push(samples: [Float]) -> SceneAudioSpectrumFrame {
-        precondition(samples.count == Self.sampleCount)
+    public func push(
+        left: [Float],
+        right: [Float],
+        sampleRate: Double
+    ) -> SceneAudioSpectrumFrame {
+        precondition(left.count == Self.sampleCount)
+        precondition(right.count == Self.sampleCount)
+        precondition(sampleRate.isFinite && sampleRate > 0)
 
-        moveTowards(&current16, destination16)
-        moveTowards(&current32, destination32)
-        moveTowards(&current64, destination64)
+        let leftDestination = analyze(samples: left, sampleRate: sampleRate)
+        let rightDestination = analyze(samples: right, sampleRate: sampleRate)
+        let windowDuration = Double(Self.sampleCount) / sampleRate
+        smooth(
+            state: &leftState,
+            destination: leftDestination,
+            windowDuration: windowDuration
+        )
+        smooth(
+            state: &rightState,
+            destination: rightDestination,
+            windowDuration: windowDuration
+        )
 
+        return SceneAudioSpectrumFrame(
+            spectrum16Left: leftState.spectrum16,
+            spectrum16Right: rightState.spectrum16,
+            spectrum32Left: leftState.spectrum32,
+            spectrum32Right: rightState.spectrum32,
+            spectrum64Left: leftState.spectrum64,
+            spectrum64Right: rightState.spectrum64
+        )
+    }
+
+    private func analyze(
+        samples: [Float],
+        sampleRate: Double
+    ) -> ChannelState {
+        var windowed = [Float](repeating: 0, count: Self.sampleCount)
+        vDSP.multiply(samples, window, result: &windowed)
         let imaginary = [Float](repeating: 0, count: Self.sampleCount)
         var realOutput = [Float](repeating: 0, count: Self.sampleCount)
         var imaginaryOutput = [Float](repeating: 0, count: Self.sampleCount)
         transform.transform(
-            inputReal: samples,
+            inputReal: windowed,
             inputImaginary: imaginary,
             outputReal: &realOutput,
             outputImaginary: &imaginaryOutput
         )
 
-        for band in 0..<64 {
-            let index = band * 2
-            let real = realOutput[index]
-            let imag = imaginaryOutput[index]
-            let magnitudeSquared = real * real + imag * imag
-            let logarithmicMagnitude: Float = magnitudeSquared > 0
-                ? 0.35 * log10(magnitudeSquared)
-                : 0
-
-            destination64[band] = min(
-                1,
-                logarithmicMagnitude *
-                    (2 - exp(1 - Float(band) / 63 - 0.5))
-            )
-            // The upstream implementation deliberately overwrites these
-            // buckets as it walks the 64-band result (band >> n); this is not
-            // an averaging operation.
-            destination32[band >> 1] = min(
-                1,
-                logarithmicMagnitude *
-                    (2 - exp(1 - Float(band) / 31 - 0.5))
-            )
-            destination16[band >> 2] = min(
-                1,
-                logarithmicMagnitude *
-                    (2 - exp(1 - Float(band) / 15 - 0.5))
-            )
+        let positiveBinCount = Self.sampleCount / 2
+        var magnitudes = [Float](repeating: 0, count: positiveBinCount)
+        for index in 1..<positiveBinCount {
+            magnitudes[index] = hypot(
+                realOutput[index], imaginaryOutput[index]
+            ) * magnitudeNormalization
         }
-
-        return SceneAudioSpectrumFrame(
-            spectrum16Left: current16,
-            spectrum16Right: current16,
-            spectrum32Left: current32,
-            spectrum32Right: current32,
-            spectrum64Left: current64,
-            spectrum64Right: current64
+        return ChannelState(
+            spectrum16: reduceBands(
+                magnitudes: magnitudes,
+                count: 16,
+                sampleRate: sampleRate
+            ),
+            spectrum32: reduceBands(
+                magnitudes: magnitudes,
+                count: 32,
+                sampleRate: sampleRate
+            ),
+            spectrum64: reduceBands(
+                magnitudes: magnitudes,
+                count: 64,
+                sampleRate: sampleRate
+            )
         )
     }
 
-    private func moveTowards(_ current: inout [Float], _ destination: [Float]) {
-        for index in current.indices {
-            let delta = destination[index] - current[index]
-            if abs(delta) <= 0.3 {
-                current[index] = destination[index]
-            } else {
-                current[index] += delta > 0 ? 0.3 : -0.3
-            }
+    private func reduceBands(
+        magnitudes: [Float],
+        count: Int,
+        sampleRate: Double
+    ) -> [Float] {
+        let nyquist = sampleRate * 0.5
+        let highestFrequency = min(20_000, nyquist)
+        let binWidth = sampleRate / Double(Self.sampleCount)
+        let lowestFrequency = max(20, binWidth)
+        guard highestFrequency > lowestFrequency else {
+            return [Float](repeating: 0, count: count)
         }
+        let ratio = highestFrequency / lowestFrequency
+        return (0..<count).map { band in
+            let lowerFrequency = lowestFrequency * pow(
+                ratio,
+                Double(band) / Double(count)
+            )
+            let upperFrequency = lowestFrequency * pow(
+                ratio,
+                Double(band + 1) / Double(count)
+            )
+            let lowerBin = min(
+                max(Int(floor(lowerFrequency / binWidth)), 1),
+                magnitudes.count - 1
+            )
+            let upperBin = min(
+                max(Int(ceil(upperFrequency / binWidth)), lowerBin + 1),
+                magnitudes.count
+            )
+            let peak = magnitudes[lowerBin..<upperBin].max() ?? 0
+            guard peak > 0, peak.isFinite else { return 0 }
+            // A -80 dB noise floor maps to zero and full scale maps to one.
+            // Do not upper-clamp: Wallpaper Engine explicitly permits levels
+            // greater than one for loud mixed sources.
+            return max(0, (20 * log10(peak) + 80) / 80)
+        }
+    }
+
+    private func smooth(
+        state: inout ChannelState,
+        destination: ChannelState,
+        windowDuration: Double
+    ) {
+        smooth(
+            &state.spectrum16,
+            toward: destination.spectrum16,
+            windowDuration: windowDuration
+        )
+        smooth(
+            &state.spectrum32,
+            toward: destination.spectrum32,
+            windowDuration: windowDuration
+        )
+        smooth(
+            &state.spectrum64,
+            toward: destination.spectrum64,
+            windowDuration: windowDuration
+        )
+    }
+
+    private func smooth(
+        _ current: inout [Float],
+        toward destination: [Float],
+        windowDuration: Double
+    ) {
+        let attack = Float(1 - exp(-windowDuration / 0.03))
+        let release = Float(1 - exp(-windowDuration / 0.18))
+        for index in current.indices {
+            let coefficient = destination[index] >= current[index]
+                ? attack
+                : release
+            current[index] += (destination[index] - current[index]) * coefficient
+        }
+    }
+}
+
+struct CapturedAudioSamples: Equatable, Sendable {
+    let sampleRate: Double
+    let left: [Float]
+    let right: [Float]
+
+    init(sampleRate: Double, left: [Float], right: [Float]) {
+        precondition(sampleRate.isFinite && sampleRate > 0)
+        precondition(!left.isEmpty && left.count == right.count)
+        precondition(left.allSatisfy(\.isFinite))
+        precondition(right.allSatisfy(\.isFinite))
+        self.sampleRate = sampleRate
+        self.left = left
+        self.right = right
     }
 }
 
@@ -225,10 +355,14 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
     private let lock = NSLock()
     private var capture: CoreAudioSystemCapture?
     private var statusStorage: SceneAudioCaptureStatus = .idle
-    private var pendingSamples: [Float] = []
+    private var pendingLeftSamples: [Float] = []
+    private var pendingRightSamples: [Float] = []
+    private var pendingSampleRate: Double?
     private var latestFrameStorage = SceneAudioSpectrumFrame.zero
     private var lastSignalUptime: TimeInterval?
-    private let analyzer = LinuxAudioSpectrumAnalyzer()
+    private var didReportPCMInput = false
+    private var didReportActiveSpectrum = false
+    private let analyzer = WallpaperEngineAudioSpectrumAnalyzer()
     @MainActor private var activeLeaseIDs: Set<UUID> = []
     @MainActor private var captureAllowed = false
     @MainActor private var captureSuspended = false
@@ -362,7 +496,7 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
         do {
             let nextCapture = try await performSystemAudioCaptureStartup { [weak self] in
                 let capture = CoreAudioSystemCapture { [weak self] samples in
-                    self?.append(samples: samples)
+                    self?.append(samples)
                 }
                 try capture.start()
                 return capture
@@ -436,9 +570,14 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
             let currentCapture = capture
             capture = nil
             statusStorage = .idle
-            pendingSamples.removeAll(keepingCapacity: true)
+            pendingLeftSamples.removeAll(keepingCapacity: true)
+            pendingRightSamples.removeAll(keepingCapacity: true)
+            pendingSampleRate = nil
+            analyzer.reset()
             latestFrameStorage = .zero
             lastSignalUptime = nil
+            didReportPCMInput = false
+            didReportActiveSpectrum = false
             return currentCapture
         }
         if let currentCapture {
@@ -448,21 +587,64 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
         }
     }
 
-    private func append(samples: [Float]) {
-        guard !samples.isEmpty else { return }
+    private func append(_ samples: CapturedAudioSamples) {
+        var firstPCMInput: (sampleRate: Double, frameCount: Int)?
+        var firstActiveSpectrumPeak: Float?
         withLock {
-            let meanSquare = samples.reduce(Float.zero) { partial, sample in
-                partial + sample * sample
-            } / Float(samples.count)
+            if !didReportPCMInput {
+                didReportPCMInput = true
+                firstPCMInput = (samples.sampleRate, samples.left.count)
+            }
+            if let pendingSampleRate, pendingSampleRate != samples.sampleRate {
+                pendingLeftSamples.removeAll(keepingCapacity: true)
+                pendingRightSamples.removeAll(keepingCapacity: true)
+                analyzer.reset()
+            }
+            pendingSampleRate = samples.sampleRate
+            let sumOfSquares = zip(samples.left, samples.right).reduce(
+                Float.zero
+            ) { partial, pair in
+                partial + pair.0 * pair.0 + pair.1 * pair.1
+            }
+            let meanSquare = sumOfSquares / Float(samples.left.count * 2)
             if meanSquare.squareRoot() >= 0.0025 {
                 lastSignalUptime = ProcessInfo.processInfo.systemUptime
             }
-            pendingSamples.append(contentsOf: samples)
-            while pendingSamples.count >= LinuxAudioSpectrumAnalyzer.sampleCount {
-                let window = Array(pendingSamples.prefix(LinuxAudioSpectrumAnalyzer.sampleCount))
-                pendingSamples.removeFirst(LinuxAudioSpectrumAnalyzer.sampleCount)
-                latestFrameStorage = analyzer.push(samples: window)
+            pendingLeftSamples.append(contentsOf: samples.left)
+            pendingRightSamples.append(contentsOf: samples.right)
+            while pendingLeftSamples.count >=
+                    WallpaperEngineAudioSpectrumAnalyzer.sampleCount {
+                let count = WallpaperEngineAudioSpectrumAnalyzer.sampleCount
+                let left = Array(pendingLeftSamples.prefix(count))
+                let right = Array(pendingRightSamples.prefix(count))
+                pendingLeftSamples.removeFirst(count)
+                pendingRightSamples.removeFirst(count)
+                latestFrameStorage = analyzer.push(
+                    left: left,
+                    right: right,
+                    sampleRate: samples.sampleRate
+                )
+                if !didReportActiveSpectrum {
+                    let peak = maximumSpectrumLevel(latestFrameStorage)
+                    if peak > 0.001 {
+                        didReportActiveSpectrum = true
+                        firstActiveSpectrumPeak = peak
+                    }
+                }
             }
+        }
+        if let firstPCMInput {
+            NSLog(
+                "[SceneAudio] PCM input active: %.0f Hz, %d frames in first batch",
+                firstPCMInput.sampleRate,
+                Int32(firstPCMInput.frameCount)
+            )
+        }
+        if let firstActiveSpectrumPeak {
+            NSLog(
+                "[SceneAudio] Wallpaper Engine spectrum active: peak %.3f",
+                Double(firstActiveSpectrumPeak)
+            )
         }
     }
 
@@ -485,39 +667,46 @@ public enum SceneAudioCaptureError: LocalizedError, Equatable {
     }
 }
 
-/// Decodes and downmixes every channel in an AudioBufferList so planar and
-/// interleaved layouts share one validated implementation.
+/// Decodes a Core Audio mono/stereo PCM buffer without destroying channel
+/// separation. Mono is duplicated because Wallpaper Engine always exposes two
+/// channel arrays; any unsupported channel layout fails explicitly.
 func decodePCMBufferList(
     _ list: UnsafeMutableAudioBufferListPointer,
     frameCount: Int,
     format asbd: AudioStreamBasicDescription
-) -> [Float]? {
-    guard frameCount > 0 else { return nil }
+) -> CapturedAudioSamples? {
+    let expectedChannels = Int(asbd.mChannelsPerFrame)
+    guard frameCount > 0,
+          asbd.mSampleRate.isFinite,
+          asbd.mSampleRate > 0,
+          expectedChannels == 1 || expectedChannels == 2 else { return nil }
     let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
     let isSignedInteger = (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0
     let bytesPerSample = max(Int((asbd.mBitsPerChannel + 7) / 8), 1)
     let nonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0 ||
         list.count > 1
-    var decoded = [Float](repeating: 0, count: frameCount)
-    var decodedChannelCount = 0
+    var decodedChannels: [[Float]] = []
+    decodedChannels.reserveCapacity(expectedChannels)
 
     for buffer in list {
         guard let data = buffer.mData else { continue }
         let bufferChannels = max(Int(buffer.mNumberChannels), 1)
+        guard !nonInterleaved || bufferChannels == 1 else { return nil }
         let channelsInBuffer = nonInterleaved ? 1 : bufferChannels
         let bytesPerFrame = nonInterleaved
-            ? bytesPerSample
+            ? max(Int(asbd.mBytesPerFrame), bytesPerSample)
             : max(Int(asbd.mBytesPerFrame), bytesPerSample * bufferChannels)
         let byteCount = Int(buffer.mDataByteSize)
         guard bytesPerFrame > 0, byteCount > 0 else { continue }
         let availableFrames = min(frameCount, byteCount / bytesPerFrame)
         guard availableFrames == frameCount else { return nil }
 
-        for frame in 0..<availableFrames {
-            let frameBase = data.advanced(by: frame * bytesPerFrame)
-            for channel in 0..<channelsInBuffer {
+        for channel in 0..<channelsInBuffer {
+            var decoded = [Float](repeating: 0, count: frameCount)
+            for frame in 0..<availableFrames {
+                let frameBase = data.advanced(by: frame * bytesPerFrame)
                 let offset = nonInterleaved ? 0 : channel * bytesPerSample
-                guard offset + bytesPerSample <= bytesPerFrame else { continue }
+                guard offset + bytesPerSample <= bytesPerFrame else { return nil }
                 guard let sample = decodeAudioSample(
                     frameBase.advanced(by: offset),
                     bytesPerSample: bytesPerSample,
@@ -526,18 +715,20 @@ func decodePCMBufferList(
                     isSignedInteger: isSignedInteger,
                     isBigEndian: (asbd.mFormatFlags & kAudioFormatFlagIsBigEndian) != 0
                 ) else { return nil }
-                decoded[frame] += sample
+                decoded[frame] = sample
             }
+            decodedChannels.append(decoded)
         }
-        decodedChannelCount += channelsInBuffer
     }
 
-    guard decodedChannelCount > 0 else { return nil }
-    let divisor = Float(decodedChannelCount)
-    for index in decoded.indices {
-        decoded[index] = max(-1, min(1, decoded[index] / divisor))
-    }
-    return decoded
+    guard decodedChannels.count == expectedChannels else { return nil }
+    let left = decodedChannels[0]
+    let right = expectedChannels == 2 ? decodedChannels[1] : left
+    return CapturedAudioSamples(
+        sampleRate: asbd.mSampleRate,
+        left: left,
+        right: right
+    )
 }
 
 private func decodeAudioSample(

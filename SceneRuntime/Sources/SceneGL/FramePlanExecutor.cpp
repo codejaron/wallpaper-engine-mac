@@ -3934,29 +3934,14 @@ struct FramePlanExecutor::Impl final {
             result.puppetIndices = mesh.indices;
             ensurePuppetGeometry(session);
         } else {
-            if (pass.geometry == FrameGeometryKind::passthroughCapture) {
-                // Wallpaper Engine's compose-layer vertex shader uses the
-                // position to choose a scene sample and the texcoord to place
-                // that sample in the local composite target. Its GL contract
-                // pairs the scene's upper edge with the target's upper V edge.
-                result.vertices = {{
-                    {{left, bottom, 0}, {0, vMax}},
-                    {{right, bottom, 0}, {uMax, vMax}},
-                    {{right, top, 0}, {uMax, 0}},
-                    {{left, bottom, 0}, {0, vMax}},
-                    {{right, top, 0}, {uMax, 0}},
-                    {{left, top, 0}, {0, 0}},
-                }};
-            } else {
-                result.vertices = {{
-                    {{left, bottom, 0}, {0, 0}},
-                    {{right, bottom, 0}, {uMax, 0}},
-                    {{right, top, 0}, {uMax, vMax}},
-                    {{left, bottom, 0}, {0, 0}},
-                    {{right, top, 0}, {uMax, vMax}},
-                    {{left, top, 0}, {0, vMax}},
-                }};
-            }
+            result.vertices = {{
+                {{left, bottom, 0}, {0, 0}},
+                {{right, bottom, 0}, {uMax, 0}},
+                {{right, top, 0}, {uMax, vMax}},
+                {{left, bottom, 0}, {0, 0}},
+                {{right, top, 0}, {uMax, vMax}},
+                {{left, top, 0}, {0, vMax}},
+            }};
             ensureGeometry(session);
         }
         result.positionLocation = glGetAttribLocation(

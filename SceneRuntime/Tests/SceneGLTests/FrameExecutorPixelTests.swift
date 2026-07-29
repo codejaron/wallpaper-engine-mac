@@ -2088,6 +2088,55 @@ final class FrameExecutorPixelTests: XCTestCase {
         })
     }
 
+    func testTextOpacityEffectPreservesLayoutAndControlsCompositing() throws {
+        let direct = try loadTextFixture(
+            font: "systemfont_arial",
+            origin: "32 32 0",
+            scale: "0.5 0.5 1",
+            effectAlpha: nil
+        )
+        defer { destroy(direct) }
+        let visibleEffect = try loadTextFixture(
+            font: "systemfont_arial",
+            origin: "32 32 0",
+            scale: "0.5 0.5 1",
+            effectAlpha: 1
+        )
+        defer { destroy(visibleEffect) }
+        let hiddenEffect = try loadTextFixture(
+            font: "systemfont_arial",
+            origin: "32 32 0",
+            scale: "0.5 0.5 1",
+            effectAlpha: 0
+        )
+        defer { destroy(hiddenEffect) }
+
+        try render(direct.executor)
+        try render(visibleEffect.executor)
+        try render(hiddenEffect.executor)
+        try assertNoExecutorIssues(direct.executor)
+        try assertNoExecutorIssues(visibleEffect.executor)
+        try assertNoExecutorIssues(hiddenEffect.executor)
+
+        let directBounds = try XCTUnwrap(redPixelBounds(
+            try readPixels(direct.executor),
+            width: Int(we_scene_frame_executor_width(direct.executor))
+        ))
+        let effectBounds = try XCTUnwrap(redPixelBounds(
+            try readPixels(visibleEffect.executor),
+            width: Int(we_scene_frame_executor_width(visibleEffect.executor))
+        ))
+        XCTAssertEqual(effectBounds.minX, directBounds.minX, accuracy: 1)
+        XCTAssertEqual(effectBounds.maxX, directBounds.maxX, accuracy: 1)
+        XCTAssertEqual(effectBounds.minY, directBounds.minY, accuracy: 1)
+        XCTAssertEqual(effectBounds.maxY, directBounds.maxY, accuracy: 1)
+        let hiddenPixels = try readPixels(hiddenEffect.executor)
+        let maximumHiddenRed = stride(
+            from: 0, to: hiddenPixels.count, by: 4
+        ).map { hiddenPixels[$0] }.max() ?? 0
+        XCTAssertEqual(maximumHiddenRed, 0)
+    }
+
     func testRasterizedTextReusesImmutableFontAssetAcrossFrames() throws {
         let fixtureFont = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -2986,7 +3035,8 @@ final class FrameExecutorPixelTests: XCTestCase {
         maximumWidth: Double? = nil,
         maximumRows: Int? = nil,
         useEllipsis: Bool = false,
-        fontData: Data? = nil
+        fontData: Data? = nil,
+        effectAlpha: Double? = nil
     ) throws -> RuntimePipeline {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -3024,6 +3074,16 @@ final class FrameExecutorPixelTests: XCTestCase {
             textObject["limitrows"] = true
             textObject["maxrows"] = maximumRows
         }
+        if let effectAlpha {
+            textObject["effects"] = [[
+                "file": "effects/opacity/effect.json",
+                "id": 2,
+                "passes": [[
+                    "constantshadervalues": ["alpha": effectAlpha],
+                ]],
+                "visible": true,
+            ]]
+        }
         textObject["limituseellipsis"] = useEllipsis
         let scene: [String: Any] = [
             "camera": ["center": "0 0 -1", "eye": "0 0 0", "up": "0 1 0"],
@@ -3034,10 +3094,80 @@ final class FrameExecutorPixelTests: XCTestCase {
             "objects": [textObject],
             "version": 1,
         ]
-        try makePackage([
+        var entries: [(String, Data)] = [
             ("project.json", try json(project)),
             ("scene.json", try json(scene)),
-        ]).write(to: package)
+        ]
+        if effectAlpha != nil {
+            entries.append(contentsOf: [
+                (
+                    "effects/opacity/effect.json",
+                    try json([
+                        "passes": [[
+                            "material": "materials/effects/opacity.json",
+                        ]],
+                        "version": 1,
+                    ])
+                ),
+                (
+                    "materials/effects/opacity.json",
+                    try json(["passes": [[
+                        "blending": "normal",
+                        "cullmode": "nocull",
+                        "depthtest": "disabled",
+                        "depthwrite": "disabled",
+                        "shader": "text-opacity",
+                    ]]])
+                ),
+                (
+                    "materials/util/effectpassthrough.json",
+                    try json(["passes": [[
+                        "blending": "normal",
+                        "cullmode": "nocull",
+                        "depthtest": "disabled",
+                        "depthwrite": "disabled",
+                        "shader": "text-passthrough",
+                    ]]])
+                ),
+            ])
+            let vertex = """
+            uniform mat4 g_ModelViewProjectionMatrix;
+            attribute vec3 a_Position;
+            attribute vec2 a_TexCoord;
+            varying vec2 v_TexCoord;
+            void main() {
+                gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);
+                v_TexCoord = a_TexCoord;
+            }
+            """
+            let passthroughFragment = """
+            uniform sampler2D g_Texture0;
+            varying vec2 v_TexCoord;
+            void main() { gl_FragColor = texture(g_Texture0, v_TexCoord); }
+            """
+            let opacityFragment = """
+            uniform sampler2D g_Texture0;
+            uniform float g_UserAlpha; // {"material":"alpha","default":1.0}
+            varying vec2 v_TexCoord;
+            void main() {
+                vec4 color = texture(g_Texture0, v_TexCoord);
+                color.a *= g_UserAlpha;
+                gl_FragColor = color;
+            }
+            """
+            for name in ["text-passthrough", "text-opacity"] {
+                try Data(vertex.utf8).write(
+                    to: shaders.appendingPathComponent("\(name).vert")
+                )
+            }
+            try Data(passthroughFragment.utf8).write(
+                to: shaders.appendingPathComponent("text-passthrough.frag")
+            )
+            try Data(opacityFragment.utf8).write(
+                to: shaders.appendingPathComponent("text-opacity.frag")
+            )
+        }
+        try makePackage(entries).write(to: package)
         let fixture = Fixture(root: root, assets: assets, package: package)
         do {
             var error: WESceneRuntimeErrorRef?

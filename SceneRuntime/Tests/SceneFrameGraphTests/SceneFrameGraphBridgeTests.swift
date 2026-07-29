@@ -3796,6 +3796,112 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(string(allOperations.last?.destination.id), "scene:_rt_FullFrameBuffer")
     }
 
+    func testTextEffectsRasterizeLocallyThenUseTheSharedImageEffectPipeline() throws {
+        var documents = syntheticDocuments()
+        var scene = documents["scene.json"] as! [String: Any]
+        var objects = scene["objects"] as! [[String: Any]]
+        objects.append([
+            "effects": [[
+                "file": "effects/opacity/effect.json",
+                "id": 90,
+                "passes": [[
+                    "constantshadervalues": [
+                        "alpha": [
+                            "script": """
+                            export function update() { return 0.25; }
+                            """,
+                            "value": 1.0,
+                        ],
+                    ],
+                ]],
+                "visible": true,
+            ]],
+            "font": "Helvetica",
+            "id": 8,
+            "name": "Effect text",
+            "origin": "200 100 0",
+            "pointsize": 24,
+            "size": "120 48",
+            "text": "Effect text",
+            "visible": true,
+        ])
+        scene["objects"] = objects
+        documents["scene.json"] = scene
+        documents["effects/opacity/effect.json"] = [
+            "passes": [["material": "materials/effects/opacity.json"]],
+            "version": 1,
+        ]
+        documents["materials/effects/opacity.json"] = [
+            "passes": [[
+                "blending": "normal",
+                "cullmode": "nocull",
+                "depthtest": "disabled",
+                "depthwrite": "disabled",
+                "shader": "text-opacity",
+            ]],
+        ]
+        documents["materials/util/effectpassthrough.json"] = [
+            "passes": [[
+                "blending": "normal",
+                "cullmode": "nocull",
+                "depthtest": "disabled",
+                "depthwrite": "disabled",
+                "shader": "text-passthrough",
+            ]],
+        ]
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+        let plan = try createPlan(
+            loaded.frameGraph,
+            runtime: 1,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        let info = try planInfo(plan)
+        XCTAssertEqual(info.issue_count, 0)
+        XCTAssertEqual(info.text_count, 1)
+        XCTAssertEqual(info.image_count, 2)
+        let allOperations = try operations(plan)
+        let textOperations = Array(allOperations.suffix(4))
+        XCTAssertEqual(textOperations.map(\.kind), [
+            WE_SCENE_FRAME_OPERATION_CLEAR,
+            WE_SCENE_FRAME_OPERATION_TEXT,
+            WE_SCENE_FRAME_OPERATION_RENDER,
+            WE_SCENE_FRAME_OPERATION_RENDER,
+        ])
+        XCTAssertTrue(
+            string(textOperations[1].destination.id).contains("text-source")
+        )
+        XCTAssertEqual(string(textOperations[2].shader), "text-passthrough")
+        XCTAssertEqual(string(textOperations[3].shader), "text-opacity")
+        XCTAssertEqual(
+            textOperations[3].blending,
+            WE_SCENE_FRAME_BLENDING_TRANSLUCENT
+        )
+        XCTAssertEqual(
+            string(textOperations[3].destination.id),
+            "scene:_rt_FullFrameBuffer"
+        )
+        let alpha = try XCTUnwrap(
+            try constants(plan, operation: allOperations.count - 1)["alpha"]
+        )
+        XCTAssertEqual(alpha.source, WE_SCENE_DYNAMIC_VALUE_SCRIPT)
+        XCTAssertEqual(alpha.value.number_value, 0.25, accuracy: 1e-6)
+        let textFramebuffers = try framebuffers(plan).filter {
+            string($0.resource.id).contains("object:8")
+        }
+        XCTAssertTrue(textFramebuffers.allSatisfy {
+            $0.width == 120 && $0.height == 48
+        })
+    }
+
     func testTextWithoutAuthoredColorUsesNormalizedWhiteDefault() throws {
         var documents = syntheticDocuments()
         var scene = documents["scene.json"] as! [String: Any]

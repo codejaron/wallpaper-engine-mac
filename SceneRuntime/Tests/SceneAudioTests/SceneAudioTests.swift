@@ -185,7 +185,7 @@ final class SceneAudioTests: XCTestCase {
         XCTAssertEqual(description.uuid, uuid)
     }
 
-    func testSystemAudioAggregateStartsImmediatelyWithoutPhysicalSubdevices() throws {
+    func testSystemAudioAggregateUsesTheProcessTapAsItsOnlyClockedSource() throws {
         let tapUUID = UUID(uuidString: "61A39357-10FE-4A51-8A92-1B96F210F890")!
         let aggregateUUID = UUID(uuidString: "16CCDF99-7C31-4C8F-81C2-D7C2E8AA23CE")!
 
@@ -195,12 +195,9 @@ final class SceneAudioTests: XCTestCase {
         )
 
         XCTAssertEqual(description[kAudioAggregateDeviceIsPrivateKey] as? Bool, true)
-        XCTAssertEqual(description[kAudioAggregateDeviceIsStackedKey] as? Bool, false)
+        XCTAssertNil(description[kAudioAggregateDeviceIsStackedKey])
         XCTAssertEqual(description[kAudioAggregateDeviceTapAutoStartKey] as? Bool, false)
-        let subdevices = try XCTUnwrap(
-            description[kAudioAggregateDeviceSubDeviceListKey] as? [Any]
-        )
-        XCTAssertTrue(subdevices.isEmpty)
+        XCTAssertNil(description[kAudioAggregateDeviceSubDeviceListKey])
         let taps = try XCTUnwrap(
             description[kAudioAggregateDeviceTapListKey] as? [[String: Any]]
         )

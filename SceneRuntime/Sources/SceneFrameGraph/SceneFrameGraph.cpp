@@ -1460,6 +1460,161 @@ private:
             return descriptorIndex;
     }
 
+    void scheduleTextEffects(
+        std::size_t objectIndex,
+        std::size_t nodeIndex,
+        std::size_t textIndex
+    ) {
+        const auto& objects = model_->project().scene.objects;
+        const auto* text = std::get_if<TextObject>(&objects.at(objectIndex).data);
+        if (text == nullptr || text->effects.empty()) return;
+        const SceneGraphNodeSnapshot& node = graphSnapshot_.nodes.at(nodeIndex);
+        if (!node.isVisible) return;
+        if (!text->effectSourceModel ||
+            !text->effectSourceModel->material ||
+            text->effectSourceModel->material->passes.empty()) {
+            frameError(
+                *model_,
+                SceneModelErrorCode::assetFailure,
+                objectPointer(objectIndex, "effects"),
+                "Text effects require the official passthrough material"
+            );
+        }
+
+        const FrameTextDescriptor& descriptor = plan_.texts.at(textIndex);
+        const double layerWidth = descriptor.size.x > 0.0
+            ? descriptor.size.x
+            : static_cast<double>(plan_.width);
+        const double layerHeight = descriptor.size.y > 0.0
+            ? descriptor.size.y
+            : static_cast<double>(plan_.height);
+        const std::uint32_t width = checkedDimension(
+            *model_, layerWidth, objectPointer(objectIndex, "size"),
+            "Text effect width"
+        );
+        const std::uint32_t height = checkedDimension(
+            *model_, layerHeight, objectPointer(objectIndex, "size"),
+            "Text effect height"
+        );
+
+        const std::string sourceLogicalName =
+            "_rt_textLayerSource_" + std::to_string(node.id);
+        const FramebufferDescriptor source = createFramebuffer(
+            "object:" + std::to_string(node.id) + ":text-source",
+            sourceLogicalName,
+            FramebufferFormat::rgba8,
+            width,
+            height,
+            1.0,
+            true
+        );
+        const FrameResourceRef resourceA = imageCompositeResource(node.id, 'a');
+        const FrameResourceRef resourceB = imageCompositeResource(node.id, 'b');
+        sceneFramebuffers_.insert_or_assign(resourceA.logicalName, resourceA);
+        sceneFramebuffers_.insert_or_assign(resourceB.logicalName, resourceB);
+        const FramebufferDescriptor compositeA = createFramebuffer(
+            resourceA.id,
+            resourceA.logicalName,
+            FramebufferFormat::rgba8,
+            width,
+            height,
+            1.0,
+            true
+        );
+        const FramebufferDescriptor compositeB = createFramebuffer(
+            resourceB.id,
+            resourceB.logicalName,
+            FramebufferFormat::rgba8,
+            width,
+            height,
+            1.0,
+            true
+        );
+
+        const auto dynamicLiteral = [](RuntimeValue value) {
+            DynamicValue result;
+            result.value = std::move(value);
+            return result;
+        };
+        const auto evaluatedLiteral = [](RuntimeValue value) {
+            return EvaluatedValue{
+                .value = std::move(value),
+                .source = DynamicValueSource::literal,
+            };
+        };
+        ImageObject effectImage;
+        effectImage.model = text->effectSourceModel;
+        effectImage.magentaCompositeTintMaterial =
+            text->magentaCompositeTintMaterial;
+        effectImage.alpha = dynamicLiteral(RuntimeValue::floating(1.0));
+        effectImage.color = dynamicLiteral(
+            RuntimeValue::color({1.0, 1.0, 1.0, 1.0})
+        );
+        effectImage.size = dynamicLiteral(RuntimeValue::vector(
+            {layerWidth, layerHeight, 0.0, 0.0}, 2
+        ));
+        effectImage.parallaxDepth = dynamicLiteral(RuntimeValue::vector(
+            {0.0, 0.0, 0.0, 0.0}, 2
+        ));
+        effectImage.brightness = dynamicLiteral(RuntimeValue::floating(1.0));
+        effectImage.colorBlendMode = dynamicLiteral(RuntimeValue::integer(0));
+        effectImage.horizontalAlignment = "center";
+        effectImage.effects = text->effects;
+
+        const std::size_t imageIndex = plan_.images.size();
+        plan_.images.push_back({
+            .objectIndex = objectIndex,
+            .objectId = node.id,
+            .visible = true,
+            .solid = false,
+            .passthrough = false,
+            .fullscreen = false,
+            .size = {layerWidth, layerHeight},
+            .worldTransform = node.worldTransform,
+            .source = source.resource,
+            .compositeA = compositeA.resource,
+            .compositeB = compositeB.resource,
+            .puppetMesh = nullptr,
+            .alpha = evaluatedLiteral(RuntimeValue::floating(1.0)),
+            .color = evaluatedLiteral(
+                RuntimeValue::color({1.0, 1.0, 1.0, 1.0})
+            ),
+            .brightness = evaluatedLiteral(RuntimeValue::floating(1.0)),
+            .colorBlendMode = evaluatedLiteral(RuntimeValue::integer(0)),
+            .parallaxDepth = evaluatedLiteral(RuntimeValue::vector(
+                {0.0, 0.0, 0.0, 0.0}, 2
+            )),
+            .horizontalAlignment = "center",
+        });
+        plan_.operations.emplace_back(FrameClearCommand{
+            .origin = {
+                .imageIndex = imageIndex,
+                .objectId = node.id,
+            },
+            .destination = source.resource,
+            .color = {
+                .red = 0.0,
+                .green = 0.0,
+                .blue = 0.0,
+                .alpha = 0.0,
+            },
+        });
+        plan_.operations.emplace_back(FrameTextCommand{
+            .textIndex = textIndex,
+            .objectId = node.id,
+            .destination = source.resource,
+            .localSpace = true,
+        });
+        scheduleImage(ImageContext{
+            .planImageIndex = imageIndex,
+            .objectIndex = objectIndex,
+            .image = &effectImage,
+            .node = &node,
+            .currentMain = compositeA.resource,
+            .currentSub = compositeB.resource,
+        });
+    }
+
     [[nodiscard]] particle::Vector3 concreteParticleVector(
         ParticleVector3 value
     ) const noexcept {
@@ -3266,11 +3421,18 @@ private:
                         if (descriptor &&
                             !skippedObjectIds_.contains(node.id) &&
                             plan_.texts.at(*descriptor).visible) {
-                            plan_.operations.emplace_back(FrameTextCommand{
-                                .textIndex = *descriptor,
-                                .objectId = plan_.texts.at(*descriptor).objectId,
-                                .destination = plan_.output,
-                            });
+                            const auto& text = std::get<TextObject>(object.data);
+                            if (text.effects.empty()) {
+                                plan_.operations.emplace_back(FrameTextCommand{
+                                    .textIndex = *descriptor,
+                                    .objectId = plan_.texts.at(*descriptor).objectId,
+                                    .destination = plan_.output,
+                                });
+                            } else {
+                                scheduleTextEffects(
+                                    objectIndex, nodeIndex, *descriptor
+                                );
+                            }
                         }
                         return;
                     }

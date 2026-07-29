@@ -3204,39 +3204,13 @@ private:
             false
         );
 
-        if (const Json* effects = optionalField(source, "effects")) {
-            const std::string effectsPointer = childPointer(pointer, "effects");
-            requireArray(document, *effects, effectsPointer, "Image effects");
-            result.effects.reserve(effects->size());
-            bool needsMagentaCompositeTintMaterial = false;
-            for (std::size_t index = 0; index < effects->size(); ++index) {
-                result.effects.push_back(parseImageEffect(
-                    document,
-                    (*effects)[index],
-                    childPointer(effectsPointer, index)
-                ));
-                for (const EffectPassOverride& passOverride :
-                     result.effects.back().passOverrides) {
-                    const auto composite = passOverride.combos.find("COMPOSITE");
-                    if (composite != passOverride.combos.end() &&
-                        composite->second == 2 &&
-                        passOverride.constants.contains("compositecolor")) {
-                        needsMagentaCompositeTintMaterial = true;
-                        break;
-                    }
-                }
-            }
-            if (needsMagentaCompositeTintMaterial) {
-                result.magentaCompositeTintMaterial = loadMaterial(
-                    "materials/effects/tint.json",
-                    referenceChain(
-                        document,
-                        effectsPointer,
-                        "materials/effects/tint.json"
-                    )
-                );
-            }
-        }
+        parseLayerEffects(
+            document,
+            source,
+            pointer,
+            result.effects,
+            result.magentaCompositeTintMaterial
+        );
 
         if (const Json* instance = optionalField(source, "instance")) {
             const std::string instancePointer = childPointer(pointer, "instance");
@@ -3263,7 +3237,7 @@ private:
         const Document& document,
         const Json& source,
         std::string_view pointer
-    ) const {
+    ) {
         TextObject result;
         result.text = parseDynamic(
             document,
@@ -3375,7 +3349,77 @@ private:
                              .value_or(0);
         result.maxWidth = optionalNumber(document, source, "maxwidth", pointer)
                               .value_or(0.0);
+        parseLayerEffects(
+            document,
+            source,
+            pointer,
+            result.effects,
+            result.magentaCompositeTintMaterial
+        );
+        if (!result.effects.empty()) {
+            const std::string materialPath =
+                "materials/util/effectpassthrough.json";
+            auto material = std::make_shared<Material>(*loadMaterial(
+                materialPath,
+                referenceChain(
+                    document,
+                    childPointer(pointer, "effects"),
+                    materialPath
+                )
+            ));
+            // The text source is transparent outside glyph coverage. Its
+            // authored effects must be composited over earlier scene layers,
+            // so carry translucent blending through to the final effect pass.
+            material->passes.front().blending = BlendingMode::translucent;
+            auto model = std::make_shared<Model>();
+            model->assetPath = "runtime/text-effect-source";
+            model->material = std::move(material);
+            result.effectSourceModel = std::move(model);
+        }
         return result;
+    }
+
+    void parseLayerEffects(
+        const Document& document,
+        const Json& source,
+        std::string_view pointer,
+        std::vector<ImageEffect>& result,
+        std::shared_ptr<const Material>& magentaCompositeTintMaterial
+    ) {
+        const Json* effects = optionalField(source, "effects");
+        if (effects == nullptr) return;
+
+        const std::string effectsPointer = childPointer(pointer, "effects");
+        requireArray(document, *effects, effectsPointer, "Layer effects");
+        result.reserve(effects->size());
+        bool needsMagentaCompositeTintMaterial = false;
+        for (std::size_t index = 0; index < effects->size(); ++index) {
+            result.push_back(parseImageEffect(
+                document,
+                (*effects)[index],
+                childPointer(effectsPointer, index)
+            ));
+            for (const EffectPassOverride& passOverride :
+                 result.back().passOverrides) {
+                const auto composite = passOverride.combos.find("COMPOSITE");
+                if (composite != passOverride.combos.end() &&
+                    composite->second == 2 &&
+                    passOverride.constants.contains("compositecolor")) {
+                    needsMagentaCompositeTintMaterial = true;
+                    break;
+                }
+            }
+        }
+        if (needsMagentaCompositeTintMaterial) {
+            magentaCompositeTintMaterial = loadMaterial(
+                "materials/effects/tint.json",
+                referenceChain(
+                    document,
+                    effectsPointer,
+                    "materials/effects/tint.json"
+                )
+            );
+        }
     }
 
     SoundObject parseSound(

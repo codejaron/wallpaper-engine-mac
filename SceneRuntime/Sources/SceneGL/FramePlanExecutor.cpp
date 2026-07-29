@@ -1595,6 +1595,7 @@ struct FramePlanExecutor::Impl final {
         PreparedAudioSpectrumUniform audioSpectrum32Right;
         PreparedAudioSpectrumUniform audioSpectrum64Left;
         PreparedAudioSpectrumUniform audioSpectrum64Right;
+        bool userAlphaProvidedByMaterial = false;
         bool compositeColorProvidedByShader = false;
         Matrix modelViewProjectionInverseValue = identityMatrix();
         std::array<float, 3> ambientColorValue{};
@@ -2744,6 +2745,13 @@ struct FramePlanExecutor::Impl final {
         result.userAlpha = prepareBuiltinUniform(
             program, "g_UserAlpha", GL_FLOAT
         );
+        result.userAlphaProvidedByMaterial = std::any_of(
+            program.parameters.begin(), program.parameters.end(),
+            [](const ShaderParameterMetadata& parameter) {
+                return parameter.name == "g_UserAlpha" &&
+                    parameter.material.has_value();
+            }
+        );
         result.alpha = prepareBuiltinUniform(program, "g_Alpha", GL_FLOAT);
         result.color = prepareBuiltinUniform(
             program, "g_Color", GL_FLOAT_VEC3
@@ -2911,7 +2919,8 @@ struct FramePlanExecutor::Impl final {
         if (uniforms.brightness >= 0) {
             glUniform1f(uniforms.brightness, uniforms.brightnessValue);
         }
-        if (uniforms.userAlpha >= 0) {
+        if (uniforms.userAlpha >= 0 &&
+            !uniforms.userAlphaProvidedByMaterial) {
             glUniform1f(uniforms.userAlpha, uniforms.alphaValue);
         }
         if (uniforms.alpha >= 0) {
@@ -3958,7 +3967,9 @@ struct FramePlanExecutor::Impl final {
         if (descriptor.objectId != command.objectId) {
             throw Error(ErrorCode::resourceValidation, "Frame text command object identity is inconsistent");
         }
-        static_cast<void>(framebuffer(command.destination, aliases));
+        const FramebufferResource& destination = framebuffer(
+            command.destination, aliases
+        );
         const auto& transform = descriptor.worldTransform;
         const text::RasterizedText& rasterized = cachedTextRaster(descriptor);
         const std::array<double, 4> layoutComponents{
@@ -4033,44 +4044,60 @@ struct FramePlanExecutor::Impl final {
             color[index] = static_cast<float>(component);
         }
 
-        const float originX = static_cast<float>(
-            transform.origin.x - static_cast<double>(plan.width) * 0.5
-        );
-        const float originY = static_cast<float>(
-            centeredWallpaperY(transform.origin.y, plan.height)
-        );
-        const Matrix world = multiply(
-            translation(originX, originY, float(transform.origin.z)),
-            multiply(
-                rotationZ(-checkedFloat(transform.angles.z, "Text Z angle")),
-                multiply(
-                    rotationY(checkedFloat(transform.angles.y, "Text Y angle")),
-                    multiply(
-                        rotationX(-checkedFloat(transform.angles.x, "Text X angle")),
-                        scaling(
-                            checkedFloat(transform.scale.x, "Text scale X"),
-                            checkedFloat(transform.scale.y, "Text scale Y"),
-                            checkedFloat(transform.scale.z, "Text scale Z")
-                        )
-                    )
-                )
-            )
-        );
         const Matrix alignment = translation(
             checkedFloat(alignmentX, "Text horizontal alignment"),
             checkedFloat(alignmentY, "Text vertical alignment"),
             0.0F
         );
-        if (!camera.orthographicViewProjection) {
-            throw Error(
-                ErrorCode::internalFailure,
-                "Scene orthographic camera was not prepared"
+        Matrix modelViewProjection;
+        if (command.localSpace) {
+            const float width = static_cast<float>(destination.width);
+            const float height = static_cast<float>(destination.height);
+            const Matrix localProjection = orthographic(
+                0.0F, width, 0.0F, height, -1.0F, 1.0F
+            );
+            modelViewProjection = multiply(
+                localProjection,
+                multiply(
+                    translation(width * 0.5F, height * 0.5F, 0.0F),
+                    alignment
+                )
+            );
+        } else {
+            const float originX = static_cast<float>(
+                transform.origin.x - static_cast<double>(plan.width) * 0.5
+            );
+            const float originY = static_cast<float>(
+                centeredWallpaperY(transform.origin.y, plan.height)
+            );
+            const Matrix world = multiply(
+                translation(originX, originY, float(transform.origin.z)),
+                multiply(
+                    rotationZ(-checkedFloat(transform.angles.z, "Text Z angle")),
+                    multiply(
+                        rotationY(checkedFloat(transform.angles.y, "Text Y angle")),
+                        multiply(
+                            rotationX(-checkedFloat(transform.angles.x, "Text X angle")),
+                            scaling(
+                                checkedFloat(transform.scale.x, "Text scale X"),
+                                checkedFloat(transform.scale.y, "Text scale Y"),
+                                checkedFloat(transform.scale.z, "Text scale Z")
+                            )
+                        )
+                    )
+                )
+            );
+            if (!camera.orthographicViewProjection) {
+                throw Error(
+                    ErrorCode::internalFailure,
+                    "Scene orthographic camera was not prepared"
+                );
+            }
+            modelViewProjection = multiply(
+                *camera.orthographicViewProjection,
+                multiply(world, alignment)
             );
         }
-        const Matrix modelViewProjection = multiply(
-            *camera.orthographicViewProjection,
-            multiply(world, alignment)
-        );
         validateMatrix(modelViewProjection, "Text model-view-projection matrix");
         return {
             .destination = command.destination,

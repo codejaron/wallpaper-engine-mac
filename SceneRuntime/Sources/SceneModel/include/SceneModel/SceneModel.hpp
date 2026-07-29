@@ -389,6 +389,13 @@ struct ImageObject {
 };
 
 struct TextObject {
+    // Text is rasterized by SceneGL, then fed through the same authored
+    // effect graph as an image layer. The synthetic source model carries the
+    // official passthrough material used to enter that graph without adding a
+    // second shader implementation for text.
+    std::shared_ptr<const Model> effectSourceModel;
+    std::shared_ptr<const Material> magentaCompositeTintMaterial;
+    std::vector<ImageEffect> effects;
     DynamicValue text;
     std::string font;
     DynamicValue pointSize;

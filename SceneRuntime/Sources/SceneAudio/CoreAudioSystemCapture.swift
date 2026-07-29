@@ -23,8 +23,6 @@ func makeSystemAudioAggregateDescription(
         kAudioAggregateDeviceNameKey: "Open Wallpaper Engine System Audio",
         kAudioAggregateDeviceUIDKey: aggregateUUID.uuidString,
         kAudioAggregateDeviceIsPrivateKey: true,
-        kAudioAggregateDeviceIsStackedKey: false,
-        kAudioAggregateDeviceSubDeviceListKey: [],
         kAudioAggregateDeviceTapAutoStartKey: false,
         kAudioAggregateDeviceTapListKey: [[
             kAudioSubTapUIDKey: tapUUID.uuidString,

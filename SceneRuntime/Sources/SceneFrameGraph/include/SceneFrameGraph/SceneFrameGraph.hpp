@@ -343,6 +343,10 @@ struct FrameTextCommand {
     std::size_t textIndex = 0;
     int objectId = 0;
     FrameResourceRef destination;
+    // Text without effects is drawn directly in scene space. Effect-backed
+    // text is first rasterized into its local layer framebuffer, then enters
+    // the ordinary image effect pipeline.
+    bool localSpace = false;
 };
 
 struct FrameParticleCommand {

@@ -92,6 +92,108 @@ final class PresentationViewportTests: XCTestCase {
         XCTAssertEqual(result.mapped_pointer_y, 0.25, accuracy: 1e-12)
     }
 
+    func testAutomaticPreservesLandscapeWidthAndMapsPointerThroughItsUVs() {
+        var display = viewport(
+            canvasWidth: 16,
+            canvasHeight: 10,
+            x: 0,
+            width: 16,
+            drawableWidth: 16,
+            drawableHeight: 10
+        )
+        var topRight = WESceneGLTestPresentationResult()
+        var bottomLeft = WESceneGLTestPresentationResult()
+
+        XCTAssertEqual(
+            transform(
+                sourceWidth: 16,
+                sourceHeight: 9,
+                viewport: &display,
+                scaling: WE_SCENE_PRESENTATION_AUTOMATIC,
+                pointerX: 1,
+                pointerY: 1,
+                result: &topRight
+            ),
+            1
+        )
+        XCTAssertEqual(
+            transform(
+                sourceWidth: 16,
+                sourceHeight: 9,
+                viewport: &display,
+                scaling: WE_SCENE_PRESENTATION_AUTOMATIC,
+                pointerX: 0,
+                pointerY: 0,
+                result: &bottomLeft
+            ),
+            1
+        )
+
+        XCTAssertEqual(topRight.has_content, 1)
+        assertRect(topRight.destination, x: 0, y: 0, width: 16, height: 10)
+        XCTAssertEqual(topRight.mapped_pointer_x, 1, accuracy: 1e-12)
+        XCTAssertEqual(topRight.mapped_pointer_y, 19.0 / 18.0, accuracy: 1e-12)
+        XCTAssertEqual(bottomLeft.mapped_pointer_x, 0, accuracy: 1e-12)
+        XCTAssertEqual(bottomLeft.mapped_pointer_y, -1.0 / 18.0, accuracy: 1e-12)
+    }
+
+    func testAutomaticPresenterKeepsBothSideEdgesAndClampsTheAddedAxis() {
+        var display = viewport(
+            canvasWidth: 16,
+            canvasHeight: 10,
+            x: 0,
+            width: 16,
+            drawableWidth: 16,
+            drawableHeight: 10
+        )
+        var pixels = [UInt8](repeating: 0, count: 16 * 10 * 4)
+
+        XCTAssertEqual(
+            we_scene_gl_test_present_pattern(
+                16,
+                9,
+                &display,
+                Int32(WE_SCENE_PRESENTATION_AUTOMATIC.rawValue),
+                &pixels,
+                pixels.count
+            ),
+            1
+        )
+
+        XCTAssertEqual(pixel(in: pixels, width: 16, x: 0, y: 5), [255, 0, 0, 255])
+        XCTAssertEqual(pixel(in: pixels, width: 16, x: 15, y: 5), [0, 255, 0, 255])
+        XCTAssertEqual(pixel(in: pixels, width: 16, x: 8, y: 0), [0, 0, 255, 255])
+        XCTAssertEqual(pixel(in: pixels, width: 16, x: 8, y: 9), [255, 255, 0, 255])
+    }
+
+    func testAutomaticPreservesHeightAcrossOppositeOrientations() {
+        var portraitDisplay = viewport(
+            canvasWidth: 5,
+            canvasHeight: 8,
+            x: 0,
+            width: 5,
+            drawableWidth: 5,
+            drawableHeight: 8
+        )
+        var topRight = WESceneGLTestPresentationResult()
+
+        XCTAssertEqual(
+            transform(
+                sourceWidth: 4,
+                sourceHeight: 2,
+                viewport: &portraitDisplay,
+                scaling: WE_SCENE_PRESENTATION_AUTOMATIC,
+                pointerX: 1,
+                pointerY: 1,
+                result: &topRight
+            ),
+            1
+        )
+
+        XCTAssertEqual(topRight.mapped_pointer_x, 0.65625, accuracy: 1e-12)
+        XCTAssertEqual(topRight.mapped_pointer_y, 1, accuracy: 1e-12)
+    }
+
     func testBlitReadsTheSelectedHalfWithUserVisibleVerticalOrientation() {
         var left = viewport(canvasWidth: 8, canvasHeight: 4, x: 0, width: 4)
         var right = viewport(canvasWidth: 8, canvasHeight: 4, x: 4, width: 4)
@@ -271,6 +373,16 @@ final class PresentationViewportTests: XCTestCase {
 
     private func repeatedPixel(_ pixel: [UInt8], count: Int) -> [UInt8] {
         Array(repeating: pixel, count: count).flatMap { $0 }
+    }
+
+    private func pixel(
+        in pixels: [UInt8],
+        width: Int,
+        x: Int,
+        y: Int
+    ) -> [UInt8] {
+        let offset = (y * width + x) * 4
+        return Array(pixels[offset ..< offset + 4])
     }
 
     private func sideBySideRows(

@@ -188,6 +188,7 @@ struct PerformancePage: SettingsPage {
                 }
                 .disabled(true)
                 Picker("Scene scaling", selection: $viewModel.settings.scenePresentationScaling) {
+                    Text("Automatic").tag(GSScenePresentationScaling.automatic)
                     Text("Stretch").tag(GSScenePresentationScaling.stretch)
                     Text("Aspect fit").tag(GSScenePresentationScaling.aspectFit)
                     Text("Aspect fill").tag(GSScenePresentationScaling.aspectFill)

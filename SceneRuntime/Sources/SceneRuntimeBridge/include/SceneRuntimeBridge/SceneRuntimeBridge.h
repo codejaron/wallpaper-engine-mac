@@ -140,6 +140,7 @@ typedef enum WEScenePresentationScaling {
     WE_SCENE_PRESENTATION_STRETCH = 0,
     WE_SCENE_PRESENTATION_ASPECT_FIT = 1,
     WE_SCENE_PRESENTATION_ASPECT_FILL = 2,
+    WE_SCENE_PRESENTATION_AUTOMATIC = 3,
 } WEScenePresentationScaling;
 
 // One display's rectangle inside a bottom-left-origin virtual desktop canvas.

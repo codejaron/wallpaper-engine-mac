@@ -47,6 +47,7 @@ enum GSVideoFramework: String, CaseIterable, Identifiable, Codable {
 
 enum GSScenePresentationScaling: String, CaseIterable, Identifiable, Codable {
     var id: Self { self }
+    case automatic
     case stretch
     case aspectFit
     case aspectFill
@@ -63,7 +64,7 @@ enum GSLogLevel: String, CaseIterable, Identifiable, Codable {
 }
 
 struct GlobalSettings: Codable, Equatable {
-    private static let currentScenePresentationSettingsVersion = 2
+    private static let currentScenePresentationSettingsVersion = 3
     
     // MARK: Playback
     var otherApplicationFocused = GSPlayback.keepRunning
@@ -83,7 +84,7 @@ struct GlobalSettings: Codable, Equatable {
     // MARK: Scene presentation
     // Per-screen rendering remains the default. Span mode opts into a shared
     // virtual canvas whose slices are presented by each display window.
-    var scenePresentationScaling = GSScenePresentationScaling.aspectFill
+    var scenePresentationScaling = GSScenePresentationScaling.automatic
     var sceneSpanAcrossScreens = false
     private var scenePresentationSettingsVersion =
         Self.currentScenePresentationSettingsVersion
@@ -147,7 +148,7 @@ struct GlobalSettings: Codable, Equatable {
         textureResolution = .automatic
         reflections = false
         fps = 30
-        scenePresentationScaling = .aspectFill
+        scenePresentationScaling = .automatic
         sceneSpanAcrossScreens = false
         scenePresentationSettingsVersion =
             Self.currentScenePresentationSettingsVersion
@@ -205,17 +206,23 @@ struct GlobalSettings: Codable, Equatable {
             GSScenePresentationScaling.self,
             forKey: .scenePresentationScaling
         )
-        // Version 1 incorrectly made stretch the compatibility default. That
-        // distorts every scene whose authored canvas and display have different
-        // aspect ratios. Wallpaper Engine preserves aspect ratio and crops the
-        // overflow, so migrate that faulty default once. An explicit aspect-fit
-        // selection remains meaningful; version 2+ selections are authoritative.
-        if storedScenePresentationVersion < 2 {
-            scenePresentationScaling = storedScenePresentationScaling == .aspectFit
-                ? .aspectFit
-                : .aspectFill
+        // Earlier builds successively used aspect-fill and stretch as their
+        // implicit defaults because the engine's fourth, orientation-aware
+        // Default mode was missing. Migrate only the value that represented the
+        // default in each version; preserve the other explicit selections.
+        let previousImplicitDefault: GSScenePresentationScaling?
+        switch storedScenePresentationVersion {
+        case ...0: previousImplicitDefault = .aspectFill
+        case 1: previousImplicitDefault = .stretch
+        case 2: previousImplicitDefault = .aspectFill
+        default: previousImplicitDefault = nil
+        }
+        if let previousImplicitDefault,
+           storedScenePresentationScaling == previousImplicitDefault {
+            scenePresentationScaling = .automatic
         } else {
-            scenePresentationScaling = storedScenePresentationScaling ?? .aspectFill
+            scenePresentationScaling =
+                storedScenePresentationScaling ?? .automatic
         }
         sceneSpanAcrossScreens = try container.decodeIfPresent(
             Bool.self, forKey: .sceneSpanAcrossScreens

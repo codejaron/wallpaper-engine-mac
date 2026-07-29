@@ -81,6 +81,8 @@ std::optional<gl::PresentationScaling> presentationScaling(
             return gl::PresentationScaling::aspectFit;
         case WE_SCENE_PRESENTATION_ASPECT_FILL:
             return gl::PresentationScaling::aspectFill;
+        case WE_SCENE_PRESENTATION_AUTOMATIC:
+            return gl::PresentationScaling::automatic;
     }
     return std::nullopt;
 }

@@ -37,6 +37,9 @@ bool presentationScaling(int value, gl::PresentationScaling& scaling) {
         case 2:
             scaling = gl::PresentationScaling::aspectFill;
             return true;
+        case 3:
+            scaling = gl::PresentationScaling::automatic;
+            return true;
         default:
             return false;
     }
@@ -51,6 +54,41 @@ WESceneGLTestPresentationRect presentationRect(
         .width = rect.width,
         .height = rect.height,
     };
+}
+
+void paintPresentationPattern(
+    std::uint32_t width,
+    std::uint32_t height
+) {
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // The scene framebuffer stores the user-visible top row at GL y=0.
+    glScissor(0, 0, 1, static_cast<GLsizei>(height));
+    glClearColor(1, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glScissor(
+        static_cast<GLint>(width - 1),
+        0,
+        1,
+        static_cast<GLsizei>(height)
+    );
+    glClearColor(0, 1, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glScissor(1, 0, static_cast<GLsizei>(width - 2), 1);
+    glClearColor(0, 0, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glScissor(
+        1,
+        static_cast<GLint>(height - 1),
+        static_cast<GLsizei>(width - 2),
+        1
+    );
+    glClearColor(1, 1, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_SCISSOR_TEST);
 }
 
 }  // namespace
@@ -99,13 +137,107 @@ extern "C" int we_scene_gl_test_presentation_transform(
         );
         const auto mapped = transform.map({pointer_x, pointer_y});
         const auto slice = transform.slice();
+        const auto edgeClampedSlice = transform.edgeClampedSlice();
         *result = {
             .mapped_pointer_x = mapped.x,
             .mapped_pointer_y = mapped.y,
-            .has_content = slice.hasContent ? 1 : 0,
+            .has_content = slice.hasContent || edgeClampedSlice ? 1 : 0,
             .source = presentationRect(slice.source),
-            .destination = presentationRect(slice.destination),
+            .destination = presentationRect(
+                edgeClampedSlice
+                    ? edgeClampedSlice->destination
+                    : slice.destination
+            ),
         };
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
+extern "C" int we_scene_gl_test_present_pattern(
+    uint32_t source_width,
+    uint32_t source_height,
+    const WESceneGLTestPresentationViewport* viewport,
+    int scaling,
+    uint8_t* rgba,
+    size_t length
+) {
+    try {
+        if (source_width < 4 || source_height < 2 || viewport == nullptr ||
+            rgba == nullptr) {
+            return 0;
+        }
+        gl::PresentationScaling mode;
+        if (!presentationScaling(scaling, mode)) return 0;
+        const auto nativeViewport = presentationViewport(*viewport);
+        gl::validatePresentationViewport(nativeViewport);
+        if (nativeViewport.drawableWidth >
+            std::numeric_limits<size_t>::max() / 4 /
+                nativeViewport.drawableHeight) {
+            return 0;
+        }
+        const size_t expected = static_cast<size_t>(
+            nativeViewport.drawableWidth
+        ) * nativeViewport.drawableHeight * 4;
+        if (length != expected) return 0;
+
+        gl::Device device;
+        gl::EdgeClampedPresentationRenderer presenter;
+        auto session = device.activate();
+        auto source = session.createFramebuffer(
+            gl::PixelFormat::rgba8,
+            source_width,
+            source_height,
+            gl::TextureWrap::clampToEdge
+        );
+        auto destination = session.createFramebuffer(
+            gl::PixelFormat::rgba8,
+            nativeViewport.drawableWidth,
+            nativeViewport.drawableHeight,
+            gl::TextureWrap::clampToEdge
+        );
+
+        glBindFramebuffer(GL_FRAMEBUFFER, source.framebuffer);
+        paintPresentationPattern(source_width, source_height);
+        glBindFramebuffer(GL_FRAMEBUFFER, destination.framebuffer);
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_BLEND);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+
+        const auto transform = gl::makePresentationTransform(
+            source_width, source_height, nativeViewport, mode
+        );
+        const auto edgeClampedSlice = transform.edgeClampedSlice();
+        const auto slice = transform.slice();
+        if (edgeClampedSlice) {
+            presenter.present(
+                session,
+                source,
+                destination.framebuffer,
+                GL_COLOR_ATTACHMENT0,
+                *edgeClampedSlice,
+                GL_NEAREST
+            );
+        } else if (slice.hasContent) {
+            gl::blitWallpaperEngineOutput(
+                source,
+                destination.framebuffer,
+                GL_COLOR_ATTACHMENT0,
+                slice,
+                GL_NEAREST
+            );
+        }
+        session.checkError(
+            gl::ErrorCode::draw,
+            "testing orientation-aware presentation"
+        );
+        session.readRGBA8(destination, std::span<uint8_t>(rgba, length));
+        presenter.release(session);
+        session.destroyFramebuffer(destination);
+        session.destroyFramebuffer(source);
         return 1;
     } catch (...) {
         return 0;

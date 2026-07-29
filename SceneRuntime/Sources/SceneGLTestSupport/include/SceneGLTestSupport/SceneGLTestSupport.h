@@ -67,6 +67,14 @@ int we_scene_gl_test_blit_presentation_slice(
     uint8_t* rgba,
     size_t length
 );
+int we_scene_gl_test_present_pattern(
+    uint32_t source_width,
+    uint32_t source_height,
+    const WESceneGLTestPresentationViewport* viewport,
+    int scaling,
+    uint8_t* rgba,
+    size_t length
+);
 #ifdef __cplusplus
 }
 #endif

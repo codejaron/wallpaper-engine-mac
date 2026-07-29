@@ -214,6 +214,7 @@ struct ScenePresentationLayout: Equatable {
 
     var bridgeScaling: WEScenePresentationScaling {
         switch scaling {
+        case .automatic: return WE_SCENE_PRESENTATION_AUTOMATIC
         case .stretch: return WE_SCENE_PRESENTATION_STRETCH
         case .aspectFit: return WE_SCENE_PRESENTATION_ASPECT_FIT
         case .aspectFill: return WE_SCENE_PRESENTATION_ASPECT_FILL
@@ -526,7 +527,7 @@ private final class SceneOpenGLView: NSOpenGLView {
     private var requestedPropertyOverrides: [String: ScenePropertyValue] = [:]
     private var presentation = ScenePresentationLayout(
         spanAcrossScreens: false,
-        scaling: .aspectFill,
+        scaling: .automatic,
         canvasWidth: 0,
         canvasHeight: 0,
         viewportX: 0,

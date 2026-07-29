@@ -18,30 +18,6 @@ void blitWallpaperEngineOutput(
     GLenum filter
 );
 
-// Samples a Wallpaper Engine framebuffer through UVs that may extend beyond
-// the source bounds. OpenGL edge clamping reproduces the engine's default
-// orientation-aware presentation without cropping preserved authored content.
-class EdgeClampedPresentationRenderer final {
-public:
-    void present(
-        Device::Session& session,
-        const FramebufferResource& source,
-        GLuint destinationFramebuffer,
-        GLenum destinationBuffer,
-        const EdgeClampedPresentationSlice& slice,
-        GLenum filter
-    );
-    void release(Device::Session& session) noexcept;
-
-private:
-    void ensurePipeline(Device::Session& session);
-
-    GLuint program_ = 0;
-    GLuint vertexArray_ = 0;
-    GLint sourceTextureLocation_ = -1;
-    GLint sourceUVLocation_ = -1;
-};
-
 }  // namespace we::scene::gl
 
 #endif

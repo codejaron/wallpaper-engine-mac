@@ -207,9 +207,9 @@ struct GlobalSettings: Codable, Equatable {
             forKey: .scenePresentationScaling
         )
         // Earlier builds successively used aspect-fill and stretch as their
-        // implicit defaults because the engine's fourth, orientation-aware
-        // Default mode was missing. Migrate only the value that represented the
-        // default in each version; preserve the other explicit selections.
+        // implicit defaults before Automatic named Wallpaper Engine's Windows
+        // default Cover behavior explicitly. Migrate only the value that
+        // represented the default in each version; preserve explicit choices.
         let previousImplicitDefault: GSScenePresentationScaling?
         switch storedScenePresentationVersion {
         case ...0: previousImplicitDefault = .aspectFill

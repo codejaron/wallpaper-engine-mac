@@ -92,7 +92,7 @@ final class PresentationViewportTests: XCTestCase {
         XCTAssertEqual(result.mapped_pointer_y, 0.25, accuracy: 1e-12)
     }
 
-    func testAutomaticPreservesLandscapeWidthAndMapsPointerThroughItsUVs() {
+    func testAutomaticUsesWindowsCoverCropAndMapsPointerThroughIt() {
         var display = viewport(
             canvasWidth: 16,
             canvasHeight: 10,
@@ -130,14 +130,15 @@ final class PresentationViewportTests: XCTestCase {
         )
 
         XCTAssertEqual(topRight.has_content, 1)
+        assertRect(topRight.source, x: 1, y: 0, width: 14, height: 9)
         assertRect(topRight.destination, x: 0, y: 0, width: 16, height: 10)
-        XCTAssertEqual(topRight.mapped_pointer_x, 1, accuracy: 1e-12)
-        XCTAssertEqual(topRight.mapped_pointer_y, 19.0 / 18.0, accuracy: 1e-12)
-        XCTAssertEqual(bottomLeft.mapped_pointer_x, 0, accuracy: 1e-12)
-        XCTAssertEqual(bottomLeft.mapped_pointer_y, -1.0 / 18.0, accuracy: 1e-12)
+        XCTAssertEqual(topRight.mapped_pointer_x, 15.0 / 16.0, accuracy: 1e-12)
+        XCTAssertEqual(topRight.mapped_pointer_y, 1, accuracy: 1e-12)
+        XCTAssertEqual(bottomLeft.mapped_pointer_x, 1.0 / 16.0, accuracy: 1e-12)
+        XCTAssertEqual(bottomLeft.mapped_pointer_y, 0, accuracy: 1e-12)
     }
 
-    func testAutomaticPresenterKeepsBothSideEdgesAndClampsTheAddedAxis() {
+    func testAutomaticPresenterCropsSideEdgesWithoutStretchingRows() {
         var display = viewport(
             canvasWidth: 16,
             canvasHeight: 10,
@@ -160,13 +161,13 @@ final class PresentationViewportTests: XCTestCase {
             1
         )
 
-        XCTAssertEqual(pixel(in: pixels, width: 16, x: 0, y: 5), [255, 0, 0, 255])
-        XCTAssertEqual(pixel(in: pixels, width: 16, x: 15, y: 5), [0, 255, 0, 255])
+        XCTAssertEqual(pixel(in: pixels, width: 16, x: 0, y: 5), [0, 0, 0, 255])
+        XCTAssertEqual(pixel(in: pixels, width: 16, x: 15, y: 5), [0, 0, 0, 255])
         XCTAssertEqual(pixel(in: pixels, width: 16, x: 8, y: 0), [0, 0, 255, 255])
         XCTAssertEqual(pixel(in: pixels, width: 16, x: 8, y: 9), [255, 255, 0, 255])
     }
 
-    func testAutomaticPreservesHeightAcrossOppositeOrientations() {
+    func testAutomaticCoverCropsLandscapeSourceForPortraitDisplay() {
         var portraitDisplay = viewport(
             canvasWidth: 5,
             canvasHeight: 8,
@@ -190,7 +191,7 @@ final class PresentationViewportTests: XCTestCase {
             1
         )
 
-        XCTAssertEqual(topRight.mapped_pointer_x, 0.65625, accuracy: 1e-12)
+        XCTAssertEqual(topRight.mapped_pointer_x, 0.5, accuracy: 1e-12)
         XCTAssertEqual(topRight.mapped_pointer_y, 1, accuracy: 1e-12)
     }
 

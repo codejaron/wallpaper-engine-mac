@@ -86,17 +86,6 @@ struct PresentationSlice final {
     PresentationRect destination;
 };
 
-// Texture coordinates for Wallpaper Engine's default orientation-aware
-// presentation mode. Coordinates use logical bottom-left source space and may
-// extend outside [0, 1]; the presenter clamps them to the source texture edge.
-struct EdgeClampedPresentationSlice final {
-    double sourceLeft = 0.0;
-    double sourceBottom = 0.0;
-    double sourceRight = 1.0;
-    double sourceTop = 1.0;
-    PresentationRect destination;
-};
-
 // Pure scene-to-canvas transform shared by pointer mapping and presentation.
 // Construct through makePresentationTransform so dimensions and bounds are
 // validated before map() or slice() is used.
@@ -106,16 +95,9 @@ struct PresentationTransform final {
     PresentationViewport viewport;
     PresentationRect source;
     PresentationRect canvasDestination;
-    bool edgeClamped = false;
-    double canvasSourceX = 0.0;
-    double canvasSourceY = 0.0;
-    double canvasSourceWidth = 0.0;
-    double canvasSourceHeight = 0.0;
 
     [[nodiscard]] FrameVector2 map(FrameVector2 drawablePoint) const;
     [[nodiscard]] PresentationSlice slice() const;
-    [[nodiscard]] std::optional<EdgeClampedPresentationSlice>
-    edgeClampedSlice() const;
 };
 
 [[nodiscard]] PresentationViewport drawablePresentationViewport(

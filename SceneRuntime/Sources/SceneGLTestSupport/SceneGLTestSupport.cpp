@@ -137,17 +137,12 @@ extern "C" int we_scene_gl_test_presentation_transform(
         );
         const auto mapped = transform.map({pointer_x, pointer_y});
         const auto slice = transform.slice();
-        const auto edgeClampedSlice = transform.edgeClampedSlice();
         *result = {
             .mapped_pointer_x = mapped.x,
             .mapped_pointer_y = mapped.y,
-            .has_content = slice.hasContent || edgeClampedSlice ? 1 : 0,
+            .has_content = slice.hasContent ? 1 : 0,
             .source = presentationRect(slice.source),
-            .destination = presentationRect(
-                edgeClampedSlice
-                    ? edgeClampedSlice->destination
-                    : slice.destination
-            ),
+            .destination = presentationRect(slice.destination),
         };
         return 1;
     } catch (...) {
@@ -183,7 +178,6 @@ extern "C" int we_scene_gl_test_present_pattern(
         if (length != expected) return 0;
 
         gl::Device device;
-        gl::EdgeClampedPresentationRenderer presenter;
         auto session = device.activate();
         auto source = session.createFramebuffer(
             gl::PixelFormat::rgba8,
@@ -210,18 +204,8 @@ extern "C" int we_scene_gl_test_present_pattern(
         const auto transform = gl::makePresentationTransform(
             source_width, source_height, nativeViewport, mode
         );
-        const auto edgeClampedSlice = transform.edgeClampedSlice();
         const auto slice = transform.slice();
-        if (edgeClampedSlice) {
-            presenter.present(
-                session,
-                source,
-                destination.framebuffer,
-                GL_COLOR_ATTACHMENT0,
-                *edgeClampedSlice,
-                GL_NEAREST
-            );
-        } else if (slice.hasContent) {
+        if (slice.hasContent) {
             gl::blitWallpaperEngineOutput(
                 source,
                 destination.framebuffer,
@@ -232,10 +216,9 @@ extern "C" int we_scene_gl_test_present_pattern(
         }
         session.checkError(
             gl::ErrorCode::draw,
-            "testing orientation-aware presentation"
+            "testing cover presentation"
         );
         session.readRGBA8(destination, std::span<uint8_t>(rgba, length));
-        presenter.release(session);
         session.destroyFramebuffer(destination);
         session.destroyFramebuffer(source);
         return 1;

@@ -882,6 +882,27 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertNotEqual(loud.maxY, quiet.maxY)
     }
 
+    func testPassthroughCaptureUsesWallpaperEngineCompositeTargetOrientation() throws {
+        let loaded = try loadFixture(
+            fragmentSource: textureOnlyFragmentShader,
+            textureData: makeRGBA8Texture2x2(pixels: [
+                255, 0, 0, 255, 255, 0, 0, 255,
+                0, 0, 255, 255, 0, 0, 255, 255,
+            ]),
+            includePassthroughComposite: true
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            [0, 0, 255, 255, 0, 0, 255, 255,
+             255, 0, 0, 255, 255, 0, 0, 255],
+            "A compose-layer capture must pair the upper scene edge with the composite target's upper V edge"
+        )
+    }
+
     func testMediaSnapshotCopiesBorrowedStateAndDeduplicatesRevision() throws {
         let loaded = try loadFixture(
             fragmentSource: validFragmentShader,
@@ -2990,7 +3011,8 @@ final class FrameExecutorPixelTests: XCTestCase {
         textureAnimationScript: String? = nil,
         sceneTexturePropertyKey: String? = nil,
         hostTextureNames: [String] = [],
-        textureInProjectDirectory: Bool = false
+        textureInProjectDirectory: Bool = false,
+        includePassthroughComposite: Bool = false
     ) throws -> RuntimePipeline {
         let fixture = try makeFixture(
             fragmentSource: fragmentSource,
@@ -3029,7 +3051,8 @@ final class FrameExecutorPixelTests: XCTestCase {
             textureAnimationScript: textureAnimationScript,
             sceneTexturePropertyKey: sceneTexturePropertyKey,
             hostTextureNames: hostTextureNames,
-            textureInProjectDirectory: textureInProjectDirectory
+            textureInProjectDirectory: textureInProjectDirectory,
+            includePassthroughComposite: includePassthroughComposite
         )
         do {
             var error: WESceneRuntimeErrorRef?
@@ -3776,7 +3799,8 @@ final class FrameExecutorPixelTests: XCTestCase {
         textureAnimationScript: String? = nil,
         sceneTexturePropertyKey: String? = nil,
         hostTextureNames: [String] = [],
-        textureInProjectDirectory: Bool = false
+        textureInProjectDirectory: Bool = false,
+        includePassthroughComposite: Bool = false
     ) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -3848,6 +3872,38 @@ final class FrameExecutorPixelTests: XCTestCase {
         try Data(vertexShader.utf8).write(
             to: shaders.appendingPathComponent("broken.vert")
         )
+        if includePassthroughComposite {
+            try Data("""
+            uniform mat4 g_ModelViewProjectionMatrix;
+            attribute vec3 a_Position;
+            attribute vec2 a_TexCoord;
+            varying vec3 v_ScreenCoord;
+            void main() {
+                v_ScreenCoord = (g_ModelViewProjectionMatrix
+                    * vec4(a_Position, 1.0)).xyw;
+                gl_Position = vec4(a_TexCoord * 2.0 - 1.0, 0.0, 1.0);
+            }
+            """.utf8).write(
+                to: shaders.appendingPathComponent("composelayer.vert")
+            )
+            try Data("""
+            uniform sampler2D g_Texture0;
+            varying vec3 v_ScreenCoord;
+            void main() {
+                vec2 coordinate = v_ScreenCoord.xy / v_ScreenCoord.z
+                    * 0.5 + 0.5;
+                gl_FragColor = texture(g_Texture0, coordinate);
+            }
+            """.utf8).write(
+                to: shaders.appendingPathComponent("composelayer.frag")
+            )
+            try Data(vertexShader.utf8).write(
+                to: shaders.appendingPathComponent("composite-consumer.vert")
+            )
+            try Data(textureOnlyFragmentShader.utf8).write(
+                to: shaders.appendingPathComponent("composite-consumer.frag")
+            )
+        }
         if compositeTintColor != nil {
             for name in ["composite-effect", "composite-tint", "composite-blend"] {
                 try Data(vertexShader.utf8).write(
@@ -4110,6 +4166,26 @@ final class FrameExecutorPixelTests: XCTestCase {
                 "volume": 0.25,
             ])
         }
+        if includePassthroughComposite {
+            objects.append([
+                "dependencies": [1],
+                "id": 2,
+                "image": "models/passthrough.json",
+                "name": "Hidden compose-layer capture",
+                "origin": defaultOrigin,
+                "size": "2 2",
+                "visible": false,
+            ])
+            objects.append([
+                "dependencies": [2],
+                "id": 3,
+                "image": "models/composite-consumer.json",
+                "name": "Composite consumer",
+                "origin": defaultOrigin,
+                "size": "2 2",
+                "visible": true,
+            ])
+        }
         let scene: [String: Any] = [
             "camera": camera,
             "general": general,
@@ -4277,6 +4353,37 @@ final class FrameExecutorPixelTests: XCTestCase {
                 ("materials/static.tex", makeRGBA8Texture2x2(pixel: [0, 0, 255, 255])),
                 ("models/static.json", try json([
                     "material": "materials/static.json",
+                ])),
+            ])
+        }
+        if includePassthroughComposite {
+            entries.append(contentsOf: [
+                ("materials/passthrough.json", try json([
+                    "passes": [[
+                        "blending": "normal",
+                        "cullmode": "nocull",
+                        "depthtest": "disabled",
+                        "depthwrite": "disabled",
+                        "shader": "composelayer",
+                        "textures": ["_rt_FullFrameBuffer"],
+                    ]],
+                ])),
+                ("materials/composite-consumer.json", try json([
+                    "passes": [[
+                        "blending": "normal",
+                        "cullmode": "nocull",
+                        "depthtest": "disabled",
+                        "depthwrite": "disabled",
+                        "shader": "composite-consumer",
+                        "textures": ["_rt_imageLayerComposite_2_a"],
+                    ]],
+                ])),
+                ("models/passthrough.json", try json([
+                    "material": "materials/passthrough.json",
+                    "passthrough": true,
+                ])),
+                ("models/composite-consumer.json", try json([
+                    "material": "materials/composite-consumer.json",
                 ])),
             ])
         }

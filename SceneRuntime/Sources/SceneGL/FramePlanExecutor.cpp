@@ -660,8 +660,6 @@ PresentationTransform makePresentationTransform(
             .width = viewport.canvasWidth,
             .height = viewport.canvasHeight,
         },
-        .canvasSourceWidth = static_cast<double>(sourceWidth),
-        .canvasSourceHeight = static_cast<double>(sourceHeight),
     };
     switch (scaling) {
         case PresentationScaling::stretch:
@@ -688,6 +686,10 @@ PresentationTransform makePresentationTransform(
                 (viewport.canvasHeight - result.canvasDestination.height) / 2;
             break;
         }
+        // Wallpaper Engine on Windows calls this default alignment "Cover":
+        // preserve aspect ratio, fill the display, and crop the overflow.
+        // Automatic is the host-facing name for that compatibility default.
+        case PresentationScaling::automatic:
         case PresentationScaling::aspectFill: {
             const double sourceAspect =
                 static_cast<double>(sourceWidth) / sourceHeight;
@@ -715,45 +717,6 @@ PresentationTransform makePresentationTransform(
             }
             break;
         }
-        case PresentationScaling::automatic: {
-            // Orientation conditions follow Almamu/linux-wallpaperengine's
-            // WallpaperState::DefaultUVs at b016d7d1fdcf4e5fd2f9c9fa420a8aaa07fee02d
-            // (GPL-3.0), expressed here in this transform's source-pixel space.
-            // Wallpaper Engine's default mode is orientation-aware. Displays
-            // with the same broad orientation preserve the authored horizontal
-            // range; displays with the opposite orientation preserve the
-            // authored vertical range. The remaining axis is sampled outside
-            // the texture and clamped at presentation time.
-            result.edgeClamped = true;
-            const bool fitSourceHeight =
-                (viewport.canvasHeight > viewport.canvasWidth &&
-                 sourceWidth >= sourceHeight) ||
-                (viewport.canvasWidth > viewport.canvasHeight &&
-                 sourceHeight > sourceWidth);
-            const bool fitSourceWidth =
-                (viewport.canvasWidth > viewport.canvasHeight &&
-                 sourceWidth >= sourceHeight) ||
-                (viewport.canvasHeight > viewport.canvasWidth &&
-                 sourceHeight > sourceWidth);
-            if (fitSourceHeight) {
-                result.canvasSourceWidth =
-                    static_cast<double>(viewport.canvasWidth) * sourceHeight /
-                    viewport.canvasHeight;
-                result.canvasSourceX =
-                    (static_cast<double>(sourceWidth) -
-                     result.canvasSourceWidth) /
-                    2.0;
-            } else if (fitSourceWidth) {
-                result.canvasSourceHeight =
-                    static_cast<double>(viewport.canvasHeight) * sourceWidth /
-                    viewport.canvasWidth;
-                result.canvasSourceY =
-                    (static_cast<double>(sourceHeight) -
-                     result.canvasSourceHeight) /
-                    2.0;
-            }
-            break;
-        }
         default:
             throw Error(
                 ErrorCode::invalidArgument,
@@ -772,16 +735,6 @@ FrameVector2 PresentationTransform::map(FrameVector2 drawablePoint) const {
         localPixelX * viewport.viewportWidth / viewport.drawableWidth;
     const double canvasPixelY = viewport.viewportY +
         localPixelY * viewport.viewportHeight / viewport.drawableHeight;
-    if (edgeClamped) {
-        const double sourceX = canvasSourceX +
-            canvasPixelX * canvasSourceWidth / viewport.canvasWidth;
-        const double sourceY = canvasSourceY +
-            canvasPixelY * canvasSourceHeight / viewport.canvasHeight;
-        return {
-            sourceX / sourceWidth,
-            sourceY / sourceHeight,
-        };
-    }
     const double contentLeft = canvasDestination.x;
     const double contentBottom = canvasDestination.y;
     const double contentRight = rectEnd(
@@ -809,7 +762,6 @@ FrameVector2 PresentationTransform::map(FrameVector2 drawablePoint) const {
 }
 
 PresentationSlice PresentationTransform::slice() const {
-    if (edgeClamped) return {};
     const PresentationRect display{
         .x = viewport.viewportX,
         .y = viewport.viewportY,
@@ -904,34 +856,6 @@ PresentationSlice PresentationTransform::slice() const {
             .y = destinationBottom,
             .width = destinationRight - destinationLeft,
             .height = destinationTop - destinationBottom,
-        },
-    };
-}
-
-std::optional<EdgeClampedPresentationSlice>
-PresentationTransform::edgeClampedSlice() const {
-    if (!edgeClamped) return std::nullopt;
-
-    const double sourceLeft = canvasSourceX +
-        static_cast<double>(viewport.viewportX) * canvasSourceWidth /
-            viewport.canvasWidth;
-    const double sourceBottom = canvasSourceY +
-        static_cast<double>(viewport.viewportY) * canvasSourceHeight /
-            viewport.canvasHeight;
-    const double sourceRight = canvasSourceX +
-        static_cast<double>(viewport.viewportX + viewport.viewportWidth) *
-            canvasSourceWidth / viewport.canvasWidth;
-    const double sourceTop = canvasSourceY +
-        static_cast<double>(viewport.viewportY + viewport.viewportHeight) *
-            canvasSourceHeight / viewport.canvasHeight;
-    return EdgeClampedPresentationSlice{
-        .sourceLeft = sourceLeft / sourceWidth,
-        .sourceBottom = sourceBottom / sourceHeight,
-        .sourceRight = sourceRight / sourceWidth,
-        .sourceTop = sourceTop / sourceHeight,
-        .destination = {
-            .width = viewport.drawableWidth,
-            .height = viewport.drawableHeight,
         },
     };
 }
@@ -1950,7 +1874,6 @@ struct FramePlanExecutor::Impl final {
         try {
             auto session = device->activate();
             textRenderer.release(session);
-            edgeClampedPresenter.release(session);
             releaseParticleGeometry(session);
             releasePuppetGeometry(session);
             session.destroyFramebuffer(particleRefractSnapshot);
@@ -4011,14 +3934,29 @@ struct FramePlanExecutor::Impl final {
             result.puppetIndices = mesh.indices;
             ensurePuppetGeometry(session);
         } else {
-            result.vertices = {{
-                {{left, bottom, 0}, {0, 0}},
-                {{right, bottom, 0}, {uMax, 0}},
-                {{right, top, 0}, {uMax, vMax}},
-                {{left, bottom, 0}, {0, 0}},
-                {{right, top, 0}, {uMax, vMax}},
-                {{left, top, 0}, {0, vMax}},
-            }};
+            if (pass.geometry == FrameGeometryKind::passthroughCapture) {
+                // Wallpaper Engine's compose-layer vertex shader uses the
+                // position to choose a scene sample and the texcoord to place
+                // that sample in the local composite target. Its GL contract
+                // pairs the scene's upper edge with the target's upper V edge.
+                result.vertices = {{
+                    {{left, bottom, 0}, {0, vMax}},
+                    {{right, bottom, 0}, {uMax, vMax}},
+                    {{right, top, 0}, {uMax, 0}},
+                    {{left, bottom, 0}, {0, vMax}},
+                    {{right, top, 0}, {uMax, 0}},
+                    {{left, top, 0}, {0, 0}},
+                }};
+            } else {
+                result.vertices = {{
+                    {{left, bottom, 0}, {0, 0}},
+                    {{right, bottom, 0}, {uMax, 0}},
+                    {{right, top, 0}, {uMax, vMax}},
+                    {{left, bottom, 0}, {0, 0}},
+                    {{right, top, 0}, {uMax, vMax}},
+                    {{left, top, 0}, {0, vMax}},
+                }};
+            }
             ensureGeometry(session);
         }
         result.positionLocation = glGetAttribLocation(
@@ -6916,7 +6854,6 @@ struct FramePlanExecutor::Impl final {
             presentation,
             scaling
         );
-        const auto edgeClampedSlice = transform.edgeClampedSlice();
         const PresentationSlice slice = transform.slice();
 
         glDisable(GL_SCISSOR_TEST);
@@ -6943,16 +6880,7 @@ struct FramePlanExecutor::Impl final {
         );
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        if (edgeClampedSlice) {
-            edgeClampedPresenter.present(
-                session,
-                output,
-                0,
-                GL_BACK,
-                *edgeClampedSlice,
-                GL_LINEAR
-            );
-        } else if (slice.hasContent) {
+        if (slice.hasContent) {
             blitWallpaperEngineOutput(
                 output,
                 0,
@@ -6975,7 +6903,6 @@ struct FramePlanExecutor::Impl final {
     std::map<std::string, AssetTextureResource> assets;
     std::map<std::string, ProgramResource> programs;
     TextCoverageRenderer textRenderer;
-    EdgeClampedPresentationRenderer edgeClampedPresenter;
     std::map<TextRasterKey, CachedTextRaster> textRasters;
     std::size_t textRasterBytes = 0;
     std::uint64_t textRasterUseSequence = 0;

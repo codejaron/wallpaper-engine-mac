@@ -526,7 +526,7 @@ private final class SceneOpenGLView: NSOpenGLView {
     private var requestedPropertyOverrides: [String: ScenePropertyValue] = [:]
     private var presentation = ScenePresentationLayout(
         spanAcrossScreens: false,
-        scaling: .stretch,
+        scaling: .aspectFill,
         canvasWidth: 0,
         canvasHeight: 0,
         viewportX: 0,

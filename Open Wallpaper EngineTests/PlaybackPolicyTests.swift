@@ -494,18 +494,18 @@ final class PlaybackPolicyTests: XCTestCase {
         )
     }
 
-    func testScenePresentationDefaultsToCompleteFrameStretch() {
-        XCTAssertEqual(GlobalSettings().scenePresentationScaling, .stretch)
+    func testScenePresentationDefaultsToAspectFill() {
+        XCTAssertEqual(GlobalSettings().scenePresentationScaling, .aspectFill)
     }
 
-    func testLegacyAspectFillDefaultMigratesToCompleteFrameStretch() throws {
+    func testLegacyAspectFillRemainsAspectFill() throws {
         let data = try XCTUnwrap(
             #"{"scenePresentationScaling":"aspectFill"}"#.data(using: .utf8)
         )
 
         let settings = try JSONDecoder().decode(GlobalSettings.self, from: data)
 
-        XCTAssertEqual(settings.scenePresentationScaling, .stretch)
+        XCTAssertEqual(settings.scenePresentationScaling, .aspectFill)
     }
 
     func testLegacyAspectFitSelectionIsPreserved() throws {
@@ -528,6 +528,29 @@ final class PlaybackPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(restored.scenePresentationScaling, .aspectFill)
+    }
+
+    func testVersionOneStretchDefaultMigratesToAspectFill() throws {
+        let data = try XCTUnwrap(
+            #"{"scenePresentationScaling":"stretch","scenePresentationSettingsVersion":1}"#
+                .data(using: .utf8)
+        )
+
+        let settings = try JSONDecoder().decode(GlobalSettings.self, from: data)
+
+        XCTAssertEqual(settings.scenePresentationScaling, .aspectFill)
+    }
+
+    func testCurrentVersionExplicitStretchSelectionIsPreserved() throws {
+        var settings = GlobalSettings()
+        settings.scenePresentationScaling = .stretch
+
+        let restored = try JSONDecoder().decode(
+            GlobalSettings.self,
+            from: JSONEncoder().encode(settings)
+        )
+
+        XCTAssertEqual(restored.scenePresentationScaling, .stretch)
     }
 
     func testDisplaySleepAppliesAnUnconditionalPause() {

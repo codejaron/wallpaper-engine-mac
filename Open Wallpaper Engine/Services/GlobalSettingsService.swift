@@ -63,7 +63,7 @@ enum GSLogLevel: String, CaseIterable, Identifiable, Codable {
 }
 
 struct GlobalSettings: Codable, Equatable {
-    private static let currentScenePresentationSettingsVersion = 1
+    private static let currentScenePresentationSettingsVersion = 2
     
     // MARK: Playback
     var otherApplicationFocused = GSPlayback.keepRunning
@@ -83,7 +83,7 @@ struct GlobalSettings: Codable, Equatable {
     // MARK: Scene presentation
     // Per-screen rendering remains the default. Span mode opts into a shared
     // virtual canvas whose slices are presented by each display window.
-    var scenePresentationScaling = GSScenePresentationScaling.stretch
+    var scenePresentationScaling = GSScenePresentationScaling.aspectFill
     var sceneSpanAcrossScreens = false
     private var scenePresentationSettingsVersion =
         Self.currentScenePresentationSettingsVersion
@@ -147,7 +147,7 @@ struct GlobalSettings: Codable, Equatable {
         textureResolution = .automatic
         reflections = false
         fps = 30
-        scenePresentationScaling = .stretch
+        scenePresentationScaling = .aspectFill
         sceneSpanAcrossScreens = false
         scenePresentationSettingsVersion =
             Self.currentScenePresentationSettingsVersion
@@ -205,15 +205,17 @@ struct GlobalSettings: Codable, Equatable {
             GSScenePresentationScaling.self,
             forKey: .scenePresentationScaling
         )
-        // Builds predating this version persisted aspectFill as the implicit
-        // default, which cropped authored content at narrower display ratios.
-        // Migrate that unversioned state once; versioned user selections remain
-        // authoritative, including an explicit aspectFill choice.
-        if storedScenePresentationVersion == 0 &&
-            storedScenePresentationScaling == .aspectFill {
-            scenePresentationScaling = .stretch
+        // Version 1 incorrectly made stretch the compatibility default. That
+        // distorts every scene whose authored canvas and display have different
+        // aspect ratios. Wallpaper Engine preserves aspect ratio and crops the
+        // overflow, so migrate that faulty default once. An explicit aspect-fit
+        // selection remains meaningful; version 2+ selections are authoritative.
+        if storedScenePresentationVersion < 2 {
+            scenePresentationScaling = storedScenePresentationScaling == .aspectFit
+                ? .aspectFit
+                : .aspectFill
         } else {
-            scenePresentationScaling = storedScenePresentationScaling ?? .stretch
+            scenePresentationScaling = storedScenePresentationScaling ?? .aspectFill
         }
         sceneSpanAcrossScreens = try container.decodeIfPresent(
             Bool.self, forKey: .sceneSpanAcrossScreens

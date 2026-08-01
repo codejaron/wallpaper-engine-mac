@@ -218,10 +218,13 @@ struct CursorProjection final {
 };
 
 [[nodiscard]] double centeredWallpaperY(
-    double topDownY,
+    double wallpaperY,
     std::uint32_t sceneHeight
 ) noexcept {
-    return topDownY - static_cast<double>(sceneHeight) * 0.5;
+    // Wallpaper Engine scene coordinates grow upward from the bottom edge.
+    // The offscreen scene is presented with one final vertical flip, so
+    // authored positions must be mirrored here exactly once.
+    return static_cast<double>(sceneHeight) * 0.5 - wallpaperY;
 }
 
 [[nodiscard]] FrameVector2 linuxEffectPointer(
@@ -247,7 +250,7 @@ struct CursorProjection final {
     }
     const double worldX = std::clamp(pointer.x, 0.0, 1.0) *
         static_cast<double>(plan.width);
-    const double worldY = (1.0 - std::clamp(pointer.y, 0.0, 1.0)) *
+    const double worldY = std::clamp(pointer.y, 0.0, 1.0) *
         static_cast<double>(plan.height);
     const auto& transform = image.worldTransform;
     const double scaledWidth = image.size.x * transform.scale.x;
@@ -263,9 +266,8 @@ struct CursorProjection final {
         return std::nullopt;
     }
 
-    // Scene rendering keeps Wallpaper Engine's top-down Y in a centered
-    // coordinate until the final presentation. Keep this inverse exactly
-    // paired with prepareDraw's center/alignment/rotation decomposition.
+    // Keep pointer projection paired with prepareDraw's authored-scene to
+    // offscreen-scene conversion, including the final presentation flip.
     double centerX = transform.origin.x -
         static_cast<double>(plan.width) * 0.5;
     double centerY = centeredWallpaperY(transform.origin.y, plan.height);
@@ -3723,10 +3725,9 @@ struct FramePlanExecutor::Impl final {
                    pass.geometry == FrameGeometryKind::passthroughCapture ||
                    puppetSceneSpace) {
             const auto& transform = image.worldTransform;
-            // Wallpaper Engine stores image origins in top-left scene pixels.
-            // The internal scene framebuffer deliberately keeps that Y-down
-            // orientation until presentation, so its centered coordinate is
-            // origin.y - height/2 rather than a per-object GL normalization.
+            // Wallpaper Engine's authored Y grows upward from the scene's
+            // bottom edge. Convert it once for the vertically flipped
+            // offscreen scene; presentation restores the visible orientation.
             // Alignment and scale remain baked into geometry because shaders
             // may inspect each common matrix separately.
             const double scaledWidth = image.size.x * transform.scale.x;

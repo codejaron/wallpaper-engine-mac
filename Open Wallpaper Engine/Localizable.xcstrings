@@ -529,6 +529,16 @@
     "Choose Wallpaper Engine assets directory" : {
 
     },
+    "Choose wallpaper storage folder" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择壁纸存储文件夹"
+          }
+        }
+      }
+    },
     "Clear assets directory" : {
 
     },
@@ -1310,6 +1320,16 @@
         }
       }
     },
+    "New downloads and imports are saved here. Existing wallpapers are not moved." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新下载和导入的壁纸将保存到这里。不会移动现有壁纸。"
+          }
+        }
+      }
+    },
     "New Tag" : {
       "localizations" : {
         "zh-Hans" : {
@@ -1878,6 +1898,16 @@
         }
       }
     },
+    "Restore default wallpaper storage folder" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复默认壁纸存储位置"
+          }
+        }
+      }
+    },
     "Retry" : {
 
     },
@@ -2184,6 +2214,17 @@
     "The runtime did not provide a valid slider range." : {
 
     },
+    "The selected wallpaper storage folder is not writable." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "所选壁纸存储文件夹不可写入。"
+          }
+        }
+      }
+    },
     "Theme" : {
       "localizations" : {
         "zh-Hans" : {
@@ -2457,6 +2498,16 @@
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "每台显示器壁纸"
+          }
+        }
+      }
+    },
+    "Wallpaper Storage" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "壁纸存储位置"
           }
         }
       }

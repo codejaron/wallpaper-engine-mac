@@ -116,6 +116,9 @@ struct GlobalSettings: Codable, Equatable {
     
     // MARK: Advanced
     var wallpaperEngineAssetsDirectory: String?
+    /// The root directory where newly downloaded and imported wallpapers live.
+    /// `nil` preserves the original Documents/Open Wallpaper Engine location.
+    var wallpaperStorageDirectory: String?
     var processPiority = GSProcessPiority.normal // Not putting in use
     var pauseOnVRAMExhausted = false // Not putting in use
     var restartAfterCrashing = false // Not putting in use
@@ -138,7 +141,8 @@ struct GlobalSettings: Codable, Equatable {
         case audioOutput, systemAudioCaptureEnabled,
              reloadWhenChangingOutputDevice
         case videoFramework
-        case wallpaperEngineAssetsDirectory, processPiority,
+        case wallpaperEngineAssetsDirectory, wallpaperStorageDirectory,
+             processPiority,
              pauseOnVRAMExhausted, restartAfterCrashing
         case logLevel, autoRefresh
     }
@@ -168,6 +172,7 @@ struct GlobalSettings: Codable, Equatable {
         reloadWhenChangingOutputDevice = true
         videoFramework = .avkit
         wallpaperEngineAssetsDirectory = nil
+        wallpaperStorageDirectory = nil
         processPiority = .normal
         pauseOnVRAMExhausted = false
         restartAfterCrashing = false
@@ -263,6 +268,9 @@ struct GlobalSettings: Codable, Equatable {
         ) ?? .avkit
         wallpaperEngineAssetsDirectory = try container.decodeIfPresent(
             String.self, forKey: .wallpaperEngineAssetsDirectory
+        )
+        wallpaperStorageDirectory = try container.decodeIfPresent(
+            String.self, forKey: .wallpaperStorageDirectory
         )
         processPiority = try container.decodeIfPresent(
             GSProcessPiority.self, forKey: .processPiority

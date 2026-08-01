@@ -12,6 +12,7 @@ struct GeneralPage: SettingsPage {
     @ObservedObject var viewModel: GlobalSettingsViewModel
     @ObservedObject private var mediaSnapshotProvider: SceneMediaSnapshotProvider
     @State private var assetsDirectoryIssue: String?
+    @State private var wallpaperStorageDirectoryIssue: String?
     
     init(globalSettings viewModel: GlobalSettingsViewModel) {
         self.viewModel = viewModel
@@ -87,6 +88,36 @@ struct GeneralPage: SettingsPage {
             }
             // MARK: Advanced
             Section {
+                LabeledContent("Wallpaper Storage") {
+                    HStack(spacing: 8) {
+                        Text(configuredWallpaperStorageDirectory ?? defaultWallpaperStorageDirectory)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .foregroundStyle(
+                                configuredWallpaperStorageDirectory == nil ? .secondary : .primary
+                            )
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                        Button(action: selectWallpaperStorageDirectory) {
+                            Image(systemName: "folder")
+                        }
+                        .help("Choose wallpaper storage folder")
+                        if configuredWallpaperStorageDirectory != nil {
+                            Button(action: resetWallpaperStorageDirectory) {
+                                Image(systemName: "xmark.circle")
+                            }
+                            .help("Restore default wallpaper storage folder")
+                        }
+                    }
+                }
+                Text("New downloads and imports are saved here. Existing wallpapers are not moved.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                if let issue = wallpaperStorageDirectoryIssue {
+                    Label(issue, systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 LabeledContent("Wallpaper Engine assets") {
                     HStack(spacing: 8) {
                         Text(configuredAssetsDirectory ?? "Not selected")
@@ -159,6 +190,17 @@ struct GeneralPage: SettingsPage {
         return value
     }
 
+    private var configuredWallpaperStorageDirectory: String? {
+        let value = viewModel.settings.wallpaperStorageDirectory?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value, !value.isEmpty else { return nil }
+        return value
+    }
+
+    private var defaultWallpaperStorageDirectory: String {
+        WallpaperDirectory.defaultURL(using: .default).path
+    }
+
     private var configuredAssetsValidationIssue: String? {
         guard let configuredAssetsDirectory else { return nil }
         do {
@@ -198,6 +240,38 @@ struct GeneralPage: SettingsPage {
     private func clearAssetsDirectory() {
         viewModel.settings.wallpaperEngineAssetsDirectory = nil
         assetsDirectoryIssue = nil
+    }
+
+    private func selectWallpaperStorageDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Select"
+        panel.directoryURL = URL(
+            fileURLWithPath: configuredWallpaperStorageDirectory
+                ?? defaultWallpaperStorageDirectory,
+            isDirectory: true
+        )
+        guard panel.runModal() == .OK, let selectedURL = panel.url else { return }
+
+        let directory = selectedURL.standardizedFileURL.resolvingSymlinksInPath()
+        guard FileManager.default.isWritableFile(atPath: directory.path) else {
+            wallpaperStorageDirectoryIssue =
+                "The selected wallpaper storage folder is not writable."
+            return
+        }
+
+        viewModel.settings.wallpaperStorageDirectory = directory.path
+        AppDelegate.shared.contentViewModel.refresh()
+        wallpaperStorageDirectoryIssue = nil
+    }
+
+    private func resetWallpaperStorageDirectory() {
+        viewModel.settings.wallpaperStorageDirectory = nil
+        AppDelegate.shared.contentViewModel.refresh()
+        wallpaperStorageDirectoryIssue = nil
     }
 
     private static func resolveAssetsDirectory(from selectedURL: URL) throws -> URL {

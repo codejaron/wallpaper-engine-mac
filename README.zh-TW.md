@@ -1,7 +1,7 @@
 Open Wallpaper Engine（修補版）
 =========
 
-[English](README.md) | **繁體中文** | [日本語](README.ja.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | **繁體中文** | [日本語](README.ja.md)
 
 [![GitHub license](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
@@ -24,6 +24,38 @@ Open Wallpaper Engine（修補版）
 - **[Chen Chia Yang](https://github.com/Unayung)** — 場景桌布渲染、網頁桌布修復、Steam 創意工坊整合、多螢幕支援、Zip 匯入
 
 採用 [GPL-3.0](LICENSE) 授權，與原始專案相同。
+
+## 0.8.1 新功能
+
+### 場景 Runtime 相容性
+
+場景桌布現在透過原生 C++/OpenGL 管線執行，並更貼近 Linux Wallpaper Engine runtime 的行為契約。可處理 Wallpaper Engine 套件、模型、shader、腳本、frame graph 與紋理，無須將 framebuffer 讀回 CPU。
+
+- **場景圖層與效果** — 支援群組圖層、圖片材質、多 pass 效果、framebuffer 操作、場景合成、游標互動、相機視差與自動投影。
+- **文字、媒體與影片** — 原生繪製嵌入與系統字型、作者設定的版面與文字效果；支援影片紋理、場景內建音效，以及相容腳本使用的 macOS「正在播放」中繼資料與封面。
+- **音訊反應場景** — 可選的 Core Audio 系統音訊擷取會向需要 Wallpaper Engine 音訊輸入的場景提供頻譜資料。
+- **正確呈現** — 保留作者座標方向與長寬比，提供自動、拉伸、符合與填滿縮放；場景桌布也能以一張虛擬畫布跨越多個螢幕。
+- **較低的渲染成本** — framebuffer 規劃會重用相容目標，並避免不必要的 framebuffer 工作。
+
+大多數場景桌布需要官方 Wallpaper Engine 的 `assets` 目錄。這些資產受專有授權保護，並不隨本專案提供；請參閱[設定 Wallpaper Engine assets](#設定-wallpaper-engine-assets)。
+
+### 場景屬性控制
+
+桌布詳細資訊頁會顯示 runtime 提供的場景使用者屬性。Boolean、slider、combo、color 與文字輸入屬性會立即套用到執行中的場景，並依螢幕與桌布分別保存。屬性說明支援格式化文字、連結與遠端圖片，也支援屬性分組和還原預設值。
+
+### 播放與音訊策略
+
+播放設定現在由一套策略統一套用到影片、網頁與場景桌布。可設定在其他應用程式取得焦點、全螢幕或最大化、播放音訊，或筆電使用電池時繼續執行、靜音、暫停或停止。多個條件同時成立時，會採用限制最嚴格的動作；螢幕休眠時一律暫停，喚醒後恢復。
+
+「其他應用程式正在播放音訊」規則與音訊反應場景都需要在一般設定啟用**系統音訊擷取**。擷取失敗會在 App 中顯示原因，而不會靜默停用規則。
+
+### 創意工坊瀏覽與預覽
+
+創意工坊瀏覽器除搜尋與排序外，現在可按內容分級、桌布類型與題材篩選。遠端圖片和 GIF 預覽的載入邏輯也已重構，搜尋結果與桌布卡片會在內容載入時穩定更新。
+
+### 場景品質控制
+
+場景專用的效能設定新增渲染品質、FPS、呈現縮放與跨螢幕模式。不支援的抗鋸齒、後處理、紋理解析度和反射控制會明確停用，不再造成可用的誤解。
 
 ## 0.8.0 新功能
 
@@ -83,10 +115,9 @@ Cmd+點擊選取多個桌布，右鍵選擇批次取消訂閱。
 ## 目前限制
 
 - **粒子相容性** — 確定性的 sprite 路徑已支援 box/sphere emitter、常用隨機 initializer、movement 與 alpha fade。Trail/rope、子系統與 control point、collision/boids、動態粒子紋理，以及非 `genericparticle` 的多 pass 材質仍未支援。
-- **音訊互動場景** — 已支援場景內建音效播放，但 macOS 系統音訊擷取與 Wallpaper Engine audio-input buffer 尚不可用，並會明確回報錯誤。
-- **文字相容性** — 已支援文字圖層渲染，但非零字元間距與進階行數、寬度、刪節號排版仍未支援。
-- **效果相容性** — 已支援圖片材質、passthrough 場景合成圖層、多 pass effect、framebuffer binding、copy/swap/clear、相機視差與自動投影。Compose、puppet mesh 及其他尚未建模的效果功能會明確失敗。
-- **使用者屬性** — Boolean、slider、combo、color 與文字輸入會即時套用，並依顯示器與 Scene 保存。Scene texture、檔案、資料夾與快捷鍵屬性目前可見但唯讀。
+- **效果相容性** — 已支援場景合成與常見圖片/效果路徑，但部分進階 compose、puppet mesh 和尚未建模的效果功能仍無法繪製。
+- **使用者屬性** — Boolean、slider、combo、color 與文字輸入可編輯；Scene texture、檔案、資料夾與快捷鍵屬性目前可見但唯讀。
+- **平台相關輸入** — 系統音訊擷取與「正在播放」整合依賴 macOS 服務。服務不可用時，App 會回報失敗，受影響的場景輸入也無法使用。
 
 ## 支援的桌布類型
 
@@ -123,26 +154,24 @@ open "Open Wallpaper Engine.xcodeproj"
 3. 出現提示時輸入 [Steam Web API 金鑰](https://steamcommunity.com/dev/apikey)
 4. 搜尋、篩選，然後點擊 **Download** 下載桌布
 
+### 設定 Wallpaper Engine assets
+
+大多數場景桌布依賴原版 Wallpaper Engine 的 shader 與材質。這些專有檔案不包含在本儲存庫或 App 中。
+
+1. 使用擁有 Wallpaper Engine 的 Steam 帳號，透過 Steam 在 Windows 安裝它，或使用該帳號既有的安裝目錄。
+2. 在 Steam 開啟 **Wallpaper Engine > 管理 > 瀏覽本機檔案**。預設 Steam 資料庫的應用程式目錄為 `C:\Program Files (x86)\Steam\steamapps\common\wallpaper_engine`，所需目錄是其中的 `assets`。
+3. 將 `assets` 目錄複製到 Mac 上穩定且可讀的位置。在本 App 開啟 **設定 > 一般 > Wallpaper Engine assets**，選取該 `assets` 目錄，或它的 `wallpaper_engine` 父目錄。所選目錄必須包含 `shaders/`。
+
+請勿將這些檔案加入儲存庫、提交或重新散布。Steam 資料庫路徑可能不同；Wallpaper Engine 的[官方支援文件](https://help.wallpaperengine.io/en/steam/contentfile.html)採用相同的 `steamapps/common/wallpaper_engine` 安裝目錄結構。
+
 ### 從本地檔案匯入
 
 - **資料夾：** 檔案 > 從資料夾匯入——選擇包含 `project.json` 的桌布資料夾
 - **Zip：** 檔案 > 匯入 或拖放包含桌布套件的 `.zip` 檔案
-- **手動：** 直接將桌布資料夾複製到 `~/Documents/Open Wallpaper Engine/`
+- **儲存位置：** 在 **設定 > 一般 > 桌布儲存位置** 選擇下載與匯入的儲存目錄。預設目錄為 `~/Documents/Open Wallpaper Engine/`；變更目錄不會移動既有桌布。
 
-## 變更的檔案（相對上游）
+## 架構
 
-**修改：**
-- `WebWallpaperView.swift` — WKWebView 檔案存取設定
-- `WallpaperView.swift` — 場景桌布分派
-- `SceneWallpaperView.swift` — 使用原生 SceneRuntime 的 NSOpenGLView 實作
-- `ImportPanels.swift` — 資料夾匯入邏輯修復
-
-**新增：**
-- `SceneRuntime/` — 套件解析、模型、腳本、frame graph、shader 與 OpenGL 執行管線
-- `Services/SceneWallpaperViewModel.swift` — 原生 SceneRuntime session 的 App 端擁有者
-- `Services/SteamCmdService.swift` — steamcmd 偵測、登入與創意工坊下載
-- `Services/WorkshopAPIService.swift` — Steam Web API 客戶端
-- `Services/WorkshopViewModel.swift` — 創意工坊瀏覽器狀態管理
-- `Services/WallpaperDirectory.swift` — 集中式桌布儲存路徑
-- `Services/ZipImporter.swift` — Zip 檔案解壓與匯入
-- `ContentView/Components/WorkshopView.swift` — 創意工坊瀏覽器 UI
+- `SceneRuntime/` 包含原生套件解析、模型、腳本、shader、frame graph、音訊與 OpenGL 執行管線。
+- App 層負責按螢幕管理場景 session、屬性保存、播放策略、macOS 音訊擷取和「正在播放」輸入。
+- 創意工坊瀏覽使用 Steam Web API 探索內容，並透過 `steamcmd` 完成驗證與下載。

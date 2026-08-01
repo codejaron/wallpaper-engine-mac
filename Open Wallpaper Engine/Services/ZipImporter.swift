@@ -1,5 +1,6 @@
 import Foundation
 
+@MainActor
 enum ZipImporter {
     /// Extracts a zip file and copies any wallpaper folders (containing project.json) to the wallpapers directory.
     /// Returns the number of wallpapers successfully imported.

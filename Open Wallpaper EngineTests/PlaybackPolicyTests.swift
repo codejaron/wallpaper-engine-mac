@@ -466,6 +466,42 @@ final class PlaybackPolicyTests: XCTestCase {
         XCTAssertFalse(settings.requiresSystemAudioCaptureForAudioRule)
     }
 
+    func testWallpaperStorageDirectoryRoundTrips() throws {
+        var settings = GlobalSettings()
+        settings.wallpaperStorageDirectory = "/Volumes/Wallpapers"
+
+        let restored = try JSONDecoder().decode(
+            GlobalSettings.self,
+            from: JSONEncoder().encode(settings)
+        )
+
+        XCTAssertEqual(restored.wallpaperStorageDirectory, "/Volumes/Wallpapers")
+    }
+
+    func testWallpaperDirectoryUsesConfiguredStorageDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: UUID().uuidString,
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let directory = WallpaperDirectory.url(
+            configuredPath: root.path,
+            using: .default
+        )
+
+        XCTAssertEqual(
+            directory,
+            root.standardizedFileURL.resolvingSymlinksInPath()
+        )
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: directory.path,
+            isDirectory: &isDirectory
+        ))
+        XCTAssertTrue(isDirectory.boolValue)
+    }
+
     func testLegacyDisplaySleepSettingDoesNotInvalidateOtherSettings() throws {
         let data = try XCTUnwrap(
             #"{"displayAsleep":"stop","otherApplicationFocused":"mute"}"#

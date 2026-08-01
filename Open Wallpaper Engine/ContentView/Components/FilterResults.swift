@@ -64,7 +64,7 @@ struct FilterResults: View {
                     VStack(alignment: .leading) {
                         Group {
                             ForEach(Array(zip(FRShowOnly.allOptions.indices, FRShowOnly.allOptions)), id: \.0) { (i, option) in
-                                let (option, image) = option
+                                let (title, systemImage) = option
                                 let color: Color = {
                                     if i == 0 {
                                         return Color.green
@@ -87,9 +87,11 @@ struct FilterResults: View {
                                     print(String(describing: viewModel.showOnly))
                                 })) {
                                     HStack(spacing: 2) {
-                                        Image(systemName: image)
-                                            .foregroundStyle(color)
-                                        Text(option)
+                                        if let systemImage {
+                                            Image(systemName: systemImage)
+                                                .foregroundStyle(color)
+                                        }
+                                        Text(title)
                                     }
                                 }
                                 .disabled(i != 0 ? true : false)

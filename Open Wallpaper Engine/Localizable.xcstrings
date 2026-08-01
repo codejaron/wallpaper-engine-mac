@@ -89,10 +89,17 @@
         }
       }
     },
+    "—" : {
+
+    },
     "!!! Notice that this may affects performance !!!" : {
 
     },
+    "@%@" : {
+
+    },
     "@haren724" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -119,7 +126,18 @@
     "%lld" : {
 
     },
+    "%lldx%lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lldx%2$lld"
+          }
+        }
+      }
+    },
     "×8 MSAA is only recommended for powerful high-end desktop graphics cards." : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -163,6 +181,7 @@
       }
     },
     "2048x2048 MacBook Pro 14''" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -177,6 +196,9 @@
           }
         }
       }
+    },
+    "A Steam Web API key is required to browse." : {
+
     },
     "About" : {
       "extractionState" : "manual",
@@ -210,6 +232,7 @@
       }
     },
     "Add to Playlist" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -220,6 +243,7 @@
       }
     },
     "Add Wallpaper" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -322,6 +346,12 @@
         }
       }
     },
+    "Aspect fill" : {
+
+    },
+    "Aspect fit" : {
+
+    },
     "Assign Hotkey" : {
       "localizations" : {
         "zh-Hans" : {
@@ -351,6 +381,9 @@
           }
         }
       }
+    },
+    "Authenticating with Steam..." : {
+
     },
     "Auto" : {
       "localizations" : {
@@ -382,6 +415,16 @@
         }
       }
     },
+    "Balanced" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "平衡"
+          }
+        }
+      }
+    },
     "Basic Setup" : {
       "localizations" : {
         "zh-Hans" : {
@@ -392,6 +435,9 @@
         }
       }
     },
+    "Batch Unsubscribe Confirmation" : {
+
+    },
     "Below Normal" : {
       "localizations" : {
         "zh-Hans" : {
@@ -401,6 +447,9 @@
           }
         }
       }
+    },
+    "brew install steamcmd" : {
+
     },
     "Browse All By" : {
       "localizations" : {
@@ -432,6 +481,9 @@
         }
       }
     },
+    "Browse..." : {
+
+    },
     "Cancel" : {
       "localizations" : {
         "zh-Hans" : {
@@ -443,6 +495,7 @@
       }
     },
     "Change Wallpaper" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -463,6 +516,7 @@
       }
     },
     "Choose Display" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -471,6 +525,25 @@
           }
         }
       }
+    },
+    "Choose Wallpaper Engine assets directory" : {
+
+    },
+    "Choose wallpaper storage folder" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择壁纸存储文件夹"
+          }
+        }
+      }
+    },
+    "Clear assets directory" : {
+
+    },
+    "Click a display to select it, then choose a wallpaper from the library." : {
+
     },
     "Close Window" : {
       "localizations" : {
@@ -496,6 +569,7 @@
       }
     },
     "Configure" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -505,22 +579,15 @@
         }
       }
     },
+    "Contributors" : {
+
+    },
     "Copy" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "复制"
-          }
-        }
-      }
-    },
-    "Currently, these settings below are designed for scene wallpapers \nand may not work as expect " : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "目前以下设置并不会生效，因为它们是为场景类壁纸而设计的。目前还不支持场景壁纸"
           }
         }
       }
@@ -565,6 +632,9 @@
         }
       }
     },
+    "Delete All %lld Immediately" : {
+
+    },
     "Delete Immediately" : {
       "localizations" : {
         "zh-Hans" : {
@@ -598,7 +668,11 @@
         }
       }
     },
+    "Discard Invalid Saved Properties" : {
+
+    },
     "Discover" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -608,15 +682,8 @@
         }
       }
     },
-    "Display asleep" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "显示器休眠"
-          }
-        }
-      }
+    "Display Settings" : {
+
     },
     "Displays" : {
       "localizations" : {
@@ -637,6 +704,12 @@
           }
         }
       }
+    },
+    "Download" : {
+
+    },
+    "Downloaded" : {
+
     },
     "Dual Monitor" : {
       "localizations" : {
@@ -668,12 +741,35 @@
         }
       }
     },
+    "Enable System Audio Capture in General settings for this rule to work." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要在“通用”设置中开启“系统音频捕获”，此规则才能生效。"
+          }
+        }
+      }
+    },
+    "Enable this display to load and edit its Scene properties." : {
+
+    },
     "Enabled" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "启用"
+          }
+        }
+      }
+    },
+    "Enables audio-reactive wallpaper effects and the Other Application Playing Audio rule." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启用音频响应式壁纸效果和“其他应用播放音频”规则。"
           }
         }
       }
@@ -698,6 +794,9 @@
         }
       }
     },
+    "Enter Steam Guard Code" : {
+
+    },
     "Errors Only" : {
       "localizations" : {
         "zh-Hans" : {
@@ -707,6 +806,9 @@
           }
         }
       }
+    },
+    "Failed" : {
+
     },
     "Favorite" : {
       "extractionState" : "stale",
@@ -750,6 +852,9 @@
         }
       }
     },
+    "Find wallpapers by name, tag, or browse trending content." : {
+
+    },
     "Follow System" : {
       "localizations" : {
         "zh-Hans" : {
@@ -792,7 +897,11 @@
         }
       }
     },
+    "Get a free key at" : {
+
+    },
     "Group" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -803,6 +912,7 @@
       }
     },
     "Hello, World!" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -843,6 +953,7 @@
       }
     },
     "High" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -886,8 +997,18 @@
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "高品质"
+            "state" : "translated",
+            "value" : "高质量"
+          }
+        }
+      }
+    },
+    "High Quality uses authored pixels; Balanced caps rendering at the display's backing-pixel density; Power Saving halves that linear resolution. FPS, scaling, and spanning also apply only to Scene wallpapers; disabled options are not yet supported." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "高质量使用壁纸原始像素；平衡以显示器实际像素密度为上限；省电将该线性分辨率减半。帧率、缩放和跨屏设置也仅对场景壁纸生效；其他灰色选项尚未支持。"
           }
         }
       }
@@ -901,6 +1022,9 @@
           }
         }
       }
+    },
+    "If Steam sends a sign-in request, open Steam Mobile and approve it to continue." : {
+
     },
     "Import" : {
       "localizations" : {
@@ -935,6 +1059,12 @@
     "Internal" : {
 
     },
+    "Invalid or missing runtime value" : {
+
+    },
+    "Invalid property markup: %@" : {
+
+    },
     "Keep Running" : {
       "localizations" : {
         "zh-Hans" : {
@@ -959,8 +1089,8 @@
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "当笔记本连接电源时"
+            "state" : "translated",
+            "value" : "当笔记本使用电池时"
           }
         }
       }
@@ -1006,7 +1136,11 @@
         }
       }
     },
+    "Load More" : {
+
+    },
     "Load Profile" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1015,6 +1149,15 @@
           }
         }
       }
+    },
+    "Loading Scene properties from the runtime…" : {
+
+    },
+    "Log In" : {
+
+    },
+    "Log in with your Steam account to browse and download wallpapers.\nYou must own Wallpaper Engine on Steam." : {
+
     },
     "Log Level" : {
       "localizations" : {
@@ -1026,7 +1169,11 @@
         }
       }
     },
+    "Login to download" : {
+
+    },
     "Low" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1047,6 +1194,7 @@
       }
     },
     "Made with ❤️ by" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1067,6 +1215,7 @@
       }
     },
     "Medium" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1087,6 +1236,7 @@
       }
     },
     "Mobile" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1095,6 +1245,9 @@
           }
         }
       }
+    },
+    "Move All %lld to Trash" : {
+
     },
     "Move to Trash" : {
       "localizations" : {
@@ -1167,6 +1320,16 @@
         }
       }
     },
+    "New downloads and imports are saved here. Existing wallpapers are not moved." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新下载和导入的壁纸将保存到这里。不会移动现有壁纸。"
+          }
+        }
+      }
+    },
     "New Tag" : {
       "localizations" : {
         "zh-Hans" : {
@@ -1176,6 +1339,9 @@
           }
         }
       }
+    },
+    "No recent wallpapers" : {
+
     },
     "No Tags" : {
       "localizations" : {
@@ -1308,22 +1474,15 @@
         }
       }
     },
+    "Or locate an existing steamcmd binary:" : {
+
+    },
     "Other Application Focused:" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "当焦点转移到其他应用时"
-          }
-        }
-      }
-    },
-    "Other Application Fullscreen:" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "当其他应用程序进入全屏时"
           }
         }
       }
@@ -1337,6 +1496,9 @@
           }
         }
       }
+    },
+    "Password" : {
+
     },
     "Paste" : {
       "localizations" : {
@@ -1400,6 +1562,7 @@
       }
     },
     "Playlist" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1470,6 +1633,16 @@
         }
       }
     },
+    "Power Saving" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "省电"
+          }
+        }
+      }
+    },
     "Power Saving Mode, Sleeping..." : {
       "localizations" : {
         "zh-Hans" : {
@@ -1479,6 +1652,9 @@
           }
         }
       }
+    },
+    "Preview failed to load" : {
+
     },
     "Proceed" : {
       "localizations" : {
@@ -1552,6 +1728,9 @@
         }
       }
     },
+    "Re-detect" : {
+
+    },
     "Recent Wallpapers" : {
       "localizations" : {
         "zh-Hans" : {
@@ -1612,7 +1791,11 @@
         }
       }
     },
+    "Remove" : {
+
+    },
     "Remove Wallpaper" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1692,6 +1875,9 @@
         }
       }
     },
+    "Reset Scene Properties" : {
+
+    },
     "Resolution" : {
       "localizations" : {
         "zh-Hans" : {
@@ -1711,6 +1897,19 @@
           }
         }
       }
+    },
+    "Restore default wallpaper storage folder" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复默认壁纸存储位置"
+          }
+        }
+      }
+    },
+    "Retry" : {
+
     },
     "Safe start after hibernation" : {
       "extractionState" : "stale",
@@ -1733,7 +1932,11 @@
         }
       }
     },
+    "Save & Search" : {
+
+    },
     "Save Profile" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1743,7 +1946,21 @@
         }
       }
     },
+    "Scene render quality" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "场景渲染质量"
+          }
+        }
+      }
+    },
+    "Scene scaling" : {
+
+    },
     "Scheme Color" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1762,6 +1979,12 @@
           }
         }
       }
+    },
+    "Search the Steam Workshop" : {
+
+    },
+    "Searching Workshop..." : {
+
     },
     "Select All" : {
       "localizations" : {
@@ -1866,7 +2089,14 @@
         }
       }
     },
+    "Span mode uses one virtual canvas and presents the current display's slice. It is intended for the same Scene wallpaper on each enabled display." : {
+
+    },
+    "Span scene wallpapers across displays" : {
+
+    },
     "Split" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1886,6 +2116,27 @@
         }
       }
     },
+    "Steam Guard Code" : {
+
+    },
+    "Steam Login" : {
+
+    },
+    "Steam Username" : {
+
+    },
+    "Steam Web API Key" : {
+
+    },
+    "Steam Workshop requires steamcmd to download wallpapers.\nInstall it with Homebrew:" : {
+
+    },
+    "steamcmd Not Found" : {
+
+    },
+    "steamcommunity.com/dev/apikey" : {
+
+    },
     "Stop (free memory)" : {
       "localizations" : {
         "zh-Hans" : {
@@ -1895,6 +2146,9 @@
           }
         }
       }
+    },
+    "Stretch" : {
+
     },
     "Subscription Date" : {
       "extractionState" : "stale",
@@ -1927,6 +2181,16 @@
         }
       }
     },
+    "System Audio Capture" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "系统音频捕获"
+          }
+        }
+      }
+    },
     "Tags" : {
       "localizations" : {
         "zh-Hans" : {
@@ -1947,6 +2211,20 @@
         }
       }
     },
+    "The runtime did not provide a valid slider range." : {
+
+    },
+    "The selected wallpaper storage folder is not writable." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "所选壁纸存储文件夹不可写入。"
+          }
+        }
+      }
+    },
     "Theme" : {
       "localizations" : {
         "zh-Hans" : {
@@ -1961,6 +2239,9 @@
 
     },
     "This plugin enables animation of GIF thumbnail images in wallpaper explorer" : {
+
+    },
+    "This Scene property type is visible but is not safely editable yet." : {
 
     },
     "Those all settings above don't have to be saved for taking effect." : {
@@ -2017,6 +2298,7 @@
       }
     },
     "Ultra mode adds HDR bloom to supported wallpapers and is only recommended for powerful high-end desktop graphics cards." : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -2076,6 +2358,16 @@
         }
       }
     },
+    "Unsubscribe %lld wallpapers: %@%@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Unsubscribe %1$lld wallpapers: %2$@%3$@"
+          }
+        }
+      }
+    },
     "Unsubscribe Confirmation" : {
       "localizations" : {
         "zh-Hans" : {
@@ -2085,6 +2377,12 @@
           }
         }
       }
+    },
+    "Unsubscribe Selected (%lld)" : {
+
+    },
+    "Use Cached Session" : {
+
     },
     "Verbose" : {
       "localizations" : {
@@ -2146,7 +2444,11 @@
         }
       }
     },
+    "Wallpaper display is disabled on this screen." : {
+
+    },
     "Wallpaper Editor" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -2155,6 +2457,9 @@
           }
         }
       }
+    },
+    "Wallpaper Engine assets" : {
+
     },
     "Wallpaper Engine for Mac" : {
       "localizations" : {
@@ -2187,11 +2492,22 @@
       }
     },
     "Wallpaper Per Display" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "每台显示器壁纸"
+          }
+        }
+      }
+    },
+    "Wallpaper Storage" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "壁纸存储位置"
           }
         }
       }
@@ -2242,6 +2558,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Open Wallpaper Engine 里的新东西"
+          }
+        }
+      }
+    },
+    "When Another App Window Is Fullscreen or Maximized:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "存在全屏或铺满桌面的其他应用窗口时"
           }
         }
       }
@@ -2325,6 +2651,9 @@
           }
         }
       }
+    },
+    "You'll also need a Steam Web API key to browse the Workshop." : {
+
     },
     "Your Presets" : {
       "localizations" : {

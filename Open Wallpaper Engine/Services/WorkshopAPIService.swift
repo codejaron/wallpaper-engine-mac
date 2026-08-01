@@ -56,6 +56,7 @@ class WorkshopAPIService {
     func searchItems(
         query: String = "",
         tags: [String] = [],
+        matchAllTags: Bool,
         sortOrder: WorkshopSortOrder = .trending,
         page: Int = 1,
         perPage: Int = 20
@@ -82,6 +83,9 @@ class WorkshopAPIService {
 
         for (index, tag) in tags.enumerated() {
             queryItems.append(URLQueryItem(name: "requiredtags[\(index)]", value: tag))
+        }
+        if !tags.isEmpty {
+            queryItems.append(URLQueryItem(name: "match_all_tags", value: matchAllTags ? "true" : "false"))
         }
 
         let apiKey = Self.loadAPIKey()

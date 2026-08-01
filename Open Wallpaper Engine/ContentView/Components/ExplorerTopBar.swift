@@ -7,6 +7,47 @@
 
 import SwiftUI
 
+struct BrowserTopBar<LeadingAccessory: View, TrailingControls: View>: View {
+    @Binding private var searchText: String
+
+    private let onSearchSubmit: () -> Void
+    private let onFilter: () -> Void
+    private let leadingAccessory: LeadingAccessory
+    private let trailingControls: TrailingControls
+
+    init(
+        searchText: Binding<String>,
+        onSearchSubmit: @escaping () -> Void,
+        onFilter: @escaping () -> Void,
+        @ViewBuilder leadingAccessory: () -> LeadingAccessory,
+        @ViewBuilder trailingControls: () -> TrailingControls
+    ) {
+        self._searchText = searchText
+        self.onSearchSubmit = onSearchSubmit
+        self.onFilter = onFilter
+        self.leadingAccessory = leadingAccessory()
+        self.trailingControls = trailingControls()
+    }
+
+    var body: some View {
+        HStack {
+            TextField("Search", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 160)
+                .onSubmit(onSearchSubmit)
+
+            Button(action: onFilter) {
+                Label("Filter Results", systemImage: "checklist.checked")
+            }
+            .buttonStyle(.borderedProminent)
+
+            leadingAccessory
+            Spacer()
+            trailingControls
+        }
+    }
+}
+
 struct ExplorerTopBar: SubviewOfContentView {
     @ObservedObject var viewModel: ContentViewModel
     
@@ -17,16 +58,13 @@ struct ExplorerTopBar: SubviewOfContentView {
     }
     
     var body: some View {
-        HStack {
-            TextField("Search", text: $viewModel.searchText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 160)
-            Button {
+        BrowserTopBar(
+            searchText: $viewModel.searchText,
+            onSearchSubmit: {},
+            onFilter: {
                 viewModel.isFilterReveal.toggle()
-            } label: {
-                Label("Filter Results", systemImage: "checklist.checked")
             }
-            .buttonStyle(.borderedProminent)
+        ) {
             if globalSettingsViewModel.settings.autoRefresh {
                 Button {
                     viewModel.refresh()
@@ -34,7 +72,7 @@ struct ExplorerTopBar: SubviewOfContentView {
                     Image(systemName: "arrow.triangle.2.circlepath")
                 }
             }
-            Spacer()
+        } trailingControls: {
             Button { 
                 if viewModel.sortingSequence == .decrease {
                     viewModel.sortingSequence = .increase

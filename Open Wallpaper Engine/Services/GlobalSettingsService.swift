@@ -7,16 +7,13 @@
 
 import Cocoa
 import Combine
+import SceneAudio
 import SwiftUI
 import ServiceManagement
 
-enum GSQuality {
-    case low, medium, high, ultra
-}
-
-enum GSPlayback: String, CaseIterable, Identifiable, Codable {
+enum GSSceneRenderQuality: String, CaseIterable, Identifiable, Codable {
     var id: Self { self }
-    case keepRunning, mute, pause, stop
+    case high, balanced, powerSaving
 }
 
 enum GSAntiAliasingQuality: String, CaseIterable, Identifiable, Codable {
@@ -49,6 +46,14 @@ enum GSVideoFramework: String, CaseIterable, Identifiable, Codable {
     case avkit
 }
 
+enum GSScenePresentationScaling: String, CaseIterable, Identifiable, Codable {
+    var id: Self { self }
+    case automatic
+    case stretch
+    case aspectFit
+    case aspectFill
+}
+
 enum GSProcessPiority: String, CaseIterable, Identifiable, Codable {
     var id: Self { self }
     case normal, belowNormal
@@ -60,20 +65,33 @@ enum GSLogLevel: String, CaseIterable, Identifiable, Codable {
 }
 
 struct GlobalSettings: Codable, Equatable {
+    private static let currentScenePresentationSettingsVersion = 3
     
     // MARK: Playback
     var otherApplicationFocused = GSPlayback.keepRunning
+    // Keep the persisted key for compatibility with existing settings. The
+    // detector now treats both native fullscreen and desktop maximize as active.
     var otherApplicationFullscreen = GSPlayback.keepRunning
     var otherApplicationPlayingAudio = GSPlayback.keepRunning
-    var displayAsleep = GSPlayback.keepRunning
     var laptopOnBattery = GSPlayback.keepRunning
     
     // MARK: Quality
     var antiAliasing = GSAntiAliasingQuality.msaa_x2
     var postProcessing = GSPostProcessingQuality.disabled
     var textureResolution = GSTextureResolutionQuality.automatic
+    // Scene framebuffer sampling density. This is intentionally independent
+    // from texture decoding quality and never adapts to measured frame time.
+    var sceneRenderQuality = GSSceneRenderQuality.high
     var reflections = false
     var fps: Double = 30
+
+    // MARK: Scene presentation
+    // Per-screen rendering remains the default. Span mode opts into a shared
+    // virtual canvas whose slices are presented by each display window.
+    var scenePresentationScaling = GSScenePresentationScaling.automatic
+    var sceneSpanAcrossScreens = false
+    private var scenePresentationSettingsVersion =
+        Self.currentScenePresentationSettingsVersion
     
     // MARK: Automatic Setup
     var autoStart = false
@@ -90,12 +108,17 @@ struct GlobalSettings: Codable, Equatable {
     
     // MARK: Audio
     var audioOutput = true
+    var systemAudioCaptureEnabled = false
     var reloadWhenChangingOutputDevice = true // Not putting in use
     
     // MARK: Video
     var videoFramework = GSVideoFramework.avkit
     
     // MARK: Advanced
+    var wallpaperEngineAssetsDirectory: String?
+    /// The root directory where newly downloaded and imported wallpapers live.
+    /// `nil` preserves the original Documents/Open Wallpaper Engine location.
+    var wallpaperStorageDirectory: String?
     var processPiority = GSProcessPiority.normal // Not putting in use
     var pauseOnVRAMExhausted = false // Not putting in use
     var restartAfterCrashing = false // Not putting in use
@@ -105,23 +128,213 @@ struct GlobalSettings: Codable, Equatable {
     
     // MARK: Misc
     var autoRefresh = true
+
+    private enum CodingKeys: String, CodingKey {
+        case otherApplicationFocused, otherApplicationFullscreen,
+             otherApplicationPlayingAudio, laptopOnBattery
+        case antiAliasing, postProcessing, textureResolution,
+             sceneRenderQuality, reflections, fps
+        case scenePresentationScaling, sceneSpanAcrossScreens,
+             scenePresentationSettingsVersion
+        case autoStart, safeMode, language
+        case adjustMenuBarTint, appearance
+        case audioOutput, systemAudioCaptureEnabled,
+             reloadWhenChangingOutputDevice
+        case videoFramework
+        case wallpaperEngineAssetsDirectory, wallpaperStorageDirectory,
+             processPiority,
+             pauseOnVRAMExhausted, restartAfterCrashing
+        case logLevel, autoRefresh
+    }
+
+    init() {
+        otherApplicationFocused = .keepRunning
+        otherApplicationFullscreen = .keepRunning
+        otherApplicationPlayingAudio = .keepRunning
+        laptopOnBattery = .keepRunning
+        antiAliasing = .msaa_x2
+        postProcessing = .disabled
+        textureResolution = .automatic
+        sceneRenderQuality = .high
+        reflections = false
+        fps = 30
+        scenePresentationScaling = .automatic
+        sceneSpanAcrossScreens = false
+        scenePresentationSettingsVersion =
+            Self.currentScenePresentationSettingsVersion
+        autoStart = false
+        safeMode = false
+        language = .followSystem
+        adjustMenuBarTint = true
+        appearance = .followSystem
+        audioOutput = true
+        systemAudioCaptureEnabled = false
+        reloadWhenChangingOutputDevice = true
+        videoFramework = .avkit
+        wallpaperEngineAssetsDirectory = nil
+        wallpaperStorageDirectory = nil
+        processPiority = .normal
+        pauseOnVRAMExhausted = false
+        restartAfterCrashing = false
+        logLevel = .none
+        autoRefresh = true
+    }
+
+    // Settings persisted by older builds predate the Scene presentation keys.
+    // Decode those keys opportunistically so adding a setting never resets the
+    // user's unrelated preferences.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        otherApplicationFocused = try container.decodeIfPresent(
+            GSPlayback.self, forKey: .otherApplicationFocused
+        ) ?? .keepRunning
+        otherApplicationFullscreen = try container.decodeIfPresent(
+            GSPlayback.self, forKey: .otherApplicationFullscreen
+        ) ?? .keepRunning
+        otherApplicationPlayingAudio = try container.decodeIfPresent(
+            GSPlayback.self, forKey: .otherApplicationPlayingAudio
+        ) ?? .keepRunning
+        laptopOnBattery = try container.decodeIfPresent(
+            GSPlayback.self, forKey: .laptopOnBattery
+        ) ?? .keepRunning
+        antiAliasing = try container.decodeIfPresent(
+            GSAntiAliasingQuality.self, forKey: .antiAliasing
+        ) ?? .msaa_x2
+        postProcessing = try container.decodeIfPresent(
+            GSPostProcessingQuality.self, forKey: .postProcessing
+        ) ?? .disabled
+        textureResolution = try container.decodeIfPresent(
+            GSTextureResolutionQuality.self, forKey: .textureResolution
+        ) ?? .automatic
+        // Existing installations predate render-density tiers. Preserve their
+        // authored-pixel output instead of silently migrating them down.
+        sceneRenderQuality = try container.decodeIfPresent(
+            GSSceneRenderQuality.self, forKey: .sceneRenderQuality
+        ) ?? .high
+        reflections = try container.decodeIfPresent(
+            Bool.self, forKey: .reflections
+        ) ?? false
+        fps = try container.decodeIfPresent(Double.self, forKey: .fps) ?? 30
+        let storedScenePresentationVersion = try container.decodeIfPresent(
+            Int.self, forKey: .scenePresentationSettingsVersion
+        ) ?? 0
+        let storedScenePresentationScaling = try container.decodeIfPresent(
+            GSScenePresentationScaling.self,
+            forKey: .scenePresentationScaling
+        )
+        // Earlier builds successively used aspect-fill and stretch as their
+        // implicit defaults before Automatic named Wallpaper Engine's Windows
+        // default Cover behavior explicitly. Migrate only the value that
+        // represented the default in each version; preserve explicit choices.
+        let previousImplicitDefault: GSScenePresentationScaling?
+        switch storedScenePresentationVersion {
+        case ...0: previousImplicitDefault = .aspectFill
+        case 1: previousImplicitDefault = .stretch
+        case 2: previousImplicitDefault = .aspectFill
+        default: previousImplicitDefault = nil
+        }
+        if let previousImplicitDefault,
+           storedScenePresentationScaling == previousImplicitDefault {
+            scenePresentationScaling = .automatic
+        } else {
+            scenePresentationScaling =
+                storedScenePresentationScaling ?? .automatic
+        }
+        sceneSpanAcrossScreens = try container.decodeIfPresent(
+            Bool.self, forKey: .sceneSpanAcrossScreens
+        ) ?? false
+        scenePresentationSettingsVersion =
+            Self.currentScenePresentationSettingsVersion
+        autoStart = try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
+        safeMode = try container.decodeIfPresent(Bool.self, forKey: .safeMode) ?? false
+        language = try container.decodeIfPresent(
+            GSLocalization.self, forKey: .language
+        ) ?? .followSystem
+        adjustMenuBarTint = try container.decodeIfPresent(
+            Bool.self, forKey: .adjustMenuBarTint
+        ) ?? true
+        appearance = try container.decodeIfPresent(
+            GSAppearance.self, forKey: .appearance
+        ) ?? .followSystem
+        audioOutput = try container.decodeIfPresent(Bool.self, forKey: .audioOutput) ?? true
+        systemAudioCaptureEnabled = try container.decodeIfPresent(
+            Bool.self, forKey: .systemAudioCaptureEnabled
+        ) ?? false
+        reloadWhenChangingOutputDevice = try container.decodeIfPresent(
+            Bool.self, forKey: .reloadWhenChangingOutputDevice
+        ) ?? true
+        videoFramework = try container.decodeIfPresent(
+            GSVideoFramework.self, forKey: .videoFramework
+        ) ?? .avkit
+        wallpaperEngineAssetsDirectory = try container.decodeIfPresent(
+            String.self, forKey: .wallpaperEngineAssetsDirectory
+        )
+        wallpaperStorageDirectory = try container.decodeIfPresent(
+            String.self, forKey: .wallpaperStorageDirectory
+        )
+        processPiority = try container.decodeIfPresent(
+            GSProcessPiority.self, forKey: .processPiority
+        ) ?? .normal
+        pauseOnVRAMExhausted = try container.decodeIfPresent(
+            Bool.self, forKey: .pauseOnVRAMExhausted
+        ) ?? false
+        restartAfterCrashing = try container.decodeIfPresent(
+            Bool.self, forKey: .restartAfterCrashing
+        ) ?? false
+        logLevel = try container.decodeIfPresent(
+            GSLogLevel.self, forKey: .logLevel
+        ) ?? .none
+        autoRefresh = try container.decodeIfPresent(Bool.self, forKey: .autoRefresh) ?? true
+    }
+
+    var playbackPolicyConfiguration: PlaybackPolicyConfiguration {
+        PlaybackPolicyConfiguration(
+            otherApplicationFocused: otherApplicationFocused,
+            otherApplicationFullscreenOrMaximized: otherApplicationFullscreen,
+            otherApplicationPlayingAudio: otherApplicationPlayingAudio,
+            laptopOnBattery: laptopOnBattery
+        )
+    }
+
+    var requiresSystemAudioCaptureForAudioRule: Bool {
+        otherApplicationPlayingAudio != .keepRunning &&
+            !systemAudioCaptureEnabled
+    }
 }
 
+@MainActor
 class GlobalSettingsViewModel: ObservableObject {
     @Published var settings: GlobalSettings
     {
-        didSet { save(); validate() }
+        didSet {
+            save()
+            validate()
+            SceneSystemAudioSpectrumProvider.shared.setCaptureAllowed(
+                settings.systemAudioCaptureEnabled
+            )
+        }
     }
     
     @Published var selection = 0
-    
+
     @Published var isFirstLaunch = UserDefaults.standard.value(forKey: "IsFirstLaunch") as? Bool ?? true
+
+    /// A host-condition detector can require privacy permission or a live
+    /// capture stream. Keep that failure visible instead of treating the
+    /// condition as if it were being monitored successfully.
+    @Published private(set) var playbackPolicyIssue: String?
     
     var didFinishLaunchingNotificationCancellable: Cancellable?
     var didActivateApplicationNotificationCancellable: Cancellable?
     var didCurrentWallpaperChangeCancellable: Cancellable?
     var didAddToLoginItemCancellable: Cancellable?
     var didChangeAdjustMenuBarTintCancellable: Cancellable?
+    var didChangePlaybackPolicyConfigurationCancellable: Cancellable?
+    private var playbackConditionMonitor: PlaybackConditionMonitor?
+
+    private var playbackPolicyState = PlaybackPolicyState()
+    private var appliedPlaybackPolicyAction = GSPlayback.keepRunning
+    private var hasStartedPlaybackPolicy = false
     
     init() {
         if let data = UserDefaults.standard.data(forKey: "GlobalSettings"),
@@ -130,6 +343,12 @@ class GlobalSettingsViewModel: ObservableObject {
         } else {
             self.settings = GlobalSettings()
         }
+        self.playbackPolicyState = PlaybackPolicyState(
+            configuration: self.settings.playbackPolicyConfiguration
+        )
+        SceneSystemAudioSpectrumProvider.shared.setCaptureAllowed(
+            self.settings.systemAudioCaptureEnabled
+        )
         
         // Add observers
         self.didFinishLaunchingNotificationCancellable =
@@ -138,17 +357,40 @@ class GlobalSettingsViewModel: ObservableObject {
     }
     
     deinit {
+        MainActor.assumeIsolated {
+            playbackConditionMonitor?.stop()
+        }
         didActivateApplicationNotificationCancellable?.cancel()
         didFinishLaunchingNotificationCancellable?.cancel()
         didCurrentWallpaperChangeCancellable?.cancel()
         didAddToLoginItemCancellable?.cancel()
         didChangeAdjustMenuBarTintCancellable?.cancel()
+        didChangePlaybackPolicyConfigurationCancellable?.cancel()
     }
     
     func didFinishLaunchingNotification() {
+        guard !hasStartedPlaybackPolicy else { return }
+        hasStartedPlaybackPolicy = true
+
         self.didActivateApplicationNotificationCancellable =
         NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didActivateApplicationNotification)
+            .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.activateApplicationDidChange() }
+
+        let conditionMonitor = PlaybackConditionMonitor(
+            eventHandler: { [weak self] event in
+                self?.updatePlaybackPolicy(event)
+            },
+            issueHandler: { [weak self] issue in
+                self?.playbackPolicyIssue = issue
+            }
+        )
+        playbackConditionMonitor = conditionMonitor
+        conditionMonitor.start()
+        // NSWorkspace may already have delivered the activation notification
+        // before this observer was installed. Sample the current frontmost
+        // application explicitly at startup so the initial policy is real.
+        activateApplicationDidChange()
         
         self.didCurrentWallpaperChangeCancellable =
         AppDelegate.shared.wallpaperViewModel.$wallpapers
@@ -170,9 +412,47 @@ class GlobalSettingsViewModel: ObservableObject {
             .removeDuplicates { $0.adjustMenuBarTint == $1.adjustMenuBarTint }
             .map { $0.adjustMenuBarTint }
             .sink { [weak self] in self?.didChangeAdjustMenuBarTint($0) }
+
+        self.didChangePlaybackPolicyConfigurationCancellable =
+        self.$settings
+            .removeDuplicates { previous, current in
+                previous.playbackPolicyConfiguration == current.playbackPolicyConfiguration &&
+                    previous.systemAudioCaptureEnabled == current.systemAudioCaptureEnabled
+            }
+            .receive(on: RunLoop.main)
+            .sink { [weak self] settings in
+                guard let self else { return }
+                let configuration = settings.playbackPolicyConfiguration
+                self.playbackConditionMonitor?.setAudioDetectionEnabled(
+                    settings.systemAudioCaptureEnabled &&
+                        configuration.otherApplicationPlayingAudio != .keepRunning
+                )
+                self.updatePlaybackPolicy(.configurationChanged(configuration))
+            }
             
-        
         self.validate()
+    }
+
+    func stopPlaybackPolicyMonitoring(restorePlayback: Bool = true) {
+        playbackConditionMonitor?.stop()
+        playbackConditionMonitor = nil
+        playbackPolicyIssue = nil
+        didActivateApplicationNotificationCancellable?.cancel()
+        didActivateApplicationNotificationCancellable = nil
+        didChangePlaybackPolicyConfigurationCancellable?.cancel()
+        didChangePlaybackPolicyConfigurationCancellable = nil
+        playbackPolicyState = PlaybackPolicyState(
+            configuration: settings.playbackPolicyConfiguration
+        )
+        if restorePlayback {
+            let wasStopped = appliedPlaybackPolicyAction == .stop
+            AppDelegate.shared.wallpaperViewModel.setPlaybackPolicyAction(.keepRunning)
+            appliedPlaybackPolicyAction = .keepRunning
+            if wasStopped {
+                scheduleWallpaperWindowRestoration()
+            }
+        }
+        hasStartedPlaybackPolicy = false
     }
     
     func didAddToLoginItem(_ added: Bool) {
@@ -217,37 +497,7 @@ class GlobalSettingsViewModel: ObservableObject {
     
     func save() {
         let data = try! JSONEncoder().encode(settings)
-        print(String(describing: String(data: data, encoding: .utf8)))
         UserDefaults.standard.set(data, forKey: "GlobalSettings")
-    }
-    
-    func setQuality(_ quality: GSQuality) {
-        switch quality {
-        case .low:
-            self.settings.antiAliasing = .none
-            self.settings.postProcessing = .disabled
-            self.settings.textureResolution = .highQuality
-            self.settings.fps = 10
-            self.settings.reflections = false
-        case .medium:
-            self.settings.antiAliasing = .none
-            self.settings.postProcessing = .enabled
-            self.settings.textureResolution = .highQuality
-            self.settings.fps = 15
-            self.settings.reflections = true
-        case .high:
-            self.settings.antiAliasing = .msaa_x2
-            self.settings.postProcessing = .enabled
-            self.settings.textureResolution = .highQuality
-            self.settings.fps = 25
-            self.settings.reflections = true
-        case .ultra:
-            self.settings.antiAliasing = .msaa_x2
-            self.settings.postProcessing = .ultra
-            self.settings.textureResolution = .highQuality
-            self.settings.fps = 30
-            self.settings.reflections = true
-        }
     }
     
     private func validate() {
@@ -262,42 +512,51 @@ class GlobalSettingsViewModel: ObservableObject {
     }
     
     func activateApplicationDidChange() {
-        guard let frontmostApplication = NSWorkspace.shared.frontmostApplication else { return }
+        let bundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let isOtherApplication = bundleIdentifier != nil &&
+            bundleIdentifier != "com.apple.finder" &&
+            bundleIdentifier != Bundle.main.bundleIdentifier
+        updatePlaybackPolicy(.otherApplicationFocused(isOtherApplication))
+    }
 
-        switch frontmostApplication.bundleIdentifier {
-        case "com.apple.finder", Bundle.main.bundleIdentifier:
-            globalSettingsWhenApplicationDidBecomeActive()
-        default:
-            switch self.settings.otherApplicationFocused {
-            case .mute:
-                AppDelegate.shared.mute()
-            case .pause:
-                AppDelegate.shared.pause()
-            case .stop:
-                AppDelegate.shared.pause()
-                for window in AppDelegate.shared.wallpaperWindows.values { window.orderOut(nil) }
-            case .keepRunning:
-                break
-            }
+    /// Feeds an explicit host condition into the policy state machine.
+    /// Platform detectors should call this on the application thread; no
+    /// detector is synthesized when a condition has no data source yet.
+    @discardableResult
+    func updatePlaybackPolicy(
+        _ event: PlaybackPolicyEvent
+    ) -> PlaybackPolicyTransition {
+        let transition = playbackPolicyState.reduce(event)
+        guard transition.changed else { return transition }
+        applyPlaybackPolicyAction(transition.current)
+        return transition
+    }
+
+    private func scheduleWallpaperWindowRestoration() {
+        // @Published invalidation is delivered synchronously, while SwiftUI
+        // mounts the replacement runtime on the following run-loop turn. Keep
+        // the wallpaper windows hidden until that mount has been requested.
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.appliedPlaybackPolicyAction != .stop else { return }
+            AppDelegate.shared.setWallpaperWindowsSuppressedForPlayback(false)
         }
     }
 
-    func globalSettingsWhenApplicationDidBecomeActive() {
-        switch self.settings.otherApplicationFocused {
-        case .mute:
-            AppDelegate.shared.unmute()
-        case .pause:
-            AppDelegate.shared.resume()
-        case .stop:
-            AppDelegate.shared.resume()
-            for window in AppDelegate.shared.wallpaperWindows.values { window.orderFront(nil) }
-        case .keepRunning:
-            break
+    private func applyPlaybackPolicyAction(_ action: GSPlayback) {
+        let previousAction = appliedPlaybackPolicyAction
+        if action == previousAction {
+            return
+        }
+
+        let wallpaperViewModel = AppDelegate.shared.wallpaperViewModel
+        wallpaperViewModel.setPlaybackPolicyAction(action)
+        appliedPlaybackPolicyAction = action
+        if action == .stop {
+            AppDelegate.shared.setWallpaperWindowsSuppressedForPlayback(true)
+        } else if previousAction == .stop {
+            scheduleWallpaperWindowRestoration()
         }
     }
-    
-    private func saveAndValidate() {
-        save()
-        validate()
-    }
+
 }

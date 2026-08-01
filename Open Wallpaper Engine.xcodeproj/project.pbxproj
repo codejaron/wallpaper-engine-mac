@@ -7,6 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F90000000000000000000001 /* ScenePropertyContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000000000000000000002 /* ScenePropertyContent.swift */; };
+		F90000000000000000000003 /* RemoteImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90000000000000000000004 /* RemoteImage.swift */; };
+		F90000000000000000000005 /* SwiftSoup-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = F90000000000000000000006 /* SwiftSoup-LICENSE.txt */; };
+		F90000000000000000000007 /* SwiftSoup in Frameworks */ = {isa = PBXBuildFile; productRef = F90000000000000000000009 /* SwiftSoup */; };
+		5EC47E912A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EC47E902A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift */; };
+		FA1000000000000000000001 /* SteamCmdServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000002 /* SteamCmdServiceTests.swift */; };
+		F70000000000000000000001 /* PlaybackPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000000000000000000002 /* PlaybackPolicyTests.swift */; };
+		F80000000000000000000001 /* InfoPlist.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = F80000000000000000000002 /* InfoPlist.xcstrings */; };
 		5E0700E62A859FAD00ADFE2E /* WallpaperNotFound.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 5E0700E52A859FAD00ADFE2E /* WallpaperNotFound.mp4 */; };
 		5E2F1E892A57DF2D0081D69D /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 5E2F1E882A57DF2D0081D69D /* Localizable.xcstrings */; };
 		5E32ABFE2A4D595D00A0EEEC /* FilterResults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E32ABFD2A4D595D00A0EEEC /* FilterResults.swift */; };
@@ -49,12 +57,7 @@
 		5EFBB0BB2A2F10EA00E39BEC /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EFBB0BA2A2F10EA00E39BEC /* main.swift */; };
 		5EFC591D2A81ACBC005F97E2 /* StatusBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EFC591C2A81ACBC005F97E2 /* StatusBar.swift */; };
 		5EFC591F2A81ACC3005F97E2 /* MainMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EFC591E2A81ACC3005F97E2 /* MainMenu.swift */; };
-		DAEE29C62A9CB52100633898 /* WebWallpaperViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */; };
-		AA1B2C3D4E5F600200ABCD01 /* PKGParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1B2C3D4E5F600100ABCD01 /* PKGParser.swift */; };
-		AA1B2C3D4E5F600200ABCD02 /* TEXParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1B2C3D4E5F600100ABCD02 /* TEXParser.swift */; };
-		AA1B2C3D4E5F600200ABCD03 /* SceneModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1B2C3D4E5F600100ABCD03 /* SceneModels.swift */; };
 		AA1B2C3D4E5F600200ABCD04 /* SceneWallpaperViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1B2C3D4E5F600100ABCD04 /* SceneWallpaperViewModel.swift */; };
-		AA1B2C3D4E5F600200ABCD05 /* SpriteKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA1B2C3D4E5F600100ABCD05 /* SpriteKit.framework */; };
 		BB0000000000000000000003 /* ObjCExceptionCatcher.m in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000002 /* ObjCExceptionCatcher.m */; };
 		CC0000000000000000000001 /* WallpaperDirectory.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0000000000000000000002 /* WallpaperDirectory.swift */; };
 		CC0000000000000000000003 /* ZipImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0000000000000000000004 /* ZipImporter.swift */; };
@@ -62,9 +65,73 @@
 		CC0000000000000000000007 /* WorkshopAPIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC0000000000000000000008 /* WorkshopAPIService.swift */; };
 		CC0000000000000000000009 /* WorkshopViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC000000000000000000000A /* WorkshopViewModel.swift */; };
 		CC000000000000000000000B /* WorkshopView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC000000000000000000000C /* WorkshopView.swift */; };
+		DD10000000000000000001 /* WorkshopFilterSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD10000000000000000002 /* WorkshopFilterSelection.swift */; };
+		DD10000000000000000003 /* WorkshopSearchPaginator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD10000000000000000004 /* WorkshopSearchPaginator.swift */; };
+		DAEE29C62A9CB52100633898 /* WebWallpaperViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */; };
+		D10000000000000000000001 /* SceneRuntimeBridge in Frameworks */ = {isa = PBXBuildFile; productRef = D10000000000000000000003 /* SceneRuntimeBridge */; };
+		D30000000000000000000001 /* SceneAudio in Frameworks */ = {isa = PBXBuildFile; productRef = D30000000000000000000002 /* SceneAudio */; };
+		E40000000000000000000001 /* PlaybackPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E40000000000000000000002 /* PlaybackPolicy.swift */; };
+		F50000000000000000000001 /* PlaybackConditionMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50000000000000000000002 /* PlaybackConditionMonitor.swift */; };
+		F60000000000000000000001 /* SceneAudioCaptureLifecycleMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F60000000000000000000002 /* SceneAudioCaptureLifecycleMonitor.swift */; };
+		A60000000000000000000001 /* SceneMediaSnapshotProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A60000000000000000000002 /* SceneMediaSnapshotProvider.swift */; };
+		A70000000000000000000001 /* SceneNowPlayingMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70000000000000000000002 /* SceneNowPlayingMonitor.swift */; };
+		A80000000000000000000001 /* MediaRemoteNowPlayingSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = A80000000000000000000002 /* MediaRemoteNowPlayingSource.swift */; };
+		A90000000000000000000001 /* SceneMediaArtworkProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A90000000000000000000002 /* SceneMediaArtworkProcessor.swift */; };
+		D10000000000000000000007 /* SceneRuntime NOTICE in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000004 /* SceneRuntime NOTICE */; };
+		D10000000000000000000008 /* LZ4.txt in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000005 /* LZ4.txt */; };
+		D10000000000000000000009 /* nlohmann-json.txt in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000006 /* nlohmann-json.txt */; };
+		D1000000000000000000000B /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 5EF4C24B2A4C9872009831E5 /* LICENSE */; };
+		D1000000000000000000000D /* glslang-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = D1000000000000000000000C /* glslang-LICENSE.txt */; };
+		D1000000000000000000000F /* SPIRV-Cross-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = D1000000000000000000000E /* SPIRV-Cross-LICENSE.txt */; };
+		D10000000000000000000011 /* QuickJS-NG-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000010 /* QuickJS-NG-LICENSE.txt */; };
+		D20000000000000000000002 /* SceneProperty.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000001 /* SceneProperty.swift */; };
+		D20000000000000000000004 /* ScenePropertyControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000003 /* ScenePropertyControls.swift */; };
+		B10000000000000000000001 /* env.m in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000011 /* env.m */; };
+		B10000000000000000000002 /* get.m in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000012 /* get.m */; };
+		B10000000000000000000003 /* globals.m in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000013 /* globals.m */; };
+		B10000000000000000000004 /* keys.m in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014 /* keys.m */; };
+		B10000000000000000000005 /* now_playing.m in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000015 /* now_playing.m */; };
+		B10000000000000000000006 /* MediaRemote.m in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000016 /* MediaRemote.m */; };
+		B10000000000000000000007 /* helpers.m in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000017 /* helpers.m */; };
+		B10000000000000000000020 /* MediaRemoteMini LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000021 /* MediaRemoteMini LICENSE */; };
+		B10000000000000000000031 /* MediaRemoteMini.dylib in Embed MediaRemote Helper */ = {isa = PBXBuildFile; fileRef = B10000000000000000000030 /* MediaRemoteMini.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		5EC47E8D2A2DB2E700120CCC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5EC47E6E2A2DB2E600120CCC /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5EC47E752A2DB2E600120CCC;
+			remoteInfo = "Open Wallpaper Engine";
+		};
+		B10000000000000000000047 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5EC47E6E2A2DB2E600120CCC /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B10000000000000000000042;
+			remoteInfo = MediaRemoteMini;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		B10000000000000000000046 /* Embed MediaRemote Helper */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				B10000000000000000000031 /* MediaRemoteMini.dylib in Embed MediaRemote Helper */,
+			);
+			name = "Embed MediaRemote Helper";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		F90000000000000000000002 /* ScenePropertyContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScenePropertyContent.swift; sourceTree = "<group>"; };
+		F90000000000000000000004 /* RemoteImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteImage.swift; sourceTree = "<group>"; };
+		F90000000000000000000006 /* SwiftSoup-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "SwiftSoup-LICENSE.txt"; sourceTree = "<group>"; };
 		5E0700E52A859FAD00ADFE2E /* WallpaperNotFound.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = WallpaperNotFound.mp4; sourceTree = "<group>"; };
 		5E1670732A88EBEF00D1B199 /* change-signing-certificate.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "change-signing-certificate.png"; sourceTree = "<group>"; };
 		5E1670742A88ED8400D1B199 /* import-menu.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "import-menu.png"; sourceTree = "<group>"; };
@@ -102,6 +169,11 @@
 		5EB152A02A82ADEB007EA845 /* Open_Wallpaper_Engine.docc */ = {isa = PBXFileReference; lastKnownFileType = folder.documentationcatalog; path = Open_Wallpaper_Engine.docc; sourceTree = "<group>"; };
 		5EB4DB872A980532000A1FEA /* ExplorerItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExplorerItem.swift; sourceTree = "<group>"; };
 		5EC47E762A2DB2E600120CCC /* Open Wallpaper Engine.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Open Wallpaper Engine.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		5EC47E8C2A2DB2E700120CCC /* Open Wallpaper EngineTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Open Wallpaper EngineTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		5EC47E902A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopFilterSelectionTests.swift; sourceTree = "<group>"; };
+		FA1000000000000000000002 /* SteamCmdServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteamCmdServiceTests.swift; sourceTree = "<group>"; };
+		F70000000000000000000002 /* PlaybackPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackPolicyTests.swift; sourceTree = "<group>"; };
+		F80000000000000000000002 /* InfoPlist.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = InfoPlist.xcstrings; sourceTree = "<group>"; };
 		5EC47E7D2A2DB2E700120CCC /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5EC47E802A2DB2E700120CCC /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		5EC47E872A2DB2E700120CCC /* Open_Wallpaper_Engine.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Open_Wallpaper_Engine.entitlements; sourceTree = "<group>"; };
@@ -118,13 +190,8 @@
 		5EFBB0BA2A2F10EA00E39BEC /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		5EFC591C2A81ACBC005F97E2 /* StatusBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBar.swift; sourceTree = "<group>"; };
 		5EFC591E2A81ACC3005F97E2 /* MainMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainMenu.swift; sourceTree = "<group>"; };
-		B4AD1D0F2AA24E8200471AC8 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
-		DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebWallpaperViewModel.swift; sourceTree = "<group>"; };
-		AA1B2C3D4E5F600100ABCD01 /* PKGParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PKGParser.swift; sourceTree = "<group>"; };
-		AA1B2C3D4E5F600100ABCD02 /* TEXParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TEXParser.swift; sourceTree = "<group>"; };
-		AA1B2C3D4E5F600100ABCD03 /* SceneModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneModels.swift; sourceTree = "<group>"; };
 		AA1B2C3D4E5F600100ABCD04 /* SceneWallpaperViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneWallpaperViewModel.swift; sourceTree = "<group>"; };
-		AA1B2C3D4E5F600100ABCD05 /* SpriteKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SpriteKit.framework; path = System/Library/Frameworks/SpriteKit.framework; sourceTree = SDKROOT; };
+		B4AD1D0F2AA24E8200471AC8 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
 		BB0000000000000000000001 /* ObjCExceptionCatcher.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ObjCExceptionCatcher.h; sourceTree = "<group>"; };
 		BB0000000000000000000002 /* ObjCExceptionCatcher.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ObjCExceptionCatcher.m; sourceTree = "<group>"; };
 		CC0000000000000000000002 /* WallpaperDirectory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperDirectory.swift; sourceTree = "<group>"; };
@@ -133,14 +200,57 @@
 		CC0000000000000000000008 /* WorkshopAPIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopAPIService.swift; sourceTree = "<group>"; };
 		CC000000000000000000000A /* WorkshopViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopViewModel.swift; sourceTree = "<group>"; };
 		CC000000000000000000000C /* WorkshopView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopView.swift; sourceTree = "<group>"; };
+		DD10000000000000000002 /* WorkshopFilterSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopFilterSelection.swift; sourceTree = "<group>"; };
+		DD10000000000000000004 /* WorkshopSearchPaginator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkshopSearchPaginator.swift; sourceTree = "<group>"; };
+		DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebWallpaperViewModel.swift; sourceTree = "<group>"; };
+		D10000000000000000000004 /* SceneRuntime NOTICE */ = {isa = PBXFileReference; lastKnownFileType = text; name = "SceneRuntime NOTICE"; path = SceneRuntime/NOTICE; sourceTree = "<group>"; };
+		D10000000000000000000005 /* LZ4.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SceneRuntime/ThirdPartyLicenses/LZ4.txt; sourceTree = "<group>"; };
+		D10000000000000000000006 /* nlohmann-json.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SceneRuntime/ThirdPartyLicenses/nlohmann-json.txt; sourceTree = "<group>"; };
+		D1000000000000000000000C /* glslang-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SceneRuntime/ThirdPartyLicenses/glslang-LICENSE.txt; sourceTree = "<group>"; };
+		D1000000000000000000000E /* SPIRV-Cross-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SceneRuntime/ThirdPartyLicenses/SPIRV-Cross-LICENSE.txt; sourceTree = "<group>"; };
+		D10000000000000000000010 /* QuickJS-NG-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = SceneRuntime/ThirdPartyLicenses/QuickJS-NG-LICENSE.txt; sourceTree = "<group>"; };
+		D20000000000000000000001 /* SceneProperty.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneProperty.swift; sourceTree = "<group>"; };
+		D20000000000000000000003 /* ScenePropertyControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScenePropertyControls.swift; sourceTree = "<group>"; };
+		E40000000000000000000002 /* PlaybackPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackPolicy.swift; sourceTree = "<group>"; };
+		F50000000000000000000002 /* PlaybackConditionMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackConditionMonitor.swift; sourceTree = "<group>"; };
+		F60000000000000000000002 /* SceneAudioCaptureLifecycleMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneAudioCaptureLifecycleMonitor.swift; sourceTree = "<group>"; };
+		A60000000000000000000002 /* SceneMediaSnapshotProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneMediaSnapshotProvider.swift; sourceTree = "<group>"; };
+		A70000000000000000000002 /* SceneNowPlayingMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneNowPlayingMonitor.swift; sourceTree = "<group>"; };
+		A80000000000000000000002 /* MediaRemoteNowPlayingSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaRemoteNowPlayingSource.swift; sourceTree = "<group>"; };
+		A90000000000000000000002 /* SceneMediaArtworkProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneMediaArtworkProcessor.swift; sourceTree = "<group>"; };
+		B10000000000000000000011 /* env.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = adapter/env.m; sourceTree = "<group>"; };
+		B10000000000000000000012 /* get.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = adapter/get.m; sourceTree = "<group>"; };
+		B10000000000000000000013 /* globals.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = adapter/globals.m; sourceTree = "<group>"; };
+		B10000000000000000000014 /* keys.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = adapter/keys.m; sourceTree = "<group>"; };
+		B10000000000000000000015 /* now_playing.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = adapter/now_playing.m; sourceTree = "<group>"; };
+		B10000000000000000000016 /* MediaRemote.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = private/MediaRemote.m; sourceTree = "<group>"; };
+		B10000000000000000000017 /* helpers.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = utility/helpers.m; sourceTree = "<group>"; };
+		B10000000000000000000021 /* MediaRemoteMini LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = MediaRemoteMini-LICENSE.txt; sourceTree = "<group>"; };
+		B10000000000000000000030 /* MediaRemoteMini.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = MediaRemoteMini.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		B10000000000000000000041 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5EC47E892A2DB2E700120CCC /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		5EC47E732A2DB2E600120CCC /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AA1B2C3D4E5F600200ABCD05 /* SpriteKit.framework in Frameworks */,
+				F90000000000000000000007 /* SwiftSoup in Frameworks */,
+				D30000000000000000000001 /* SceneAudio in Frameworks */,
+				D10000000000000000000001 /* SceneRuntimeBridge in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -165,6 +275,8 @@
 				5E66A0E52A8BA69B00EE79D6 /* WallpaperExplorer.swift */,
 				5EDF1E152A93B4B6006617EA /* WallpaperDiscover.swift */,
 				5E66A0E72A8BA95600EE79D6 /* WallpaperPreview.swift */,
+				D20000000000000000000003 /* ScenePropertyControls.swift */,
+				F90000000000000000000002 /* ScenePropertyContent.swift */,
 				5E66A0DC2A8ADF7C00EE79D6 /* ExplorerTopBar.swift */,
 				5EB4DB872A980532000A1FEA /* ExplorerItem.swift */,
 				5E66A0E02A8BA18D00EE79D6 /* GifImage.swift */,
@@ -208,12 +320,19 @@
 		5E98F6C92A826E5300C12E34 /* Services */ = {
 			isa = PBXGroup;
 			children = (
-				AA1B2C3D4E5F600300ABCD01 /* SceneParsers */,
 				5E7665252A2DC30D00E0E4B4 /* WEProject.swift */,
 				5EF28EBE2A8986AC0013ABBE /* WallpaperViewModel.swift */,
 				5EF28EC02A8990D90013ABBE /* VideoWallpaperViewModel.swift */,
 				DAEE29C52A9CB52100633898 /* WebWallpaperViewModel.swift */,
 				AA1B2C3D4E5F600100ABCD04 /* SceneWallpaperViewModel.swift */,
+				D20000000000000000000001 /* SceneProperty.swift */,
+				E40000000000000000000002 /* PlaybackPolicy.swift */,
+				F50000000000000000000002 /* PlaybackConditionMonitor.swift */,
+				F60000000000000000000002 /* SceneAudioCaptureLifecycleMonitor.swift */,
+				A60000000000000000000002 /* SceneMediaSnapshotProvider.swift */,
+				A80000000000000000000002 /* MediaRemoteNowPlayingSource.swift */,
+				A90000000000000000000002 /* SceneMediaArtworkProcessor.swift */,
+				A70000000000000000000002 /* SceneNowPlayingMonitor.swift */,
 				5E51A43B2AA33F5500E46E99 /* GlobalSettingsService.swift */,
 				BB0000000000000000000001 /* ObjCExceptionCatcher.h */,
 				BB0000000000000000000002 /* ObjCExceptionCatcher.m */,
@@ -221,19 +340,11 @@
 				CC0000000000000000000004 /* ZipImporter.swift */,
 				CC0000000000000000000006 /* SteamCmdService.swift */,
 				CC0000000000000000000008 /* WorkshopAPIService.swift */,
+				DD10000000000000000002 /* WorkshopFilterSelection.swift */,
+				DD10000000000000000004 /* WorkshopSearchPaginator.swift */,
 				CC000000000000000000000A /* WorkshopViewModel.swift */,
 			);
 			path = Services;
-			sourceTree = "<group>";
-		};
-		AA1B2C3D4E5F600300ABCD01 /* SceneParsers */ = {
-			isa = PBXGroup;
-			children = (
-				AA1B2C3D4E5F600100ABCD01 /* PKGParser.swift */,
-				AA1B2C3D4E5F600100ABCD02 /* TEXParser.swift */,
-				AA1B2C3D4E5F600100ABCD03 /* SceneModels.swift */,
-			);
-			path = SceneParsers;
 			sourceTree = "<group>";
 		};
 		5E98F6CA2A826E8B00C12E34 /* SettingsView */ = {
@@ -262,6 +373,7 @@
 		5E98F6CC2A826ED500C12E34 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				F90000000000000000000006 /* SwiftSoup-LICENSE.txt */,
 				5E7A89BF2AAB9D4E00192EB0 /* maxwell-cat.gif */,
 				5E0700E52A859FAD00ADFE2E /* WallpaperNotFound.mp4 */,
 				5EC47E7D2A2DB2E700120CCC /* Assets.xcassets */,
@@ -272,6 +384,8 @@
 		5EC47E6D2A2DB2E600120CCC = {
 			isa = PBXGroup;
 			children = (
+				B10000000000000000000049 /* MediaRemoteMini */,
+				D1000000000000000000000A /* SceneRuntime Notices */,
 				B4AD1D0F2AA24E8200471AC8 /* .gitignore */,
 				5E6091F12A83E85D00D4C36C /* AUTHORS.md */,
 				5EF4C24A2A4C9871009831E5 /* CNAME */,
@@ -279,15 +393,46 @@
 				5EF4C24C2A4C98FA009831E5 /* README.md */,
 				5EEE8D5D2A7501C800DCE41A /* resources */,
 				5EC47E782A2DB2E600120CCC /* Open Wallpaper Engine */,
+				5EC47E8F2A2DB2E700120CCC /* Open Wallpaper EngineTests */,
 				5EC47E772A2DB2E600120CCC /* Products */,
-				AA1B2C3D4E5F600100ABCD05 /* SpriteKit.framework */,
 			);
+			sourceTree = "<group>";
+		};
+		B10000000000000000000049 /* MediaRemoteMini */ = {
+			isa = PBXGroup;
+			children = (
+				B10000000000000000000011 /* env.m */,
+				B10000000000000000000012 /* get.m */,
+				B10000000000000000000013 /* globals.m */,
+				B10000000000000000000014 /* keys.m */,
+				B10000000000000000000015 /* now_playing.m */,
+				B10000000000000000000016 /* MediaRemote.m */,
+				B10000000000000000000017 /* helpers.m */,
+				B10000000000000000000021 /* MediaRemoteMini LICENSE */,
+			);
+			name = MediaRemoteMini;
+			path = ThirdParty/MediaRemoteMini;
+			sourceTree = "<group>";
+		};
+		D1000000000000000000000A /* SceneRuntime Notices */ = {
+			isa = PBXGroup;
+			children = (
+				D10000000000000000000004 /* SceneRuntime NOTICE */,
+				D10000000000000000000005 /* LZ4.txt */,
+				D10000000000000000000006 /* nlohmann-json.txt */,
+				D1000000000000000000000C /* glslang-LICENSE.txt */,
+				D1000000000000000000000E /* SPIRV-Cross-LICENSE.txt */,
+				D10000000000000000000010 /* QuickJS-NG-LICENSE.txt */,
+			);
+			name = "SceneRuntime Notices";
 			sourceTree = "<group>";
 		};
 		5EC47E772A2DB2E600120CCC /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				5EC47E762A2DB2E600120CCC /* Open Wallpaper Engine.app */,
+				5EC47E8C2A2DB2E700120CCC /* Open Wallpaper EngineTests.xctest */,
+				B10000000000000000000030 /* MediaRemoteMini.dylib */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -306,6 +451,7 @@
 				5E98F6CC2A826ED500C12E34 /* Resources */,
 				5EC47E7F2A2DB2E700120CCC /* Preview Content */,
 				5E2F1E882A57DF2D0081D69D /* Localizable.xcstrings */,
+				F80000000000000000000002 /* InfoPlist.xcstrings */,
 				5EC47E872A2DB2E700120CCC /* Open_Wallpaper_Engine.entitlements */,
 				5EB152A02A82ADEB007EA845 /* Open_Wallpaper_Engine.docc */,
 			);
@@ -320,9 +466,20 @@
 			path = "Preview Content";
 			sourceTree = "<group>";
 		};
+		5EC47E8F2A2DB2E700120CCC /* Open Wallpaper EngineTests */ = {
+			isa = PBXGroup;
+			children = (
+				F70000000000000000000002 /* PlaybackPolicyTests.swift */,
+				FA1000000000000000000002 /* SteamCmdServiceTests.swift */,
+				5EC47E902A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift */,
+			);
+			path = "Open Wallpaper EngineTests";
+			sourceTree = "<group>";
+		};
 		5EDF1E122A93B026006617EA /* GlobalComponents */ = {
 			isa = PBXGroup;
 			children = (
+				F90000000000000000000004 /* RemoteImage.swift */,
 				5EDF1E132A93B06B006617EA /* WorkingInProgress.swift */,
 			);
 			path = GlobalComponents;
@@ -359,15 +516,56 @@
 				5EC47E722A2DB2E600120CCC /* Sources */,
 				5EC47E732A2DB2E600120CCC /* Frameworks */,
 				5EC47E742A2DB2E600120CCC /* Resources */,
+				B10000000000000000000046 /* Embed MediaRemote Helper */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B10000000000000000000048 /* PBXTargetDependency */,
+			);
+			name = "Open Wallpaper Engine";
+			packageProductDependencies = (
+				F90000000000000000000009 /* SwiftSoup */,
+				D30000000000000000000002 /* SceneAudio */,
+				D10000000000000000000003 /* SceneRuntimeBridge */,
+			);
+			productName = "Open Wallpaper Engine";
+			productReference = 5EC47E762A2DB2E600120CCC /* Open Wallpaper Engine.app */;
+			productType = "com.apple.product-type.application";
+		};
+		B10000000000000000000042 /* MediaRemoteMini */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B10000000000000000000043 /* Build configuration list for PBXNativeTarget "MediaRemoteMini" */;
+			buildPhases = (
+				B10000000000000000000040 /* Sources */,
+				B10000000000000000000041 /* Frameworks */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 			);
-			name = "Open Wallpaper Engine";
-			productName = "Open Wallpaper Engine";
-			productReference = 5EC47E762A2DB2E600120CCC /* Open Wallpaper Engine.app */;
-			productType = "com.apple.product-type.application";
+			name = MediaRemoteMini;
+			productName = MediaRemoteMini;
+			productReference = B10000000000000000000030 /* MediaRemoteMini.dylib */;
+			productType = "com.apple.product-type.library.dynamic";
+		};
+		5EC47E8B2A2DB2E700120CCC /* Open Wallpaper EngineTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5EC47EA32A2DB2E700120CCC /* Build configuration list for PBXNativeTarget "Open Wallpaper EngineTests" */;
+			buildPhases = (
+				5EC47E882A2DB2E700120CCC /* Sources */,
+				5EC47E892A2DB2E700120CCC /* Frameworks */,
+				5EC47E8A2A2DB2E700120CCC /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5EC47E8E2A2DB2E700120CCC /* PBXTargetDependency */,
+			);
+			name = "Open Wallpaper EngineTests";
+			productName = "Open Wallpaper EngineTests";
+			productReference = 5EC47E8C2A2DB2E700120CCC /* Open Wallpaper EngineTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -379,8 +577,15 @@
 				LastSwiftUpdateCheck = 1430;
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
+					B10000000000000000000042 = {
+						CreatedOnToolsVersion = 17.0;
+					};
 					5EC47E752A2DB2E600120CCC = {
 						CreatedOnToolsVersion = 14.3.1;
+					};
+					5EC47E8B2A2DB2E700120CCC = {
+						CreatedOnToolsVersion = 14.3.1;
+						TestTargetID = 5EC47E752A2DB2E600120CCC;
 					};
 				};
 			};
@@ -394,23 +599,46 @@
 				"zh-Hans",
 			);
 			mainGroup = 5EC47E6D2A2DB2E600120CCC;
+			packageReferences = (
+				F90000000000000000000008 /* XCRemoteSwiftPackageReference "SwiftSoup" */,
+				D10000000000000000000002 /* XCLocalSwiftPackageReference "SceneRuntime" */,
+			);
 			productRefGroup = 5EC47E772A2DB2E600120CCC /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				5EC47E752A2DB2E600120CCC /* Open Wallpaper Engine */,
+				B10000000000000000000042 /* MediaRemoteMini */,
+				5EC47E8B2A2DB2E700120CCC /* Open Wallpaper EngineTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		5EC47E8A2A2DB2E700120CCC /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		5EC47E742A2DB2E600120CCC /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B10000000000000000000020 /* MediaRemoteMini LICENSE in Resources */,
+				F90000000000000000000005 /* SwiftSoup-LICENSE.txt in Resources */,
+				D1000000000000000000000B /* LICENSE in Resources */,
+				D10000000000000000000007 /* SceneRuntime NOTICE in Resources */,
+				D10000000000000000000008 /* LZ4.txt in Resources */,
+				D10000000000000000000009 /* nlohmann-json.txt in Resources */,
+				D1000000000000000000000D /* glslang-LICENSE.txt in Resources */,
+				D1000000000000000000000F /* SPIRV-Cross-LICENSE.txt in Resources */,
+				D10000000000000000000011 /* QuickJS-NG-LICENSE.txt in Resources */,
 				5E7A89C02AAB9D4E00192EB0 /* maxwell-cat.gif in Resources */,
 				5EC47E812A2DB2E700120CCC /* Preview Assets.xcassets in Resources */,
 				5E2F1E892A57DF2D0081D69D /* Localizable.xcstrings in Resources */,
+				F80000000000000000000001 /* InfoPlist.xcstrings in Resources */,
 				5E0700E62A859FAD00ADFE2E /* WallpaperNotFound.mp4 in Resources */,
 				5EC47E7E2A2DB2E700120CCC /* Assets.xcassets in Resources */,
 			);
@@ -419,19 +647,53 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		B10000000000000000000040 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000001 /* env.m in Sources */,
+				B10000000000000000000002 /* get.m in Sources */,
+				B10000000000000000000003 /* globals.m in Sources */,
+				B10000000000000000000004 /* keys.m in Sources */,
+				B10000000000000000000005 /* now_playing.m in Sources */,
+				B10000000000000000000006 /* MediaRemote.m in Sources */,
+				B10000000000000000000007 /* helpers.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5EC47E882A2DB2E700120CCC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F70000000000000000000001 /* PlaybackPolicyTests.swift in Sources */,
+				FA1000000000000000000001 /* SteamCmdServiceTests.swift in Sources */,
+				5EC47E912A2DB2E700120CCC /* WorkshopFilterSelectionTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		5EC47E722A2DB2E600120CCC /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F90000000000000000000003 /* RemoteImage.swift in Sources */,
+				F90000000000000000000001 /* ScenePropertyContent.swift in Sources */,
 				5E8C82032A9E15D0009E291B /* ExplorerItemMenu.swift in Sources */,
 				5E66A0EA2A8BAA5400EE79D6 /* ExplorerGlobalMenu.swift in Sources */,
 				5E51A43C2AA33F5500E46E99 /* GlobalSettingsService.swift in Sources */,
+				E40000000000000000000001 /* PlaybackPolicy.swift in Sources */,
+				F50000000000000000000001 /* PlaybackConditionMonitor.swift in Sources */,
+				F60000000000000000000001 /* SceneAudioCaptureLifecycleMonitor.swift in Sources */,
+				A60000000000000000000001 /* SceneMediaSnapshotProvider.swift in Sources */,
+				A80000000000000000000001 /* MediaRemoteNowPlayingSource.swift in Sources */,
+				A90000000000000000000001 /* SceneMediaArtworkProcessor.swift in Sources */,
+				A70000000000000000000001 /* SceneNowPlayingMonitor.swift in Sources */,
 				5E9D40442A2EC68600AB8A0C /* AppDelegate.swift in Sources */,
 				5EDF1E142A93B06B006617EA /* WorkingInProgress.swift in Sources */,
 				5EB152A12A82ADEB007EA845 /* Open_Wallpaper_Engine.docc in Sources */,
 				5EFBB0BB2A2F10EA00E39BEC /* main.swift in Sources */,
 				5E7665262A2DC30E00E0E4B4 /* WEProject.swift in Sources */,
 				5E66A0E82A8BA95600EE79D6 /* WallpaperPreview.swift in Sources */,
+				D20000000000000000000004 /* ScenePropertyControls.swift in Sources */,
 				5EFC591D2A81ACBC005F97E2 /* StatusBar.swift in Sources */,
 				5EFC591F2A81ACC3005F97E2 /* MainMenu.swift in Sources */,
 				5EC47EAC2A2DB3E500120CCC /* WallpaperView.swift in Sources */,
@@ -461,15 +723,15 @@
 				5E615E222A7D2F9700A37EB8 /* ImportPanels.swift in Sources */,
 				5EAF3F702A870DEC00F85685 /* PerformancePage.swift in Sources */,
 				5EF28EC12A8990D90013ABBE /* VideoWallpaperViewModel.swift in Sources */,
-				AA1B2C3D4E5F600200ABCD01 /* PKGParser.swift in Sources */,
-				AA1B2C3D4E5F600200ABCD02 /* TEXParser.swift in Sources */,
-				AA1B2C3D4E5F600200ABCD03 /* SceneModels.swift in Sources */,
 				AA1B2C3D4E5F600200ABCD04 /* SceneWallpaperViewModel.swift in Sources */,
+				D20000000000000000000002 /* SceneProperty.swift in Sources */,
 				BB0000000000000000000003 /* ObjCExceptionCatcher.m in Sources */,
 				CC0000000000000000000001 /* WallpaperDirectory.swift in Sources */,
 				CC0000000000000000000003 /* ZipImporter.swift in Sources */,
 				CC0000000000000000000005 /* SteamCmdService.swift in Sources */,
 				CC0000000000000000000007 /* WorkshopAPIService.swift in Sources */,
+				DD10000000000000000001 /* WorkshopFilterSelection.swift in Sources */,
+				DD10000000000000000003 /* WorkshopSearchPaginator.swift in Sources */,
 				CC0000000000000000000009 /* WorkshopViewModel.swift in Sources */,
 				CC000000000000000000000B /* WorkshopView.swift in Sources */,
 			);
@@ -477,7 +739,132 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		B10000000000000000000048 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B10000000000000000000042 /* MediaRemoteMini */;
+			targetProxy = B10000000000000000000047 /* PBXContainerItemProxy */;
+		};
+		5EC47E8E2A2DB2E700120CCC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5EC47E752A2DB2E600120CCC /* Open Wallpaper Engine */;
+			targetProxy = 5EC47E8D2A2DB2E700120CCC /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		B10000000000000000000044 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = NO;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				EXECUTABLE_PREFIX = "";
+				GCC_SYMBOLS_PRIVATE_EXTERN = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/ThirdParty/MediaRemoteMini",
+					"$(SRCROOT)/ThirdParty/MediaRemoteMini/include",
+				);
+				INSTALL_PATH = "@rpath";
+				LD_DYLIB_INSTALL_NAME = "@rpath/MediaRemoteMini.dylib";
+				MACOSX_DEPLOYMENT_TARGET = 14.2;
+				OTHER_CFLAGS = "$(inherited) -fvisibility=default";
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					Foundation,
+					"-framework",
+					AppKit,
+					"-framework",
+					ImageIO,
+					"-framework",
+					UniformTypeIdentifiers,
+				);
+				PRODUCT_NAME = MediaRemoteMini;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		B10000000000000000000045 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = NO;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				EXECUTABLE_PREFIX = "";
+				GCC_SYMBOLS_PRIVATE_EXTERN = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/ThirdParty/MediaRemoteMini",
+					"$(SRCROOT)/ThirdParty/MediaRemoteMini/include",
+				);
+				INSTALL_PATH = "@rpath";
+				LD_DYLIB_INSTALL_NAME = "@rpath/MediaRemoteMini.dylib";
+				MACOSX_DEPLOYMENT_TARGET = 14.2;
+				OTHER_CFLAGS = "$(inherited) -fvisibility=default";
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					Foundation,
+					"-framework",
+					AppKit,
+					"-framework",
+					ImageIO,
+					"-framework",
+					UniformTypeIdentifiers,
+				);
+				PRODUCT_NAME = MediaRemoteMini;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		5EC47EA42A2DB2E700120CCC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.winddog.wallpaper-engineTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Open Wallpaper Engine.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Open Wallpaper Engine";
+			};
+			name = Debug;
+		};
+		5EC47EA52A2DB2E700120CCC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.winddog.wallpaper-engineTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Open Wallpaper Engine.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Open Wallpaper Engine";
+			};
+			name = Release;
+		};
 		5EC47E9E2A2DB2E700120CCC /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -532,10 +919,10 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.2;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
-				ONLY_ACTIVE_ARCH = NO;
+				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = macosx;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -590,7 +977,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.2;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = NO;
@@ -607,13 +994,13 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_ENTITLEMENTS = "Open Wallpaper Engine/Open_Wallpaper_Engine.entitlements";
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "\"Open Wallpaper Engine/Preview Content\"";
-				DEVELOPMENT_TEAM = 35BWY46G6T;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -627,9 +1014,8 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.2;
 				MARKETING_VERSION = 0.8.1;
-				ONLY_ACTIVE_ARCH = NO;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.winddog.wallpaper-engine";
 				PRODUCT_MODULE_NAME = "$(PRODUCT_NAME:c99extidentifier)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -646,13 +1032,13 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_ENTITLEMENTS = "Open Wallpaper Engine/Open_Wallpaper_Engine.entitlements";
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "\"Open Wallpaper Engine/Preview Content\"";
-				DEVELOPMENT_TEAM = 35BWY46G6T;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -666,7 +1052,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.2;
 				MARKETING_VERSION = 0.8.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.winddog.wallpaper-engine";
 				PRODUCT_MODULE_NAME = "$(PRODUCT_NAME:c99extidentifier)";
@@ -680,6 +1066,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		B10000000000000000000043 /* Build configuration list for PBXNativeTarget "MediaRemoteMini" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B10000000000000000000044 /* Debug */,
+				B10000000000000000000045 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		5EC47E712A2DB2E600120CCC /* Build configuration list for PBXProject "Open Wallpaper Engine" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -698,7 +1093,52 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		5EC47EA32A2DB2E700120CCC /* Build configuration list for PBXNativeTarget "Open Wallpaper EngineTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5EC47EA42A2DB2E700120CCC /* Debug */,
+				5EC47EA52A2DB2E700120CCC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		D10000000000000000000002 /* XCLocalSwiftPackageReference "SceneRuntime" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = SceneRuntime;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		F90000000000000000000008 /* XCRemoteSwiftPackageReference "SwiftSoup" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/scinfu/SwiftSoup.git";
+			requirement = {
+				kind = exactVersion;
+				version = 2.9.6;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		F90000000000000000000009 /* SwiftSoup */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F90000000000000000000008 /* XCRemoteSwiftPackageReference "SwiftSoup" */;
+			productName = SwiftSoup;
+		};
+		D10000000000000000000003 /* SceneRuntimeBridge */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D10000000000000000000002 /* XCLocalSwiftPackageReference "SceneRuntime" */;
+			productName = SceneRuntimeBridge;
+		};
+		D30000000000000000000002 /* SceneAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D10000000000000000000002 /* XCLocalSwiftPackageReference "SceneRuntime" */;
+			productName = SceneAudio;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 5EC47E6E2A2DB2E600120CCC /* Project object */;
 }

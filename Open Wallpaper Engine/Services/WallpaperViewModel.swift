@@ -6,9 +6,13 @@
 //
 
 import SwiftUI
+import ColorSync
 
 /// Provide Wallpaper Database for WallpaperView and ContentView etc.
+@MainActor
 class WallpaperViewModel: ObservableObject {
+    private static let scenePropertyPersistenceKey = "ScenePropertyPersistenceV1"
+
     @Published var nextCurrentWallpaper: WEWallpaper =
     WEWallpaper(using: .invalid, where: Bundle.main.url(forResource: "WallpaperNotFound", withExtension: "mp4")!) {
         willSet {
@@ -39,6 +43,16 @@ class WallpaperViewModel: ObservableObject {
 
     /// The screen currently selected in the UI for configuration.
     @Published var selectedScreenId: String = ""
+
+    /// Runtime-owned property descriptors copied for the App UI. They are not
+    /// persisted because the Scene package remains authoritative.
+    @Published private(set) var scenePropertyCatalogs: [String: [String: ScenePropertyCatalog]] = [:]
+    @Published private(set) var sceneRuntimeErrors: [String: [String: String]] = [:]
+
+    /// The only persisted source of user overrides. Values are isolated by
+    /// screen and canonical Scene identity.
+    @Published private(set) var scenePropertyPersistence = ScenePropertyPersistence()
+    @Published private(set) var scenePropertyPersistenceError: String?
 
     static let defaultWallpaper = WEWallpaper(using: .invalid, where: Bundle.main.url(forResource: "WallpaperNotFound", withExtension: "mp4")!)
 
@@ -107,6 +121,102 @@ class WallpaperViewModel: ObservableObject {
         AppDelegate.shared.rebuildWallpaperWindows()
     }
 
+    func scenePropertyCatalog(
+        for screenId: String,
+        wallpaper: WEWallpaper
+    ) -> ScenePropertyCatalog? {
+        scenePropertyCatalogs[screenId]?[wallpaper.scenePropertyIdentity]
+    }
+
+    func scenePropertyOverrides(
+        for screenId: String,
+        wallpaper: WEWallpaper
+    ) -> [String: ScenePropertyValue] {
+        scenePropertyPersistence.values(
+            screenId: Self.scenePropertyScreenIdentity(screenId),
+            wallpaperIdentity: wallpaper.scenePropertyIdentity
+        )
+    }
+
+    func registerScenePropertyCatalog(
+        _ properties: [ScenePropertyDefinition],
+        for screenId: String,
+        wallpaper: WEWallpaper
+    ) {
+        let identity = wallpaper.scenePropertyIdentity
+        let catalog = ScenePropertyCatalog(
+            wallpaperIdentity: identity,
+            properties: properties
+        )
+        guard scenePropertyCatalogs[screenId]?[identity] != catalog else { return }
+        var catalogs = scenePropertyCatalogs
+        var screenCatalogs = catalogs[screenId] ?? [:]
+        screenCatalogs[identity] = catalog
+        catalogs[screenId] = screenCatalogs
+        scenePropertyCatalogs = catalogs
+    }
+
+    func clearScenePropertyCatalog(for screenId: String, wallpaper: WEWallpaper) {
+        let identity = wallpaper.scenePropertyIdentity
+        guard scenePropertyCatalogs[screenId]?[identity] != nil else { return }
+        var catalogs = scenePropertyCatalogs
+        catalogs[screenId]?[identity] = nil
+        if catalogs[screenId]?.isEmpty == true {
+            catalogs[screenId] = nil
+        }
+        scenePropertyCatalogs = catalogs
+    }
+
+    func sceneRuntimeError(for screenId: String, wallpaper: WEWallpaper) -> String? {
+        sceneRuntimeErrors[screenId]?[wallpaper.scenePropertyIdentity]
+    }
+
+    func setSceneRuntimeError(
+        _ message: String?,
+        for screenId: String,
+        wallpaper: WEWallpaper
+    ) {
+        let identity = wallpaper.scenePropertyIdentity
+        guard sceneRuntimeErrors[screenId]?[identity] != message else { return }
+        var errors = sceneRuntimeErrors
+        errors[screenId, default: [:]][identity] = message
+        if errors[screenId]?.isEmpty == true {
+            errors[screenId] = nil
+        }
+        sceneRuntimeErrors = errors
+    }
+
+    func setSceneProperty(
+        _ value: ScenePropertyValue,
+        key: String,
+        for screenId: String,
+        wallpaper: WEWallpaper
+    ) {
+        var persistence = scenePropertyPersistence
+        guard persistence.set(
+            value,
+            key: key,
+            screenId: Self.scenePropertyScreenIdentity(screenId),
+            wallpaperIdentity: wallpaper.scenePropertyIdentity
+        ) else { return }
+        commitScenePropertyPersistence(persistence)
+    }
+
+    func resetSceneProperties(for screenId: String, wallpaper: WEWallpaper) {
+        var persistence = scenePropertyPersistence
+        guard persistence.reset(
+            screenId: Self.scenePropertyScreenIdentity(screenId),
+            wallpaperIdentity: wallpaper.scenePropertyIdentity
+        ) else { return }
+        commitScenePropertyPersistence(persistence)
+    }
+
+    func discardScenePropertyPersistence() {
+        UserDefaults.standard.removeObject(forKey: Self.scenePropertyPersistenceKey)
+        scenePropertyPersistence = ScenePropertyPersistence()
+        scenePropertyPersistenceError = nil
+    }
+
     /// Remove a wallpaper from all screens (e.g., when unsubscribing).
     func removeWallpaperFromAllScreens(directory: URL) {
         for (key, wp) in wallpapers {
@@ -114,7 +224,54 @@ class WallpaperViewModel: ObservableObject {
                 wallpapers[key] = Self.defaultWallpaper
             }
         }
+        recentWallpapers.removeAll { $0.wallpaperDirectory == directory }
+        saveRecents()
+
+        var catalogs = scenePropertyCatalogs
+        var runtimeErrors = sceneRuntimeErrors
+        var persistence = scenePropertyPersistence
+        let canonicalDirectory = directory.standardizedFileURL.resolvingSymlinksInPath()
+        for screenId in Array(catalogs.keys) {
+            let identities = catalogs[screenId].map { Array($0.keys) } ?? []
+            for identity in identities {
+                let sceneDirectory = URL(fileURLWithPath: identity)
+                    .deletingLastPathComponent()
+                    .standardizedFileURL
+                    .resolvingSymlinksInPath()
+                if sceneDirectory == canonicalDirectory {
+                    catalogs[screenId]?[identity] = nil
+                }
+            }
+            if catalogs[screenId]?.isEmpty == true {
+                catalogs[screenId] = nil
+            }
+        }
+        for screenId in Array(runtimeErrors.keys) {
+            let identities = runtimeErrors[screenId].map { Array($0.keys) } ?? []
+            for identity in identities {
+                let sceneDirectory = URL(fileURLWithPath: identity)
+                    .deletingLastPathComponent()
+                    .standardizedFileURL
+                    .resolvingSymlinksInPath()
+                if sceneDirectory == canonicalDirectory {
+                    runtimeErrors[screenId]?[identity] = nil
+                }
+            }
+            if runtimeErrors[screenId]?.isEmpty == true {
+                runtimeErrors[screenId] = nil
+            }
+        }
+        _ = persistence.remove(wallpaperDirectory: directory)
+        scenePropertyCatalogs = catalogs
+        sceneRuntimeErrors = runtimeErrors
+        if persistence != scenePropertyPersistence {
+            commitScenePropertyPersistence(persistence)
+        }
     }
+
+    @Published private(set) var playbackPolicyAction = GSPlayback.keepRunning
+    @Published private(set) var effectivePlayRate: Float = 1.0
+    @Published private(set) var effectivePlayVolume: Float = 1.0
 
     var lastPlayRate: Float = 1.0
     @Published public var playRate: Float = 1.0 {
@@ -137,6 +294,7 @@ class WallpaperViewModel: ObservableObject {
         }
         didSet {
             self.lastPlayRate = oldValue
+            refreshEffectivePlaybackState()
         }
     }
 
@@ -161,6 +319,38 @@ class WallpaperViewModel: ObservableObject {
         }
         didSet {
             self.lastPlayVolume = oldValue
+            refreshEffectivePlaybackState()
+        }
+    }
+
+    /// Applies a host-policy override without overwriting the user's playback
+    /// intent. Views consume the derived effective values, while sliders and
+    /// menu actions continue to edit `playRate` and `playVolume` directly.
+    func setPlaybackPolicyAction(_ action: GSPlayback) {
+        guard playbackPolicyAction != action else { return }
+        playbackPolicyAction = action
+        refreshEffectivePlaybackState()
+    }
+
+    private func refreshEffectivePlaybackState() {
+        let nextRate: Float
+        let nextVolume: Float
+        switch playbackPolicyAction {
+        case .keepRunning:
+            nextRate = playRate
+            nextVolume = playVolume
+        case .mute:
+            nextRate = playRate
+            nextVolume = 0
+        case .pause, .stop:
+            nextRate = 0
+            nextVolume = playVolume
+        }
+        if effectivePlayRate != nextRate {
+            effectivePlayRate = nextRate
+        }
+        if effectivePlayVolume != nextVolume {
+            effectivePlayVolume = nextVolume
         }
     }
 
@@ -190,6 +380,7 @@ class WallpaperViewModel: ObservableObject {
 
         // Load recent wallpapers
         loadRecents()
+        loadScenePropertyPersistence()
     }
 
     // MARK: - Screen ID helpers
@@ -208,6 +399,17 @@ class WallpaperViewModel: ObservableObject {
         screen.localizedName
     }
 
+    static func scenePropertyScreenIdentity(_ screenId: String) -> String {
+        if let rawDisplayId = UInt32(screenId),
+           let unmanagedUUID = CGDisplayCreateUUIDFromDisplayID(rawDisplayId) {
+            let uuid = unmanagedUUID.takeRetainedValue()
+            return "display:\(CFUUIDCreateString(nil, uuid) as String)"
+        }
+        let legacy = "legacy-display-id:\(screenId)"
+        NSLog("[Scene] Unable to resolve a persistent display UUID for %@; using %@", screenId, legacy)
+        return legacy
+    }
+
     // MARK: - Persistence
 
     private func saveWallpapers() {
@@ -217,6 +419,48 @@ class WallpaperViewModel: ObservableObject {
         // Keep legacy key updated for backward compat
         if let data = try? JSONEncoder().encode(currentWallpaper) {
             UserDefaults.standard.set(data, forKey: "CurrentWallpaper")
+        }
+    }
+
+    private func loadScenePropertyPersistence() {
+        guard let data = UserDefaults.standard.data(
+            forKey: Self.scenePropertyPersistenceKey
+        ) else { return }
+        do {
+            let persistence = try JSONDecoder().decode(
+                ScenePropertyPersistence.self,
+                from: data
+            )
+            guard persistence.version == ScenePropertyPersistence.currentVersion else {
+                let message = "Unsupported Scene property persistence version: \(persistence.version)"
+                scenePropertyPersistenceError = message
+                NSLog("[Scene] %@", message)
+                return
+            }
+            scenePropertyPersistence = persistence
+            scenePropertyPersistenceError = nil
+        } catch {
+            let message = "Scene property settings could not be loaded: \(error.localizedDescription)"
+            scenePropertyPersistenceError = message
+            NSLog("[Scene] %@", message)
+        }
+    }
+
+    @discardableResult
+    private func commitScenePropertyPersistence(
+        _ persistence: ScenePropertyPersistence
+    ) -> Bool {
+        do {
+            let data = try JSONEncoder().encode(persistence)
+            UserDefaults.standard.set(data, forKey: Self.scenePropertyPersistenceKey)
+            scenePropertyPersistence = persistence
+            scenePropertyPersistenceError = nil
+            return true
+        } catch {
+            let message = "Scene property settings could not be saved: \(error.localizedDescription)"
+            scenePropertyPersistenceError = message
+            NSLog("[Scene] %@", message)
+            return false
         }
     }
 }

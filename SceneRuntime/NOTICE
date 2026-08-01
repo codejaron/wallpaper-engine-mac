@@ -1,0 +1,99 @@
+Scene Runtime provenance and asset boundary
+===========================================
+
+The Scene Runtime architecture and compatibility work use
+Almamu/linux-wallpaperengine commit
+`b016d7d1fdcf4e5fd2f9c9fa420a8aaa07fee02d` as a behavioral and
+implementation reference:
+
+https://github.com/Almamu/linux-wallpaperengine/tree/b016d7d1fdcf4e5fd2f9c9fa420a8aaa07fee02d
+
+linux-wallpaperengine is licensed under GNU GPL version 3. The containing
+Open Wallpaper Engine project is also distributed under GNU GPL version 3;
+see ../LICENSE for the complete license text.
+
+The PKG/TEX format semantics, texture enum values, and VFS precedence in this
+package were adapted from the upstream files
+`Data/Parsers/PackageParser.*`, `Data/Parsers/TextureParser.*`,
+`FileSystem/Container.*`, `FileSystem/Adapters/{Directory,Package,Virtual}.*`,
+and `Assets/AssetLocator.*`. Their implementations were rewritten for a
+platform-neutral macOS package: they do not copy Linux window, audio, media,
+Steam, or CLI code. The rewritten files remain within this GPL-3.0 project;
+future verbatim ports must retain their original notices and be recorded here.
+
+Scene object initialization/render ordering and parent transform composition
+were adapted from upstream `Render/Wallpapers/CScene.cpp` and
+`Render/Objects/CImage.cpp`. The SceneGraph implementation is a platform-neutral
+rewrite with no upstream window-system or renderer integration.
+
+Automatic orthographic projection extent calculation was adapted from
+upstream `Render/Wallpapers/CScene.cpp`: initial image origins and raw sizes
+define a stable Scene projection, while a Scene with no valid image extent
+uses explicit host drawable pixel dimensions. Presentation resize remains
+separate from the fixed projection when an image extent exists.
+
+Frame planning, material/effect pass expansion, framebuffer lookup, `bind`,
+`target`, and `previous` resource semantics were adapted from upstream
+`Render/Objects/CImage.cpp`, `Render/Objects/CRenderable.cpp`,
+`Render/Objects/Effects/CPass.cpp`, and `Render/FBOProvider.cpp`. The
+SceneFrameGraph implementation is a platform-neutral immutable CPU plan and
+does not contain the upstream OpenGL renderer or Linux integration code.
+
+Camera parallax target calculation, delayed interpolation, and image depth
+offset semantics were adapted from upstream `Render/Wallpapers/CScene.cpp`
+and `Render/Objects/CImage.cpp`. The local implementation preserves the
+upstream formulas while applying them to this runtime's local-quad matrix
+layout. Visible-region pointer mapping, the distinct SceneScript versus
+effect/parallax Y conventions, and aspect-fill crop semantics were adapted
+from `Render/WallpaperState.cpp`, `Render/Wallpapers/CScene.cpp`,
+`Render/Objects/Effects/CPass.cpp`, and `Scripting/InputObject.cpp`. The local
+runtime resolves the shared crop before frame evaluation so resize does not
+reuse a previous frame's UV mapping.
+
+Particle object schema, component defaults, deterministic CPU simulation,
+sprite vertex layout, and alpha/movement formulas were adapted from upstream
+`Data/Model/Object.h`, `Data/Parsers/ObjectParser.{h,cpp}`,
+`Render/Objects/CParticle.{h,cpp}`, and `Maths.{h,cpp}`. The local runtime
+intentionally differs in two places: it derives a stable deterministic random
+seed instead of using process entropy, and it rejects unsupported particle
+components with structured errors instead of logging and continuing. The
+renderer is a macOS OpenGL rewrite that supports only the explicitly modeled
+sprite path and does not copy the upstream renderer integration.
+
+The built-in copy-command shaders were adapted from upstream
+`WallpaperApplication.cpp`. They are registered as virtual runtime assets and
+execute through the same shader preprocessing, translation, and draw path as
+authored material passes.
+
+The `WEColor.hsv2rgb` QuickJS host function was adapted from upstream
+`ColorModule.cpp`, including Wallpaper Engine's degree-based hue convention.
+
+All adaptations in the preceding sections refer to the full upstream commit
+identified above and remain licensed under GNU GPL version 3.
+
+This package does not contain Wallpaper Engine official assets, Steam
+Workshop content, or other proprietary game data. Those files remain external
+user-provided runtime inputs and must never be added as package resources.
+
+Bundled third-party libraries
+-----------------------------
+
+- LZ4 v1.10.0, commit ebb370ca83af193212df4dcbadcc5d87bc0de2f0,
+  BSD-2-Clause. Only lib/lz4.c and lib/lz4.h are included.
+- JSON for Modern C++ (nlohmann/json), commit
+  4424a0fcc1c7fa640b5c87d26776d99150dacd10, MIT. The single-header
+  distribution is included.
+- glslang Wallpaper Engine fork, commit
+  b775500a153f5ceb0e4b6f366b79c4c57521bb62, retaining the upstream
+  multi-license `LICENSE.txt` terms. Only the GLSL/SPIR-V compiler sources
+  required by SceneShader are included.
+- SPIRV-Cross Wallpaper Engine fork, commit
+  ad4d02220b01c1800e5a4e6671d6d8ca8ab07783, Apache-2.0 or MIT. Only the
+  core and GLSL backends required by SceneShader are included.
+- QuickJS-NG, commit 72ba50f63ee31202f8c18b8d07ab1e1c3486ee6f, MIT. Only
+  the four embeddable engine sources and their required headers and generated
+  tables are included; the CLI and `quickjs-libc` host integration are omitted.
+
+Complete license texts are in ThirdPartyLicenses/ and are copied into the App
+bundle. They are build-time source dependencies only and do not provide
+alternate asset or runtime data sources.

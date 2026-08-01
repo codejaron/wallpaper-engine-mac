@@ -25,7 +25,10 @@ struct PerformancePage: SettingsPage {
                     Text("Pause").tag(GSPlayback.pause)
                 }
                 
-                Picker("Other Application Fullscreen:", selection: $viewModel.settings.otherApplicationFullscreen) {
+                Picker(
+                    "When Another App Window Is Fullscreen or Maximized:",
+                    selection: $viewModel.settings.otherApplicationFullscreen
+                ) {
                     Text("Keep Running").tag(GSPlayback.keepRunning)
                     Text("Mute").tag(GSPlayback.mute)
                     Text("Pause").tag(GSPlayback.pause)
@@ -37,11 +40,14 @@ struct PerformancePage: SettingsPage {
                     Text("Mute").tag(GSPlayback.mute)
                     Text("Pause").tag(GSPlayback.pause)
                 }
-                
-                Picker("Display asleep", selection: $viewModel.settings.displayAsleep) {
-                    Text("Keep Running").tag(GSPlayback.keepRunning)
-                    Text("Pause").tag(GSPlayback.pause)
-                    Text("Stop (free memory)").tag(GSPlayback.stop)
+                if viewModel.settings.requiresSystemAudioCaptureForAudioRule {
+                    Label(
+                        "Enable System Audio Capture in General settings for this rule to work.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
                 
                 Picker("Laptop on battery", selection: $viewModel.settings.laptopOnBattery) {
@@ -61,79 +67,46 @@ struct PerformancePage: SettingsPage {
                     .buttonStyle(.borderedProminent)
                     .disabled(true)
                 }
+
+                if let issue = viewModel.playbackPolicyIssue {
+                    Label(issue, systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } header: {
                 Label("Playback", systemImage: "play.fill")
             }
             Section {
-                HStack(spacing: 1) {
-                    Button {
-                        viewModel.setQuality(.low)
-                    } label: {
-                        Text("Low").frame(maxWidth: .infinity)
-                    }
-                    Divider()
-                    Button {
-                        viewModel.setQuality(.medium)
-                    } label: {
-                        Text("Medium").frame(maxWidth: .infinity)
-                    }
-                    Divider()
-                    Button {
-                        viewModel.setQuality(.high)
-                    } label: {
-                        Text("High").frame(maxWidth: .infinity)
-                    }
-                    Divider()
-                    Button {
-                        viewModel.setQuality(.ultra)
-                    } label: {
-                        Text("Ultra").frame(maxWidth: .infinity)
-                    }
+                Picker(
+                    "Scene render quality",
+                    selection: $viewModel.settings.sceneRenderQuality
+                ) {
+                    Text("High Quality").tag(GSSceneRenderQuality.high)
+                    Text("Balanced").tag(GSSceneRenderQuality.balanced)
+                    Text("Power Saving").tag(GSSceneRenderQuality.powerSaving)
                 }
-                .padding(6)
-                .background(Color(nsColor: NSColor.unemphasizedSelectedContentBackgroundColor))
-                .buttonStyle(.borderless)
-                .clipShape(RoundedRectangle(cornerRadius: 5.0))
+                .pickerStyle(.segmented)
+                .labelsHidden()
                 Picker("Anti-aliasing", selection: $viewModel.settings.antiAliasing) {
                     Text("None").tag(GSAntiAliasingQuality.none)
                     Text("MSAA x2").tag(GSAntiAliasingQuality.msaa_x2)
                     Text("MSAA x4").tag(GSAntiAliasingQuality.msaa_x4)
                     Text("MSAA x8").tag(GSAntiAliasingQuality.msaa_x8)
                 }
-                .overlay {
-                    HStack {
-                        Spacer(); Spacer()
-                        if viewModel.settings.antiAliasing == .msaa_x8 {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.red)
-                                .help("×8 MSAA is only recommended for powerful high-end desktop graphics cards.")
-                        }
-                        Spacer()
-                    }
-                    
-                }
+                .disabled(true)
                 Picker("Post-Processing", selection: $viewModel.settings.postProcessing) {
                     Text("Disabled").tag(GSPostProcessingQuality.disabled)
                     Text("Enabled").tag(GSPostProcessingQuality.enabled)
                     Text("Ultra").tag(GSPostProcessingQuality.ultra)
                 }
-                .overlay {
-                    HStack {
-                        Spacer(); Spacer()
-                        if viewModel.settings.postProcessing == .ultra {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.yellow)
-                                .help("Ultra mode adds HDR bloom to supported wallpapers and is only recommended for powerful high-end desktop graphics cards.")
-                        }
-                        Spacer()
-                    }
-                    
-                }
+                .disabled(true)
                 Picker("Texture Resolution", selection: $viewModel.settings.textureResolution) {
                     Text("High Quality").tag(GSTextureResolutionQuality.highQuality)
                     Text("High Performance").tag(GSTextureResolutionQuality.highPerformance)
                     Text("Automatic").tag(GSTextureResolutionQuality.automatic)
                 }
+                .disabled(true)
                 HStack {
                     Text("FPS")
                     Spacer()
@@ -187,14 +160,30 @@ struct PerformancePage: SettingsPage {
                 }
                 HStack {
                     Text("Reflections")
+                        .foregroundStyle(.secondary)
                     Spacer()
                     Toggle("Reflection", isOn: $viewModel.settings.reflections)
                         .toggleStyle(.checkbox)
                         .labelsHidden()
                 }
+                .disabled(true)
+                Picker("Scene scaling", selection: $viewModel.settings.scenePresentationScaling) {
+                    Text("Automatic").tag(GSScenePresentationScaling.automatic)
+                    Text("Stretch").tag(GSScenePresentationScaling.stretch)
+                    Text("Aspect fit").tag(GSScenePresentationScaling.aspectFit)
+                    Text("Aspect fill").tag(GSScenePresentationScaling.aspectFill)
+                }
+                Toggle(
+                    "Span scene wallpapers across displays",
+                    isOn: $viewModel.settings.sceneSpanAcrossScreens
+                )
+                Text("Span mode uses one virtual canvas and presents the current display's slice. It is intended for the same Scene wallpaper on each enabled display.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } header: {
                 Label("Quality", systemImage: "memorychip.fill")
-                Text("Currently, these settings below are designed for scene wallpapers \nand may not work as expect ")
+                Text("High Quality uses authored pixels; Balanced caps rendering at the display's backing-pixel density; Power Saving halves that linear resolution. FPS, scaling, and spanning also apply only to Scene wallpapers; disabled options are not yet supported.")
             }
         }
         .formStyle(.grouped)

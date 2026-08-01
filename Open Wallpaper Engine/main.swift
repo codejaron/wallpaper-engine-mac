@@ -7,5 +7,7 @@
 
 import Cocoa
 
-NSApplication.shared.delegate = AppDelegate.shared
-NSApplication.shared.run()
+MainActor.assumeIsolated {
+    NSApplication.shared.delegate = AppDelegate.shared
+    NSApplication.shared.run()
+}

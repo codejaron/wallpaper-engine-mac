@@ -18,39 +18,38 @@ struct WallpaperExplorer: SubviewOfContentView {
     
     var body: some View {
         ScrollView {
-            // MARK: Items
-            if viewModel.autoRefreshWallpapers.isEmpty {
-                HStack {
-                    Spacer()
-                    Text("""
-                        No wallpapers found for your search.
-                        Expand or reset the categories in the filter sidebar or try another search term.
-                        """)
-                    .font(.title)
-                    .foregroundStyle(Color.secondary)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(nil)
-                    .lineSpacing(10)
-                    Spacer()
-                }
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 50)
-            } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: viewModel.explorerIconSize, 
-                                                       maximum: viewModel.explorerIconSize * 2)
-                )], alignment: .leading) {
-                    ForEach(Array(viewModel.autoRefreshWallpapers.enumerated()), id: \.0) { (index, wallpaper) in
-                        ExplorerItem(viewModel: viewModel, wallpaperViewModel: wallpaperViewModel, wallpaper: wallpaper, index: index)
-                            .contextMenu {
-                                ExplorerItemMenu(contentViewModel: viewModel, wallpaperViewModel: wallpaperViewModel, current: wallpaper)
-                                ExplorerGlobalMenu(contentViewModel: viewModel, wallpaperViewModel: wallpaperViewModel)
-                            }
-                            .animation(.spring(), value: viewModel.imageScaleIndex)
-//                            .animation(.spring(), value: wallpaperViewModel.currentWallpaper.rawValue)
+            Group {
+                // MARK: Items
+                if viewModel.autoRefreshWallpapers.isEmpty {
+                    HStack {
+                        Spacer()
+                        Text("""
+                            No wallpapers found for your search.
+                            Expand or reset the categories in the filter sidebar or try another search term.
+                            """)
+                        .font(.title)
+                        .foregroundStyle(Color.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(nil)
+                        .lineSpacing(10)
+                        Spacer()
                     }
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 50)
+                } else {
+                    LazyVGrid(columns: gridColumns, alignment: .leading) {
+                        ForEach(viewModel.autoRefreshWallpapers, id: \.wallpaperDirectory) { wallpaper in
+                            ExplorerItem(viewModel: viewModel, wallpaperViewModel: wallpaperViewModel, wallpaper: wallpaper)
+                                .contextMenu {
+                                    ExplorerItemMenu(contentViewModel: viewModel, wallpaperViewModel: wallpaperViewModel, current: wallpaper)
+                                    ExplorerGlobalMenu(contentViewModel: viewModel, wallpaperViewModel: wallpaperViewModel)
+                                }
+                        }
+                    }
+                    .padding(.trailing)
                 }
-                .padding(.trailing)
             }
+            .background(OverlayScrollerConfigurator())
         }
         .overlay {
             VStack {
@@ -65,6 +64,47 @@ struct WallpaperExplorer: SubviewOfContentView {
                 .padding(.bottom)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .layoutPriority(1)
+    }
+
+    private var gridColumns: [GridItem] {
+        WallpaperGridLayout.columns(iconSize: viewModel.explorerIconSize)
+    }
+}
+
+enum WallpaperGridLayout {
+    static func columns(iconSize: CGFloat) -> [GridItem] {
+        [
+            GridItem(.adaptive(
+                minimum: iconSize,
+                maximum: iconSize * 1.5
+            ))
+        ]
+    }
+}
+
+private struct OverlayScrollerConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        OverlayScrollerConfigurationView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private final class OverlayScrollerConfigurationView: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        configureScroller()
+    }
+
+    override func layout() {
+        super.layout()
+        configureScroller()
+    }
+
+    private func configureScroller() {
+        enclosingScrollView?.scrollerStyle = .overlay
     }
 }
 

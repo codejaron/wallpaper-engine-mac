@@ -172,6 +172,11 @@ private struct SteamLoginView: View {
                     Text("Authenticating with Steam...")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Text("If Steam sends a sign-in request, open Steam Mobile and approve it to continue.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(width: 300)
                 }
             }
 
@@ -194,101 +199,179 @@ private struct WorkshopBrowserView: View {
     @ObservedObject var viewModel: WorkshopViewModel
 
     var body: some View {
-        VStack(spacing: 8) {
-            // Search bar
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Search wallpapers...", text: $viewModel.searchText)
-                    .textFieldStyle(.plain)
-                    .onSubmit {
-                        viewModel.currentPage = 1
-                        Task { await viewModel.search() }
-                    }
-                if !viewModel.searchText.isEmpty {
-                    Button {
-                        viewModel.searchText = ""
-                        viewModel.currentPage = 1
-                        Task { await viewModel.search() }
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
+        VStack(spacing: 5) {
+            WorkshopTopBar(viewModel: viewModel)
 
-                Picker("Sort", selection: $viewModel.sortOrder) {
-                    ForEach(WorkshopSortOrder.allCases) { order in
-                        Text(order.displayName).tag(order)
-                    }
-                }
-                .frame(width: 160)
-                .onChange(of: viewModel.sortOrder) { _ in
-                    viewModel.currentPage = 1
-                    Task { await viewModel.search() }
+            HStack(spacing: 0) {
+                WorkshopFilterResults(viewModel: viewModel)
+                    .frame(width: viewModel.isFilterReveal ? 225 : 0)
+                    .opacity(viewModel.isFilterReveal ? 1 : 0)
+                    .animation(.spring(), value: viewModel.isFilterReveal)
+
+                WorkshopResults(viewModel: viewModel)
+                    .padding(.leading, viewModel.isFilterReveal ? 10 : 0)
+                    .layoutPriority(1)
+            }
+            .animation(.default, value: viewModel.isFilterReveal)
+        }
+        .task {
+            if viewModel.items.isEmpty {
+                await viewModel.search()
+            }
+        }
+    }
+}
+
+private struct WorkshopTopBar: View {
+    @ObservedObject var viewModel: WorkshopViewModel
+
+    var body: some View {
+        BrowserTopBar(
+            searchText: $viewModel.searchText,
+            onSearchSubmit: searchFromFirstPage,
+            onFilter: {
+                viewModel.isFilterReveal.toggle()
+            }
+        ) {
+            EmptyView()
+        } trailingControls: {
+            Picker("Sort By", selection: $viewModel.sortOrder) {
+                ForEach(WorkshopSortOrder.allCases) { order in
+                    Text(order.displayName).tag(order)
                 }
             }
-            .padding(8)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(8)
-            .padding(.horizontal)
-
-            // Tag filters
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    tagGroup("Rating:", WorkshopViewModel.contentRatingTags)
-                    Divider().frame(height: 20)
-                    tagGroup("Type:", WorkshopViewModel.typeTags)
-                    Divider().frame(height: 20)
-                    tagGroup("", WorkshopViewModel.genreTags)
-                }
-                .padding(.horizontal)
+            .labelsHidden()
+            .frame(width: 160)
+            .onChange(of: viewModel.sortOrder) { _ in
+                searchFromFirstPage()
             }
+        }
+    }
 
-            // Results
+    private func searchFromFirstPage() {
+        viewModel.currentPage = 1
+        Task { await viewModel.search() }
+    }
+}
+
+private struct WorkshopFilterResults: View {
+    @ObservedObject var viewModel: WorkshopViewModel
+
+    var body: some View {
+        HStack(spacing: 0) {
+            VStack {
+                ScrollView {
+                    VStack(spacing: 30) {
+                        Button {
+                            viewModel.resetFilters()
+                            Task { await viewModel.search() }
+                        } label: {
+                            Label("Reset Filters", systemImage: "arrow.triangle.2.circlepath")
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 5)
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        VStack(spacing: 15) {
+                            filterSection(
+                                "Age Rating",
+                                group: .contentRating,
+                                tags: WorkshopViewModel.contentRatingTags
+                            )
+                            filterSection(
+                                "Type",
+                                group: .type,
+                                tags: WorkshopViewModel.typeTags
+                            )
+                            filterSection(
+                                "Tags",
+                                group: .genre,
+                                tags: WorkshopViewModel.genreTags
+                            )
+                        }
+                    }
+                    .padding(.trailing)
+                }
+                .lineLimit(1)
+            }
+            Divider()
+        }
+    }
+
+    private func filterSection(
+        _ title: LocalizedStringKey,
+        group: WorkshopFilterGroup,
+        tags: [String]
+    ) -> some View {
+        FilterSection(title, alignment: .leading) {
+            ForEach(tags, id: \.self) { tag in
+                Toggle(tag, isOn: Binding(
+                    get: { viewModel.isTagSelected(tag, in: group) },
+                    set: { isSelected in
+                        viewModel.setTag(tag, in: group, isSelected: isSelected)
+                        Task { await viewModel.search() }
+                    }
+                ))
+            }
+            .toggleStyle(.checkbox)
+        }
+    }
+}
+
+private struct WorkshopResults: View {
+    @ObservedObject var viewModel: WorkshopViewModel
+
+    var body: some View {
+        Group {
             if viewModel.isLoading && viewModel.items.isEmpty {
-                Spacer()
-                ProgressView("Searching Workshop...")
-                Spacer()
-            } else if let error = viewModel.errorMessage, viewModel.items.isEmpty {
-                Spacer()
-                VStack(spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.title)
-                        .foregroundStyle(.secondary)
-                    Text(error)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-
-                    APIKeyInputView {
-                        Task { await viewModel.search() }
-                    }
+                VStack {
+                    Spacer()
+                    ProgressView("Searching Workshop...")
+                    Spacer()
                 }
-                Spacer()
-            } else if viewModel.items.isEmpty {
-                Spacer()
-                VStack(spacing: 12) {
-                    Image(systemName: "sparkle.magnifyingglass")
-                        .font(.system(size: 40))
-                        .foregroundStyle(.secondary)
-                    Text("Search the Steam Workshop")
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                    Text("Find wallpapers by name, tag, or browse trending content.")
-                        .font(.callout)
-                        .foregroundStyle(.tertiary)
-
-                    if WorkshopAPIService.loadAPIKey().isEmpty {
-                        Divider().frame(width: 300).padding(.vertical, 4)
-                        Text("A Steam Web API key is required to browse.")
-                            .font(.callout)
+            } else if let error = viewModel.errorMessage, viewModel.items.isEmpty {
+                VStack {
+                    Spacer()
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.title)
                             .foregroundStyle(.secondary)
+                        Text(error)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+
                         APIKeyInputView {
                             Task { await viewModel.search() }
                         }
                     }
+                    Spacer()
                 }
-                Spacer()
+            } else if viewModel.items.isEmpty {
+                VStack {
+                    Spacer()
+                    VStack(spacing: 12) {
+                        Image(systemName: "sparkle.magnifyingglass")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.secondary)
+                        Text("Search the Steam Workshop")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                        Text("Find wallpapers by name, tag, or browse trending content.")
+                            .font(.callout)
+                            .foregroundStyle(.tertiary)
+
+                        if WorkshopAPIService.loadAPIKey().isEmpty {
+                            Divider().frame(width: 300).padding(.vertical, 4)
+                            Text("A Steam Web API key is required to browse.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            APIKeyInputView {
+                                Task { await viewModel.search() }
+                            }
+                        }
+                    }
+                    Spacer()
+                }
             } else {
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 200, maximum: 300))], spacing: 12) {
@@ -298,7 +381,15 @@ private struct WorkshopBrowserView: View {
                     }
                     .padding()
 
-                    if !viewModel.items.isEmpty {
+                    if let error = viewModel.errorMessage {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
+
+                    if viewModel.hasMoreResults {
                         Button("Load More") {
                             Task { await viewModel.loadMore() }
                         }
@@ -309,41 +400,63 @@ private struct WorkshopBrowserView: View {
                 }
             }
         }
-        .task {
-            if viewModel.items.isEmpty {
-                await viewModel.search()
-            }
-        }
-    }
-
-    private func tagGroup(_ label: String, _ tags: [String]) -> some View {
-        HStack(spacing: 4) {
-            if !label.isEmpty {
-                Text(label)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(tags, id: \.self) { tag in
-                Button {
-                    viewModel.toggleTag(tag)
-                    viewModel.currentPage = 1
-                    Task { await viewModel.search() }
-                } label: {
-                    Text(tag)
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(viewModel.selectedTags.contains(tag) ? Color.accentColor : Color(nsColor: .controlBackgroundColor))
-                        .foregroundStyle(viewModel.selectedTags.contains(tag) ? .white : .primary)
-                        .cornerRadius(12)
-                }
-                .buttonStyle(.plain)
-            }
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
 // MARK: - Workshop Item Card
+
+struct WorkshopItemPreview: View {
+    let url: URL?
+    @StateObject private var imageLoader: RemoteImageLoader
+
+    init(
+        url: URL?,
+        dataLoader: any RemoteImageDataLoading = RestrictedRemoteImageDataLoader.shared,
+        cache: RemoteImageCache = .shared
+    ) {
+        self.url = url
+        _imageLoader = StateObject(wrappedValue: RemoteImageLoader(
+            dataLoader: dataLoader,
+            cache: cache
+        ))
+    }
+
+    var body: some View {
+        ZStack {
+            Color(nsColor: .separatorColor)
+
+            switch imageLoader.state {
+            case .loaded(let image):
+                GifImage(image: image, animates: true)
+                    .resizable()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .failed(let message):
+                VStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.secondary)
+                    Text("Preview failed to load")
+                        .font(.caption)
+                    Button("Retry") {
+                        Task { await imageLoader.retry() }
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                }
+                .help(message)
+            case .idle, .loading:
+                ProgressView()
+                    .controlSize(.small)
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .frame(maxWidth: .infinity)
+        .clipped()
+        .task(id: url) {
+            await imageLoader.load(url: url)
+        }
+    }
+}
 
 private struct WorkshopItemCard: View {
     let item: WorkshopItem
@@ -352,22 +465,7 @@ private struct WorkshopItemCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Preview image
-            AsyncImage(url: item.previewImageURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(16/9, contentMode: .fill)
-                        .clipped()
-                case .failure:
-                    placeholder
-                default:
-                    placeholder
-                        .overlay(ProgressView().controlSize(.small))
-                }
-            }
-            .frame(height: 120)
-            .clipped()
+            WorkshopItemPreview(url: item.previewImageURL)
 
             // Info
             VStack(alignment: .leading, spacing: 4) {
@@ -440,12 +538,6 @@ private struct WorkshopItemCard: View {
                     .foregroundStyle(.secondary)
             }
         }
-    }
-
-    private var placeholder: some View {
-        Rectangle()
-            .fill(Color(nsColor: .separatorColor))
-            .aspectRatio(16/9, contentMode: .fill)
     }
 
     private func formatCount(_ count: Int) -> String {

@@ -1,0 +1,70 @@
+name: Build macOS DMG
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-dmg:
+    name: Build DMG
+    runs-on: macos-14
+
+    env:
+      PROJECT: Open Wallpaper Engine.xcodeproj
+      SCHEME: Open Wallpaper Engine
+      ARCHIVE_PATH: ${{ github.workspace }}/build/Open Wallpaper Engine.xcarchive
+      DMG_NAME: Open-Wallpaper-Engine-${{ github.ref_name }}.dmg
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Resolve Swift package dependencies
+        run: xcodebuild -resolvePackageDependencies -project "$PROJECT" -scheme "$SCHEME"
+
+      - name: Archive universal app
+        run: >-
+          xcodebuild archive
+          -project "$PROJECT"
+          -scheme "$SCHEME"
+          -configuration Release
+          -archivePath "$ARCHIVE_PATH"
+          -destination 'generic/platform=macOS'
+          ARCHS='arm64 x86_64'
+          CODE_SIGNING_ALLOWED=NO
+
+      - name: Create DMG
+        run: |
+          APP_PATH="$ARCHIVE_PATH/Products/Applications/Open Wallpaper Engine.app"
+          STAGING_PATH="$RUNNER_TEMP/dmg-staging"
+
+          test -d "$APP_PATH"
+          mkdir -p "$STAGING_PATH"
+          ditto "$APP_PATH" "$STAGING_PATH/Open Wallpaper Engine.app"
+          ln -s /Applications "$STAGING_PATH/Applications"
+          hdiutil create \
+            -volname "Open Wallpaper Engine" \
+            -srcfolder "$STAGING_PATH" \
+            -format UDZO \
+            -ov \
+            "$RUNNER_TEMP/$DMG_NAME"
+          mv "$RUNNER_TEMP/$DMG_NAME" "$GITHUB_WORKSPACE/$DMG_NAME"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Open-Wallpaper-Engine-${{ github.ref_name }}
+          path: ${{ env.DMG_NAME }}
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: gh release create "$TAG_NAME" "$DMG_NAME" --generate-notes

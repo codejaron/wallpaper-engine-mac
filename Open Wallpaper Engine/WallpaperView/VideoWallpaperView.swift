@@ -17,12 +17,22 @@ struct VideoWallpaperView: NSViewRepresentable {
     init(wallpaperViewModel: WallpaperViewModel, screenId: String) {
         self.wallpaperViewModel = wallpaperViewModel
         self.screenId = screenId
-        self._viewModel = StateObject(wrappedValue: VideoWallpaperViewModel(wallpaper: wallpaperViewModel.wallpaper(for: screenId)))
+        self._viewModel = StateObject(
+            wrappedValue: VideoWallpaperViewModel(
+                wallpaper: wallpaperViewModel.wallpaper(for: screenId),
+                screenId: screenId
+            )
+        )
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(viewModel: viewModel)
     }
 
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
 
+        viewModel.prepareForDisplay()
         view.player = viewModel.player
 
         // make the video boundary extends to fit the full screen without black background border
@@ -48,7 +58,23 @@ struct VideoWallpaperView: NSViewRepresentable {
             viewModel.currentWallpaper = selectedWallpaper
         }
 
-        viewModel.playRate = wallpaperViewModel.playRate
-        viewModel.playVolume = wallpaperViewModel.playVolume
+        viewModel.playRate = wallpaperViewModel.effectivePlayRate
+        viewModel.playVolume = wallpaperViewModel.effectivePlayVolume
+    }
+
+    static func dismantleNSView(
+        _ nsView: AVPlayerView,
+        coordinator: Coordinator
+    ) {
+        coordinator.viewModel.releasePlaybackResources()
+        nsView.player = nil
+    }
+
+    final class Coordinator {
+        let viewModel: VideoWallpaperViewModel
+
+        init(viewModel: VideoWallpaperViewModel) {
+            self.viewModel = viewModel
+        }
     }
 }

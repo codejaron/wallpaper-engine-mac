@@ -45,8 +45,9 @@ final class SceneNowPlayingMonitor {
                 withTimeInterval: timelineInterval,
                 repeats: true
             ) { [weak self] _ in
-                Task { @MainActor in
-                    self?.tickTimeline()
+                guard let self else { return }
+                Task { @MainActor [self] in
+                    self.tickTimeline()
                 }
             }
             requestRefresh()

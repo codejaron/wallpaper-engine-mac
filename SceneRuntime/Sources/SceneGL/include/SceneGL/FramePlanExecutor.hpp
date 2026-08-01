@@ -52,6 +52,43 @@ struct MediaThumbnailRGBA8 final {
 
 enum class PresentationScaling { stretch, aspectFit, aspectFill, automatic };
 
+// The requested backing-pixel ceiling for an explicitly downscaled Scene
+// render. High quality is represented by no target at all so the legacy
+// author-resolution path remains byte-for-byte unchanged.
+enum class PhysicalRenderQuality { balanced, powerSaving };
+
+struct PhysicalRenderTarget final {
+    std::uint32_t backingWidth = 0;
+    std::uint32_t backingHeight = 0;
+    PhysicalRenderQuality quality = PhysicalRenderQuality::balanced;
+};
+
+struct PhysicalRenderSize final {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+
+    [[nodiscard]] friend bool operator==(
+        const PhysicalRenderSize&,
+        const PhysicalRenderSize&
+    ) = default;
+};
+
+// Chooses a fixed physical output size from a logical author plan and a
+// backing-pixel target. This is pure policy: it never observes frame time.
+[[nodiscard]] PhysicalRenderSize physicalRenderSize(
+    const FramePlan& logicalPlan,
+    const PhysicalRenderTarget& target,
+    PresentationScaling scaling
+);
+
+// Copies a logical plan for GL execution at physicalSize. World-space data,
+// camera projection, script/particle state, and every operation remain
+// logical; only framebuffer dimensions and the plan's output dimensions move.
+[[nodiscard]] FramePlan withPhysicalRenderSize(
+    const FramePlan& logicalPlan,
+    PhysicalRenderSize physicalSize
+);
+
 struct PresentationRect final {
     std::uint32_t x = 0;
     std::uint32_t y = 0;
@@ -120,6 +157,22 @@ struct FrameExecutionIssue final {
     std::string message;
 };
 
+// Physical framebuffer backing owned by the executor. Statistics separate the
+// latest executable arena from persistent inactive backing; the total physical
+// allocation for each attachment kind is their sum.
+struct FramebufferResourceStats final {
+    // Active is the current executable plan's physical baseline.
+    std::size_t framebufferCount = 0;
+    std::size_t colorAttachmentCount = 0;
+    std::size_t depthAttachmentCount = 0;
+    // Previously active descriptors remain cached so authored feedback pixels
+    // survive any number of visibility transitions during this executor's
+    // lifetime.
+    std::size_t inactiveFramebufferCount = 0;
+    std::size_t inactiveColorAttachmentCount = 0;
+    std::size_t inactiveDepthAttachmentCount = 0;
+};
+
 // Executes coherent SceneFrameGraph snapshots in one private GL resource
 // domain. No plan state is reconstructed by the Objective-C/C boundary.
 class FramePlanExecutor final {
@@ -148,8 +201,19 @@ public:
         const PresentationViewport& viewport,
         PresentationScaling scaling
     );
+    void render(
+        const FrameInputs& inputs,
+        const PresentationViewport& viewport,
+        PresentationScaling scaling,
+        PhysicalRenderTarget physicalTarget
+    );
     void replay(std::uint32_t drawableWidth, std::uint32_t drawableHeight);
     void replay(const PresentationViewport& viewport);
+    void replay(
+        const PresentationViewport& viewport,
+        PresentationScaling scaling,
+        PhysicalRenderTarget physicalTarget
+    );
     void present(
         std::uint32_t drawableWidth,
         std::uint32_t drawableHeight,
@@ -178,6 +242,7 @@ public:
     [[nodiscard]] std::uint32_t width() const noexcept;
     [[nodiscard]] std::uint32_t height() const noexcept;
     [[nodiscard]] std::size_t rgba8ByteCount() const noexcept;
+    [[nodiscard]] FramebufferResourceStats framebufferResourceStats() const noexcept;
     [[nodiscard]] std::optional<std::uint64_t> lastModelRevision() const noexcept;
     [[nodiscard]] const std::vector<FrameSoundDescriptor>* lastSounds() const noexcept;
     [[nodiscard]] const std::vector<FrameExecutionIssue>* lastIssues() const noexcept;

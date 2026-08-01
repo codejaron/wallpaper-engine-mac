@@ -87,6 +87,55 @@ std::optional<gl::PresentationScaling> presentationScaling(
     return std::nullopt;
 }
 
+std::optional<gl::PhysicalRenderQuality> physicalRenderQuality(
+    WEScenePhysicalRenderQuality quality
+) noexcept {
+    switch (quality) {
+        case WE_SCENE_PHYSICAL_RENDER_BALANCED:
+            return gl::PhysicalRenderQuality::balanced;
+        case WE_SCENE_PHYSICAL_RENDER_POWER_SAVING:
+            return gl::PhysicalRenderQuality::powerSaving;
+    }
+    return std::nullopt;
+}
+
+bool requirePhysicalRenderTarget(
+    WESceneFrameExecutorRef executor,
+    const WEScenePhysicalRenderTarget* target,
+    bool invalidateFrame,
+    gl::PhysicalRenderTarget& result,
+    WESceneRuntimeErrorRef* outError
+) {
+    if (target == nullptr) {
+        if (invalidateFrame) executor->executor->invalidateFrame();
+        assignError(
+            outError, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+            "Physical render target is required"
+        );
+        return false;
+    }
+    const auto quality = physicalRenderQuality(target->quality);
+    if (target->backing_width == 0 || target->backing_height == 0 ||
+        target->backing_width >
+            static_cast<uint32_t>(std::numeric_limits<GLsizei>::max()) ||
+        target->backing_height >
+            static_cast<uint32_t>(std::numeric_limits<GLsizei>::max()) ||
+        !quality) {
+        if (invalidateFrame) executor->executor->invalidateFrame();
+        assignError(
+            outError, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+            "Physical render target dimensions and quality must be valid"
+        );
+        return false;
+    }
+    result = {
+        .backingWidth = target->backing_width,
+        .backingHeight = target->backing_height,
+        .quality = *quality,
+    };
+    return true;
+}
+
 gl::PresentationViewport presentationViewport(
     const WEScenePresentationViewport& viewport
 ) noexcept {
@@ -359,6 +408,7 @@ int renderExecutor(
     const WESceneAudioSpectrumInputs* audioSpectrum,
     std::optional<gl::PresentationViewport> presentation,
     std::optional<gl::PresentationScaling> scaling,
+    std::optional<gl::PhysicalRenderTarget> physicalTarget,
     WESceneRuntimeErrorRef* outError
 ) {
     clearError(outError);
@@ -389,10 +439,25 @@ int renderExecutor(
                 );
                 return 0;
             }
-            executor->executor->render(
-                frameInputs, *presentation, *scaling
-            );
+            if (physicalTarget) {
+                executor->executor->render(
+                    frameInputs, *presentation, *scaling, *physicalTarget
+                );
+            } else {
+                executor->executor->render(
+                    frameInputs, *presentation, *scaling
+                );
+            }
         } else {
+            if (physicalTarget) {
+                executor->executor->invalidateFrame();
+                assignError(
+                    outError,
+                    WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+                    "Physical rendering requires an explicit presentation target"
+                );
+                return 0;
+            }
             executor->executor->render(frameInputs);
         }
         return 1;
@@ -436,6 +501,7 @@ int renderExecutorForDrawable(
     uint32_t drawableWidth,
     uint32_t drawableHeight,
     WEScenePresentationScaling scaling,
+    std::optional<gl::PhysicalRenderTarget> physicalTarget,
     WESceneRuntimeErrorRef* outError
 ) {
     clearError(outError);
@@ -467,6 +533,7 @@ int renderExecutorForDrawable(
         executor, inputs, audioSpectrum,
         gl::drawablePresentationViewport(drawableWidth, drawableHeight),
         mode,
+        physicalTarget,
         outError
     );
 }
@@ -478,6 +545,7 @@ int renderExecutorForViewport(
     bool audioSpectrumRequired,
     const WEScenePresentationViewport* viewport,
     WEScenePresentationScaling scaling,
+    std::optional<gl::PhysicalRenderTarget> physicalTarget,
     WESceneRuntimeErrorRef* outError
 ) {
     clearError(outError);
@@ -499,17 +567,31 @@ int renderExecutorForViewport(
         return 0;
     }
     return renderExecutor(
-        executor, inputs, audioSpectrum, nativeViewport, mode, outError
+        executor, inputs, audioSpectrum, nativeViewport, mode,
+        physicalTarget, outError
     );
 }
 
 int replayExecutor(
     WESceneFrameExecutorRef executor,
     const gl::PresentationViewport& viewport,
+    std::optional<gl::PresentationScaling> scaling,
+    std::optional<gl::PhysicalRenderTarget> physicalTarget,
     WESceneRuntimeErrorRef* outError
 ) {
     try {
-        executor->executor->replay(viewport);
+        if (physicalTarget) {
+            if (!scaling) {
+                assignError(
+                    outError, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+                    "Physical replay requires a presentation scaling mode"
+                );
+                return 0;
+            }
+            executor->executor->replay(viewport, *scaling, *physicalTarget);
+        } else {
+            executor->executor->replay(viewport);
+        }
         return 1;
     } catch (const gl::Error& error) {
         assignGLError(outError, error);
@@ -866,7 +948,8 @@ extern "C" int we_scene_frame_executor_render(
     WESceneRuntimeErrorRef* out_error
 ) {
     return renderExecutor(
-        executor, inputs, nullptr, std::nullopt, std::nullopt, out_error
+        executor, inputs, nullptr, std::nullopt, std::nullopt,
+        std::nullopt, out_error
     );
 }
 
@@ -880,7 +963,8 @@ extern "C" int we_scene_frame_executor_render_with_audio_spectrum(
     if (!requireExecutor(executor, out_error)) return 0;
     if (!requireAudioSpectrum(executor, audio_spectrum, out_error)) return 0;
     return renderExecutor(
-        executor, inputs, audio_spectrum, std::nullopt, std::nullopt, out_error
+        executor, inputs, audio_spectrum, std::nullopt, std::nullopt,
+        std::nullopt, out_error
     );
 }
 
@@ -894,7 +978,7 @@ extern "C" int we_scene_frame_executor_render_for_drawable(
 ) {
     return renderExecutorForDrawable(
         executor, inputs, nullptr, false,
-        drawable_width, drawable_height, scaling, out_error
+        drawable_width, drawable_height, scaling, std::nullopt, out_error
     );
 }
 
@@ -909,7 +993,7 @@ extern "C" int we_scene_frame_executor_render_for_drawable_with_audio_spectrum(
 ) {
     return renderExecutorForDrawable(
         executor, inputs, audio_spectrum, true,
-        drawable_width, drawable_height, scaling, out_error
+        drawable_width, drawable_height, scaling, std::nullopt, out_error
     );
 }
 
@@ -921,7 +1005,8 @@ extern "C" int we_scene_frame_executor_render_for_viewport(
     WESceneRuntimeErrorRef* out_error
 ) {
     return renderExecutorForViewport(
-        executor, inputs, nullptr, false, viewport, scaling, out_error
+        executor, inputs, nullptr, false, viewport, scaling,
+        std::nullopt, out_error
     );
 }
 
@@ -935,7 +1020,96 @@ we_scene_frame_executor_render_for_viewport_with_audio_spectrum(
     WESceneRuntimeErrorRef* out_error
 ) {
     return renderExecutorForViewport(
-        executor, inputs, audio_spectrum, true, viewport, scaling, out_error
+        executor, inputs, audio_spectrum, true, viewport, scaling,
+        std::nullopt, out_error
+    );
+}
+
+extern "C" int
+we_scene_frame_executor_render_for_drawable_with_physical_render_target(
+    WESceneFrameExecutorRef executor,
+    const WESceneFrameInputs* inputs,
+    uint32_t drawable_width,
+    uint32_t drawable_height,
+    WEScenePresentationScaling scaling,
+    const WEScenePhysicalRenderTarget* physical_target,
+    WESceneRuntimeErrorRef* out_error
+) {
+    clearError(out_error);
+    if (!requireExecutor(executor, out_error)) return 0;
+    gl::PhysicalRenderTarget nativeTarget;
+    if (!requirePhysicalRenderTarget(
+            executor, physical_target, true, nativeTarget, out_error
+        )) return 0;
+    return renderExecutorForDrawable(
+        executor, inputs, nullptr, false,
+        drawable_width, drawable_height, scaling, nativeTarget, out_error
+    );
+}
+
+extern "C" int
+we_scene_frame_executor_render_for_drawable_with_audio_spectrum_and_physical_render_target(
+    WESceneFrameExecutorRef executor,
+    const WESceneFrameInputs* inputs,
+    const WESceneAudioSpectrumInputs* audio_spectrum,
+    uint32_t drawable_width,
+    uint32_t drawable_height,
+    WEScenePresentationScaling scaling,
+    const WEScenePhysicalRenderTarget* physical_target,
+    WESceneRuntimeErrorRef* out_error
+) {
+    clearError(out_error);
+    if (!requireExecutor(executor, out_error)) return 0;
+    gl::PhysicalRenderTarget nativeTarget;
+    if (!requirePhysicalRenderTarget(
+            executor, physical_target, true, nativeTarget, out_error
+        )) return 0;
+    return renderExecutorForDrawable(
+        executor, inputs, audio_spectrum, true,
+        drawable_width, drawable_height, scaling, nativeTarget, out_error
+    );
+}
+
+extern "C" int
+we_scene_frame_executor_render_for_viewport_with_physical_render_target(
+    WESceneFrameExecutorRef executor,
+    const WESceneFrameInputs* inputs,
+    const WEScenePresentationViewport* viewport,
+    WEScenePresentationScaling scaling,
+    const WEScenePhysicalRenderTarget* physical_target,
+    WESceneRuntimeErrorRef* out_error
+) {
+    clearError(out_error);
+    if (!requireExecutor(executor, out_error)) return 0;
+    gl::PhysicalRenderTarget nativeTarget;
+    if (!requirePhysicalRenderTarget(
+            executor, physical_target, true, nativeTarget, out_error
+        )) return 0;
+    return renderExecutorForViewport(
+        executor, inputs, nullptr, false, viewport, scaling,
+        nativeTarget, out_error
+    );
+}
+
+extern "C" int
+we_scene_frame_executor_render_for_viewport_with_audio_spectrum_and_physical_render_target(
+    WESceneFrameExecutorRef executor,
+    const WESceneFrameInputs* inputs,
+    const WESceneAudioSpectrumInputs* audio_spectrum,
+    const WEScenePresentationViewport* viewport,
+    WEScenePresentationScaling scaling,
+    const WEScenePhysicalRenderTarget* physical_target,
+    WESceneRuntimeErrorRef* out_error
+) {
+    clearError(out_error);
+    if (!requireExecutor(executor, out_error)) return 0;
+    gl::PhysicalRenderTarget nativeTarget;
+    if (!requirePhysicalRenderTarget(
+            executor, physical_target, true, nativeTarget, out_error
+        )) return 0;
+    return renderExecutorForViewport(
+        executor, inputs, audio_spectrum, true, viewport, scaling,
+        nativeTarget, out_error
     );
 }
 
@@ -960,6 +1134,8 @@ extern "C" int we_scene_frame_executor_replay_for_drawable(
     return replayExecutor(
         executor,
         gl::drawablePresentationViewport(drawable_width, drawable_height),
+        std::nullopt,
+        std::nullopt,
         out_error
     );
 }
@@ -974,7 +1150,86 @@ extern "C" int we_scene_frame_executor_replay_for_viewport(
     gl::PresentationViewport nativeViewport;
     if (!requirePresentationViewport(
             executor, viewport, true, nativeViewport, out_error)) return 0;
-    return replayExecutor(executor, nativeViewport, out_error);
+    return replayExecutor(
+        executor, nativeViewport, std::nullopt, std::nullopt, out_error
+    );
+}
+
+extern "C" int
+we_scene_frame_executor_replay_for_drawable_with_physical_render_target(
+    WESceneFrameExecutorRef executor,
+    uint32_t drawable_width,
+    uint32_t drawable_height,
+    WEScenePresentationScaling scaling,
+    const WEScenePhysicalRenderTarget* physical_target,
+    WESceneRuntimeErrorRef* out_error
+) {
+    clearError(out_error);
+    if (!requireExecutor(executor, out_error)) return 0;
+    if (drawable_width == 0 || drawable_height == 0 ||
+        drawable_width >
+            static_cast<uint32_t>(std::numeric_limits<GLsizei>::max()) ||
+        drawable_height >
+            static_cast<uint32_t>(std::numeric_limits<GLsizei>::max())) {
+        executor->executor->invalidateFrame();
+        assignError(
+            out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+            "Drawable dimensions must be non-zero and fit OpenGL's signed range"
+        );
+        return 0;
+    }
+    const auto mode = presentationScaling(scaling);
+    if (!mode) {
+        executor->executor->invalidateFrame();
+        assignError(
+            out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+            "Unknown scene presentation scaling mode"
+        );
+        return 0;
+    }
+    gl::PhysicalRenderTarget nativeTarget;
+    if (!requirePhysicalRenderTarget(
+            executor, physical_target, true, nativeTarget, out_error
+        )) return 0;
+    return replayExecutor(
+        executor,
+        gl::drawablePresentationViewport(drawable_width, drawable_height),
+        *mode,
+        nativeTarget,
+        out_error
+    );
+}
+
+extern "C" int
+we_scene_frame_executor_replay_for_viewport_with_physical_render_target(
+    WESceneFrameExecutorRef executor,
+    const WEScenePresentationViewport* viewport,
+    WEScenePresentationScaling scaling,
+    const WEScenePhysicalRenderTarget* physical_target,
+    WESceneRuntimeErrorRef* out_error
+) {
+    clearError(out_error);
+    if (!requireExecutor(executor, out_error)) return 0;
+    gl::PresentationViewport nativeViewport;
+    if (!requirePresentationViewport(
+            executor, viewport, true, nativeViewport, out_error
+        )) return 0;
+    const auto mode = presentationScaling(scaling);
+    if (!mode) {
+        executor->executor->invalidateFrame();
+        assignError(
+            out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+            "Unknown scene presentation scaling mode"
+        );
+        return 0;
+    }
+    gl::PhysicalRenderTarget nativeTarget;
+    if (!requirePhysicalRenderTarget(
+            executor, physical_target, true, nativeTarget, out_error
+        )) return 0;
+    return replayExecutor(
+        executor, nativeViewport, *mode, nativeTarget, out_error
+    );
 }
 
 extern "C" int we_scene_frame_executor_present(
@@ -1050,6 +1305,29 @@ extern "C" size_t we_scene_frame_executor_rgba8_byte_count(
 ) {
     return executor != nullptr && executor->executor
         ? executor->executor->rgba8ByteCount() : 0;
+}
+
+extern "C" int we_scene_frame_executor_framebuffer_resource_stats(
+    WESceneFrameExecutorRef executor,
+    WESceneFramebufferResourceStats* out_stats,
+    WESceneRuntimeErrorRef* out_error
+) {
+    clearError(out_error);
+    if (!requireExecutor(executor, out_error) ||
+        !requireOutput(out_stats, out_error, "framebuffer resource statistics")) {
+        return 0;
+    }
+    const gl::FramebufferResourceStats stats =
+        executor->executor->framebufferResourceStats();
+    *out_stats = {
+        .framebuffer_count = stats.framebufferCount,
+        .color_attachment_count = stats.colorAttachmentCount,
+        .depth_attachment_count = stats.depthAttachmentCount,
+        .inactive_framebuffer_count = stats.inactiveFramebufferCount,
+        .inactive_color_attachment_count = stats.inactiveColorAttachmentCount,
+        .inactive_depth_attachment_count = stats.inactiveDepthAttachmentCount,
+    };
+    return 1;
 }
 
 extern "C" int we_scene_frame_executor_last_model_revision(

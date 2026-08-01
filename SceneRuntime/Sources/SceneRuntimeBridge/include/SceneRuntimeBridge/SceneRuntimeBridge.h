@@ -143,6 +143,23 @@ typedef enum WEScenePresentationScaling {
     WE_SCENE_PRESENTATION_AUTOMATIC = 3,
 } WEScenePresentationScaling;
 
+// High quality intentionally has no physical target and uses the existing
+// author-resolution entry points. These values describe the fixed-size
+// downscale policies applied against the supplied backing-pixel target.
+typedef enum WEScenePhysicalRenderQuality {
+    WE_SCENE_PHYSICAL_RENDER_BALANCED = 0,
+    WE_SCENE_PHYSICAL_RENDER_POWER_SAVING = 1,
+} WEScenePhysicalRenderQuality;
+
+// A backing-pixel target independent from the presentation drawable. In span
+// mode callers pass the shared virtual canvas dimensions so every display
+// reuses exactly the same physical scene output.
+typedef struct WEScenePhysicalRenderTarget {
+    uint32_t backing_width;
+    uint32_t backing_height;
+    WEScenePhysicalRenderQuality quality;
+} WEScenePhysicalRenderTarget;
+
 // One display's rectangle inside a bottom-left-origin virtual desktop canvas.
 // Drawable dimensions describe the backing surface for that same viewport and
 // may differ from its logical size on scaled displays.
@@ -1019,6 +1036,45 @@ int we_scene_frame_executor_render_for_viewport_with_audio_spectrum(
     WEScenePresentationScaling scaling,
     WESceneRuntimeErrorRef* out_error
 );
+// The physical target is explicit and separate from the drawable/viewport
+// used for presentation and pointer mapping. These entry points do not
+// advance timing differently from their author-resolution counterparts.
+int we_scene_frame_executor_render_for_drawable_with_physical_render_target(
+    WESceneFrameExecutorRef executor,
+    const WESceneFrameInputs* inputs,
+    uint32_t drawable_width,
+    uint32_t drawable_height,
+    WEScenePresentationScaling scaling,
+    const WEScenePhysicalRenderTarget* physical_target,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_render_for_drawable_with_audio_spectrum_and_physical_render_target(
+    WESceneFrameExecutorRef executor,
+    const WESceneFrameInputs* inputs,
+    const WESceneAudioSpectrumInputs* audio_spectrum,
+    uint32_t drawable_width,
+    uint32_t drawable_height,
+    WEScenePresentationScaling scaling,
+    const WEScenePhysicalRenderTarget* physical_target,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_render_for_viewport_with_physical_render_target(
+    WESceneFrameExecutorRef executor,
+    const WESceneFrameInputs* inputs,
+    const WEScenePresentationViewport* viewport,
+    WEScenePresentationScaling scaling,
+    const WEScenePhysicalRenderTarget* physical_target,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_render_for_viewport_with_audio_spectrum_and_physical_render_target(
+    WESceneFrameExecutorRef executor,
+    const WESceneFrameInputs* inputs,
+    const WESceneAudioSpectrumInputs* audio_spectrum,
+    const WEScenePresentationViewport* viewport,
+    WEScenePresentationScaling scaling,
+    const WEScenePhysicalRenderTarget* physical_target,
+    WESceneRuntimeErrorRef* out_error
+);
 // Rebuilds the last successful evaluated frame for a new drawable projection.
 // This never evaluates scripts, advances particles, updates parallax, or
 // publishes a new sound snapshot. It fails until a frame has rendered.
@@ -1031,6 +1087,23 @@ int we_scene_frame_executor_replay_for_drawable(
 int we_scene_frame_executor_replay_for_viewport(
     WESceneFrameExecutorRef executor,
     const WEScenePresentationViewport* viewport,
+    WESceneRuntimeErrorRef* out_error
+);
+// Replays the last evaluated logical plan at an explicit physical target. It
+// never re-evaluates scripts, advances particles, or changes frame time.
+int we_scene_frame_executor_replay_for_drawable_with_physical_render_target(
+    WESceneFrameExecutorRef executor,
+    uint32_t drawable_width,
+    uint32_t drawable_height,
+    WEScenePresentationScaling scaling,
+    const WEScenePhysicalRenderTarget* physical_target,
+    WESceneRuntimeErrorRef* out_error
+);
+int we_scene_frame_executor_replay_for_viewport_with_physical_render_target(
+    WESceneFrameExecutorRef executor,
+    const WEScenePresentationViewport* viewport,
+    WEScenePresentationScaling scaling,
+    const WEScenePhysicalRenderTarget* physical_target,
     WESceneRuntimeErrorRef* out_error
 );
 int we_scene_frame_executor_present(
@@ -1049,6 +1122,24 @@ int we_scene_frame_executor_present_for_viewport(
 uint32_t we_scene_frame_executor_width(WESceneFrameExecutorRef executor);
 uint32_t we_scene_frame_executor_height(WESceneFrameExecutorRef executor);
 size_t we_scene_frame_executor_rgba8_byte_count(WESceneFrameExecutorRef executor);
+typedef struct WESceneFramebufferResourceStats {
+    size_t framebuffer_count;
+    size_t color_attachment_count;
+    size_t depth_attachment_count;
+    size_t inactive_framebuffer_count;
+    size_t inactive_color_attachment_count;
+    size_t inactive_depth_attachment_count;
+} WESceneFramebufferResourceStats;
+// Reports all framebuffer backing owned by the executor, split between the
+// current reachable arena and persistent inactive backing. This
+// query is valid before the first render and reports zeros until an arena is
+// committed. Inactive resources preserve feedback across visibility changes;
+// add current and inactive fields to obtain total allocation.
+int we_scene_frame_executor_framebuffer_resource_stats(
+    WESceneFrameExecutorRef executor,
+    WESceneFramebufferResourceStats* out_stats,
+    WESceneRuntimeErrorRef* out_error
+);
 int we_scene_frame_executor_last_model_revision(
     WESceneFrameExecutorRef executor,
     uint64_t* out_revision,

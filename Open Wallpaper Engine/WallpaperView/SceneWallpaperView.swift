@@ -240,6 +240,41 @@ struct ScenePresentationLayout: Equatable {
             drawable_height: drawableHeight
         )
     }
+
+    /// Returns the fixed backing-pixel budget for Scene framebuffer rendering.
+    /// The caller supplies NSView.convertToBacking(bounds), never point sizes.
+    /// Span participants use the same virtual-canvas dimensions so separate
+    /// display windows cannot choose divergent full-scene render sizes.
+    func physicalRenderTarget(
+        drawableWidth: UInt32,
+        drawableHeight: UInt32,
+        quality: GSSceneRenderQuality
+    ) throws -> WEScenePhysicalRenderTarget? {
+        let bridgeQuality: WEScenePhysicalRenderQuality
+        switch quality {
+        case .high:
+            return nil
+        case .balanced:
+            bridgeQuality = WE_SCENE_PHYSICAL_RENDER_BALANCED
+        case .powerSaving:
+            bridgeQuality = WE_SCENE_PHYSICAL_RENDER_POWER_SAVING
+        }
+        if let validationError {
+            throw ScenePresentationLayoutError.invalid(validationError)
+        }
+        let backingWidth = spanAcrossScreens ? canvasWidth : drawableWidth
+        let backingHeight = spanAcrossScreens ? canvasHeight : drawableHeight
+        guard backingWidth > 0, backingHeight > 0 else {
+            throw ScenePresentationLayoutError.invalid(
+                "Scene render target backing dimensions must be non-zero"
+            )
+        }
+        return WEScenePhysicalRenderTarget(
+            backing_width: backingWidth,
+            backing_height: backingHeight,
+            quality: bridgeQuality
+        )
+    }
 }
 
 /// Span-mode Scene views use one monotonic origin and one FPS-aligned time grid.
@@ -288,6 +323,7 @@ struct SceneWallpaperView: View {
             SceneOpenGLRepresentable(
                 wallpaper: wallpaper,
                 presentation: presentation,
+                renderQuality: globalSettingsViewModel.settings.sceneRenderQuality,
                 paused: wallpaperViewModel.effectivePlayRate == 0,
                 framesPerSecond: globalSettingsViewModel.settings.fps,
                 masterVolume: wallpaperViewModel.effectivePlayVolume,
@@ -348,6 +384,7 @@ struct SceneWallpaperView: View {
 private struct SceneOpenGLRepresentable: NSViewRepresentable {
     let wallpaper: WEWallpaper
     let presentation: ScenePresentationLayout
+    let renderQuality: GSSceneRenderQuality
     let paused: Bool
     let framesPerSecond: Double
     let masterVolume: Float
@@ -377,6 +414,7 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
             propertyOverrides: propertyOverrides
         )
         view.setPresentation(presentation)
+        view.setRenderQuality(renderQuality)
         view.setPaused(paused)
         view.setAudioConfiguration(
             masterVolume: masterVolume,
@@ -403,6 +441,7 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
             propertyOverrides: propertyOverrides
         )
         view.setPresentation(presentation)
+        view.setRenderQuality(renderQuality)
         view.setPaused(paused)
         view.setAudioConfiguration(
             masterVolume: masterVolume,
@@ -476,6 +515,10 @@ final class SceneOpenGLContainerView: NSView {
         openGLView?.setPresentation(value)
     }
 
+    func setRenderQuality(_ value: GSSceneRenderQuality) {
+        openGLView?.setRenderQuality(value)
+    }
+
     func setAudioConfiguration(
         masterVolume: Float,
         audioOutputEnabled: Bool,
@@ -540,6 +583,7 @@ private final class SceneOpenGLView: NSOpenGLView {
     private var isOpenGLPrepared = false
     private var hasRenderedFrame = false
     private var paused = false
+    private var renderQuality = GSSceneRenderQuality.high
     private var framesPerSecond = 30.0
     private var masterVolume: Float = 1
     private var audioOutputEnabled = true
@@ -635,6 +679,12 @@ private final class SceneOpenGLView: NSOpenGLView {
             previousSpanRuntimeSeconds = nil
         }
         presentation = value
+        needsDisplay = true
+    }
+
+    func setRenderQuality(_ value: GSSceneRenderQuality) {
+        guard renderQuality != value else { return }
+        renderQuality = value
         needsDisplay = true
     }
 
@@ -756,7 +806,8 @@ private final class SceneOpenGLView: NSOpenGLView {
                 try session.replayLastEvaluatedFrame(
                     drawableWidth: width,
                     drawableHeight: height,
-                    presentation: presentation
+                    presentation: presentation,
+                    renderQuality: renderQuality
                 )
             } else {
                 let now = ProcessInfo.processInfo.systemUptime
@@ -797,6 +848,7 @@ private final class SceneOpenGLView: NSOpenGLView {
                     drawableWidth: width,
                     drawableHeight: height,
                     presentation: presentation,
+                    renderQuality: renderQuality,
                     masterVolume: masterVolume,
                     audioOutputEnabled: audioOutputEnabled,
                     systemAudioCaptureEnabled: systemAudioCaptureEnabled,

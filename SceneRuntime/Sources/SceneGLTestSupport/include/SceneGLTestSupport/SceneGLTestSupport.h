@@ -8,6 +8,14 @@ extern "C" {
 int we_scene_gl_test_render_text(uint8_t* rgba, size_t length, size_t* cache_count);
 int we_scene_gl_test_text_cache_bound(size_t updates, size_t* cache_count);
 int we_scene_gl_test_render_text_orientation(uint8_t* rgba, size_t length);
+// Exercises the pure framebuffer liveness/depth analysis with a frame plan
+// that combines render, copy, swap, clear, text, particle and texture-input
+// references. It does not create synthetic GL output.
+int we_scene_gl_test_framebuffer_plan_requirements(void);
+// Exercises the fixed backing-pixel quality policy and verifies that applying
+// a physical size changes only framebuffer dimensions, not logical camera
+// projection or the source plan.
+int we_scene_gl_test_physical_render_policy(void);
 typedef struct WESceneGLTestParticleObjects {
     uint32_t vertex_array;
     uint32_t vertex_buffer;

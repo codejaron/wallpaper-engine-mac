@@ -146,6 +146,7 @@ final class SceneRuntimeSession {
         drawableWidth: UInt32,
         drawableHeight: UInt32,
         presentation: ScenePresentationLayout,
+        renderQuality: GSSceneRenderQuality,
         masterVolume: Float,
         audioOutputEnabled: Bool,
         systemAudioCaptureEnabled: Bool,
@@ -200,31 +201,65 @@ final class SceneRuntimeSession {
             audioSpectrum = .zero
         }
         let renderResult: Int32
+        let physicalTarget = try presentation.physicalRenderTarget(
+            drawableWidth: drawableWidth,
+            drawableHeight: drawableHeight,
+            quality: renderQuality
+        )
         if var viewport = try presentation.viewport(
             drawableWidth: drawableWidth,
             drawableHeight: drawableHeight
         ) {
-            renderResult = withAudioSpectrumInputs(audioSpectrum) { audioInputs in
-                we_scene_frame_executor_render_for_viewport_with_audio_spectrum(
-                    executor,
-                    &inputs,
-                    &audioInputs,
-                    &viewport,
-                    presentation.bridgeScaling,
-                    &error
-                )
+            if var physicalTarget {
+                renderResult = withAudioSpectrumInputs(audioSpectrum) { audioInputs in
+                    we_scene_frame_executor_render_for_viewport_with_audio_spectrum_and_physical_render_target(
+                        executor,
+                        &inputs,
+                        &audioInputs,
+                        &viewport,
+                        presentation.bridgeScaling,
+                        &physicalTarget,
+                        &error
+                    )
+                }
+            } else {
+                renderResult = withAudioSpectrumInputs(audioSpectrum) { audioInputs in
+                    we_scene_frame_executor_render_for_viewport_with_audio_spectrum(
+                        executor,
+                        &inputs,
+                        &audioInputs,
+                        &viewport,
+                        presentation.bridgeScaling,
+                        &error
+                    )
+                }
             }
         } else {
-            renderResult = withAudioSpectrumInputs(audioSpectrum) { audioInputs in
-                we_scene_frame_executor_render_for_drawable_with_audio_spectrum(
-                    executor,
-                    &inputs,
-                    &audioInputs,
-                    drawableWidth,
-                    drawableHeight,
-                    presentation.bridgeScaling,
-                    &error
-                )
+            if var physicalTarget {
+                renderResult = withAudioSpectrumInputs(audioSpectrum) { audioInputs in
+                    we_scene_frame_executor_render_for_drawable_with_audio_spectrum_and_physical_render_target(
+                        executor,
+                        &inputs,
+                        &audioInputs,
+                        drawableWidth,
+                        drawableHeight,
+                        presentation.bridgeScaling,
+                        &physicalTarget,
+                        &error
+                    )
+                }
+            } else {
+                renderResult = withAudioSpectrumInputs(audioSpectrum) { audioInputs in
+                    we_scene_frame_executor_render_for_drawable_with_audio_spectrum(
+                        executor,
+                        &inputs,
+                        &audioInputs,
+                        drawableWidth,
+                        drawableHeight,
+                        presentation.bridgeScaling,
+                        &error
+                    )
+                }
             }
         }
         guard renderResult == 1 else {
@@ -437,24 +472,53 @@ final class SceneRuntimeSession {
     func replayLastEvaluatedFrame(
         drawableWidth: UInt32,
         drawableHeight: UInt32,
-        presentation: ScenePresentationLayout
+        presentation: ScenePresentationLayout,
+        renderQuality: GSSceneRenderQuality
     ) throws {
         guard let executor else {
             throw SceneRuntimeSessionError.runtime("Scene executor is not available")
         }
         var error: WESceneRuntimeErrorRef?
         let replayResult: Int32
+        let physicalTarget = try presentation.physicalRenderTarget(
+            drawableWidth: drawableWidth,
+            drawableHeight: drawableHeight,
+            quality: renderQuality
+        )
         if var viewport = try presentation.viewport(
             drawableWidth: drawableWidth,
             drawableHeight: drawableHeight
         ) {
-            replayResult = we_scene_frame_executor_replay_for_viewport(
-                executor, &viewport, &error
-            )
+            if var physicalTarget {
+                replayResult =
+                    we_scene_frame_executor_replay_for_viewport_with_physical_render_target(
+                        executor,
+                        &viewport,
+                        presentation.bridgeScaling,
+                        &physicalTarget,
+                        &error
+                    )
+            } else {
+                replayResult = we_scene_frame_executor_replay_for_viewport(
+                    executor, &viewport, &error
+                )
+            }
         } else {
-            replayResult = we_scene_frame_executor_replay_for_drawable(
-                executor, drawableWidth, drawableHeight, &error
-            )
+            if var physicalTarget {
+                replayResult =
+                    we_scene_frame_executor_replay_for_drawable_with_physical_render_target(
+                        executor,
+                        drawableWidth,
+                        drawableHeight,
+                        presentation.bridgeScaling,
+                        &physicalTarget,
+                        &error
+                    )
+            } else {
+                replayResult = we_scene_frame_executor_replay_for_drawable(
+                    executor, drawableWidth, drawableHeight, &error
+                )
+            }
         }
         guard replayResult == 1 else {
             invalidateExecutorIssueSnapshot()

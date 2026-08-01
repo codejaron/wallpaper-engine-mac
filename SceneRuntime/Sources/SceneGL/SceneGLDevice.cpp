@@ -819,25 +819,65 @@ void Device::Session::ensureDepthAttachment(FramebufferResource& framebuffer) {
     if (framebuffer.depthRenderbuffer != 0) {
         return;
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer.framebuffer);
-    glGenRenderbuffers(1, &framebuffer.depthRenderbuffer);
-    if (framebuffer.depthRenderbuffer != 0) {
-        device_.renderbuffers_.insert(framebuffer.depthRenderbuffer);
+    GLuint candidate = 0;
+    bool tracked = false;
+    try {
+        glGenRenderbuffers(1, &candidate);
+        checkError(
+            ErrorCode::framebufferCreation,
+            "Generating framebuffer depth storage"
+        );
+        if (candidate == 0) {
+            throw Error(
+                ErrorCode::framebufferCreation,
+                "OpenGL returned renderbuffer zero for framebuffer depth storage"
+            );
+        }
+        device_.renderbuffers_.insert(candidate);
+        tracked = true;
+        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer.framebuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER, candidate);
+        glRenderbufferStorage(
+            GL_RENDERBUFFER,
+            GL_DEPTH_COMPONENT24,
+            static_cast<GLsizei>(framebuffer.width),
+            static_cast<GLsizei>(framebuffer.height)
+        );
+        glFramebufferRenderbuffer(
+            GL_FRAMEBUFFER,
+            GL_DEPTH_ATTACHMENT,
+            GL_RENDERBUFFER,
+            candidate
+        );
+        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            std::ostringstream message;
+            message << "Framebuffer is incomplete after adding depth storage (status 0x"
+                    << std::hex << status << ')';
+            throw Error(ErrorCode::framebufferCreation, message.str());
+        }
+        checkError(
+            ErrorCode::framebufferCreation,
+            "Adding framebuffer depth storage"
+        );
+        framebuffer.depthRenderbuffer = candidate;
+        candidate = 0;
+    } catch (...) {
+        if (candidate != 0) {
+            glBindFramebuffer(GL_FRAMEBUFFER, framebuffer.framebuffer);
+            glFramebufferRenderbuffer(
+                GL_FRAMEBUFFER,
+                GL_DEPTH_ATTACHMENT,
+                GL_RENDERBUFFER,
+                0
+            );
+            glDeleteRenderbuffers(1, &candidate);
+            if (tracked) {
+                device_.renderbuffers_.erase(candidate);
+            }
+        }
+        throw;
     }
-    glBindRenderbuffer(GL_RENDERBUFFER, framebuffer.depthRenderbuffer);
-    glRenderbufferStorage(
-        GL_RENDERBUFFER,
-        GL_DEPTH_COMPONENT24,
-        static_cast<GLsizei>(framebuffer.width),
-        static_cast<GLsizei>(framebuffer.height)
-    );
-    glFramebufferRenderbuffer(
-        GL_FRAMEBUFFER,
-        GL_DEPTH_ATTACHMENT,
-        GL_RENDERBUFFER,
-        framebuffer.depthRenderbuffer
-    );
-    checkError(ErrorCode::framebufferCreation, "Adding framebuffer depth storage");
 }
 
 void Device::Session::destroyFramebuffer(FramebufferResource& framebuffer) noexcept {

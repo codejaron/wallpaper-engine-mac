@@ -1,8 +1,237 @@
 import Foundation
+import SceneGLTestSupport
 import SceneRuntimeBridge
 import XCTest
 
 final class FrameExecutorBridgeTests: XCTestCase {
+    func testFixedPhysicalRenderPolicyKeepsLogicalProjectionIndependent() {
+        XCTAssertEqual(we_scene_gl_test_physical_render_policy(), 1)
+    }
+
+    func testFramebufferArenaRetainsOnlyReachableColorResources() throws {
+        XCTAssertEqual(
+            we_scene_gl_test_framebuffer_plan_requirements(),
+            1,
+            "Framebuffer liveness/depth analysis must preserve every operation input while excluding unused descriptors"
+        )
+
+        let loaded = try loadEmptyFrameGraph()
+        defer {
+            we_scene_frame_graph_destroy(loaded.frameGraph)
+            we_scene_graph_destroy(loaded.graph)
+            we_scene_model_destroy(loaded.model)
+            we_scene_runtime_destroy(loaded.runtime)
+            try? FileManager.default.removeItem(at: loaded.root)
+        }
+        var error: WESceneRuntimeErrorRef?
+        guard let executor = we_scene_frame_executor_create(
+            loaded.frameGraph, &error
+        ) else {
+            throw failure("executor", error)
+        }
+        defer { we_scene_frame_executor_destroy(executor) }
+        var inputs = WESceneFrameInputs(
+            pointer_x: 0.5, pointer_y: 0.5,
+            time_seconds: 0, frame_time_seconds: 1.0 / 60.0
+        )
+        XCTAssertEqual(
+            we_scene_frame_executor_render(executor, &inputs, &error),
+            1,
+            errorMessage(error)
+        )
+        var stats = WESceneFramebufferResourceStats()
+        XCTAssertEqual(
+            we_scene_frame_executor_framebuffer_resource_stats(
+                executor, &stats, &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertEqual(stats.framebuffer_count, 1)
+        XCTAssertEqual(stats.color_attachment_count, 1)
+        XCTAssertEqual(stats.depth_attachment_count, 0)
+    }
+
+    func testFramebufferArenaUpgradesDepthAcrossVisiblePlanChanges() throws {
+        let loaded = try loadFramebufferArenaFrameGraph()
+        defer {
+            we_scene_frame_graph_destroy(loaded.frameGraph)
+            we_scene_graph_destroy(loaded.graph)
+            we_scene_model_destroy(loaded.model)
+            we_scene_runtime_destroy(loaded.runtime)
+            try? FileManager.default.removeItem(at: loaded.root)
+        }
+        var error: WESceneRuntimeErrorRef?
+        guard let executor = we_scene_frame_executor_create(
+            loaded.frameGraph, &error
+        ) else {
+            throw failure("executor", error)
+        }
+        defer { we_scene_frame_executor_destroy(executor) }
+        var inputs = WESceneFrameInputs(
+            pointer_x: 0.5, pointer_y: 0.5,
+            time_seconds: 0, frame_time_seconds: 1.0 / 60.0
+        )
+
+        func render(
+            expectedPixel: [UInt8],
+            framebufferCount: Int,
+            depthAttachments: Int,
+            inactiveFramebufferCount: Int,
+            inactiveDepthAttachments: Int
+        ) throws {
+            XCTAssertEqual(
+                we_scene_frame_executor_render(executor, &inputs, &error),
+                1,
+                errorMessage(error)
+            )
+            var stats = WESceneFramebufferResourceStats()
+            XCTAssertEqual(
+                we_scene_frame_executor_framebuffer_resource_stats(
+                    executor, &stats, &error
+                ),
+                1,
+                errorMessage(error)
+            )
+            XCTAssertEqual(
+                stats.framebuffer_count,
+                framebufferCount,
+                "The arena must converge to the current plan's reachable output, sources, and active intermediate pass buffers"
+            )
+            XCTAssertEqual(stats.color_attachment_count, framebufferCount)
+            XCTAssertEqual(stats.depth_attachment_count, depthAttachments)
+            XCTAssertEqual(
+                stats.inactive_framebuffer_count,
+                inactiveFramebufferCount,
+                "Inactive framebuffer backing must preserve authored feedback across visibility transitions"
+            )
+            XCTAssertEqual(
+                stats.inactive_color_attachment_count,
+                inactiveFramebufferCount
+            )
+            XCTAssertEqual(
+                stats.inactive_depth_attachment_count,
+                inactiveDepthAttachments
+            )
+
+            var pixels = [UInt8](repeating: 0, count: 8 * 8 * 4)
+            XCTAssertEqual(
+                pixels.withUnsafeMutableBytes { bytes in
+                    we_scene_frame_executor_read_rgba8(
+                        executor,
+                        bytes.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        bytes.count,
+                        &error
+                    )
+                },
+                1,
+                errorMessage(error)
+            )
+            XCTAssertTrue(
+                stride(from: 0, to: pixels.count, by: 4).allSatisfy { offset in
+                    Array(pixels[offset..<(offset + 4)]) == expectedPixel
+                }
+            )
+        }
+
+        try render(
+            expectedPixel: [255, 0, 0, 255],
+            framebufferCount: 4,
+            depthAttachments: 0,
+            inactiveFramebufferCount: 0,
+            inactiveDepthAttachments: 0
+        )
+        try setBoolean(loaded.model, key: "depth_enabled", value: true)
+        inputs.time_seconds = 1
+        try render(
+            expectedPixel: [0, 255, 0, 255],
+            framebufferCount: 5,
+            depthAttachments: 1,
+            inactiveFramebufferCount: 0,
+            inactiveDepthAttachments: 0
+        )
+        try setBoolean(loaded.model, key: "depth_enabled", value: false)
+        inputs.time_seconds = 2
+        try render(
+            expectedPixel: [255, 0, 0, 255],
+            framebufferCount: 4,
+            depthAttachments: 1,
+            inactiveFramebufferCount: 1,
+            inactiveDepthAttachments: 0
+        )
+        // A stable plan must not rotate or grow the inactive cache.
+        inputs.time_seconds = 3
+        try render(
+            expectedPixel: [255, 0, 0, 255],
+            framebufferCount: 4,
+            depthAttachments: 1,
+            inactiveFramebufferCount: 1,
+            inactiveDepthAttachments: 0
+        )
+        // Exercise another distinct framebuffer set while the depth object's
+        // backing is inactive. It must remain cached beyond one transition.
+        try setBoolean(loaded.model, key: "alternate_enabled", value: true)
+        inputs.time_seconds = 4
+        try render(
+            expectedPixel: [0, 0, 255, 255],
+            framebufferCount: 5,
+            depthAttachments: 1,
+            inactiveFramebufferCount: 1,
+            inactiveDepthAttachments: 0
+        )
+        try setBoolean(loaded.model, key: "alternate_enabled", value: false)
+        inputs.time_seconds = 5
+        try render(
+            expectedPixel: [255, 0, 0, 255],
+            framebufferCount: 4,
+            depthAttachments: 1,
+            inactiveFramebufferCount: 2,
+            inactiveDepthAttachments: 0
+        )
+        // Returning to the depth plan reclaims its compatible inactive
+        // backing without allocating another color or depth attachment.
+        try setBoolean(loaded.model, key: "depth_enabled", value: true)
+        inputs.time_seconds = 6
+        try render(
+            expectedPixel: [0, 255, 0, 255],
+            framebufferCount: 5,
+            depthAttachments: 1,
+            inactiveFramebufferCount: 1,
+            inactiveDepthAttachments: 0
+        )
+
+        // Changing the physical pixel grid makes every inactive framebuffer
+        // incompatible. Keeping authored-size inactive backing here would
+        // defeat the memory reduction after a live quality-tier change.
+        var target = WEScenePhysicalRenderTarget(
+            backing_width: 4,
+            backing_height: 4,
+            quality: WE_SCENE_PHYSICAL_RENDER_BALANCED
+        )
+        inputs.time_seconds = 7
+        XCTAssertEqual(
+            we_scene_frame_executor_render_for_drawable_with_physical_render_target(
+                executor, &inputs, 4, 4,
+                WE_SCENE_PRESENTATION_STRETCH, &target, &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        var resizedStats = WESceneFramebufferResourceStats()
+        XCTAssertEqual(
+            we_scene_frame_executor_framebuffer_resource_stats(
+                executor, &resizedStats, &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertEqual(we_scene_frame_executor_width(executor), 4)
+        XCTAssertEqual(we_scene_frame_executor_height(executor), 4)
+        XCTAssertEqual(resizedStats.framebuffer_count, 5)
+        XCTAssertEqual(resizedStats.depth_attachment_count, 1)
+        XCTAssertEqual(resizedStats.inactive_framebuffer_count, 0)
+    }
+
     func testRenderableMayUseGroupAsRuntimeParent() throws {
         let loaded = try loadEmptyFrameGraph(sceneObjects: [
             [
@@ -167,6 +396,21 @@ final class FrameExecutorBridgeTests: XCTestCase {
             throw failure("render", error)
         }
         XCTAssertNil(error)
+
+        var framebufferStats = WESceneFramebufferResourceStats()
+        XCTAssertEqual(
+            we_scene_frame_executor_framebuffer_resource_stats(
+                executor, &framebufferStats, &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertEqual(
+            framebufferStats.framebuffer_count,
+            3,
+            "The active metadata default must keep output, its procedural source, and the light-cookie framebuffer alive"
+        )
+        XCTAssertEqual(framebufferStats.depth_attachment_count, 0)
 
         var issueCount = 99
         XCTAssertEqual(
@@ -1004,6 +1248,211 @@ final class FrameExecutorBridgeTests: XCTestCase {
         XCTAssertEqual(we_scene_frame_executor_height(executor), 8)
     }
 
+    func testPhysicalRenderTargetChangesPixelsNotLogicalComposition() throws {
+        let loaded = try loadPhysicalRenderFrameGraph()
+        defer {
+            we_scene_frame_graph_destroy(loaded.frameGraph)
+            we_scene_graph_destroy(loaded.graph)
+            we_scene_model_destroy(loaded.model)
+            we_scene_runtime_destroy(loaded.runtime)
+            try? FileManager.default.removeItem(at: loaded.root)
+        }
+        var error: WESceneRuntimeErrorRef?
+        guard let executor = we_scene_frame_executor_create(
+            loaded.frameGraph, &error
+        ) else {
+            throw failure("executor", error)
+        }
+        defer { we_scene_frame_executor_destroy(executor) }
+        var inputs = WESceneFrameInputs(
+            pointer_x: 0.25, pointer_y: 0.75,
+            time_seconds: 0, frame_time_seconds: 1.0 / 60.0
+        )
+
+        func pixels() throws -> [UInt8] {
+            var result = [UInt8](
+                repeating: 0,
+                count: we_scene_frame_executor_rgba8_byte_count(executor)
+            )
+            let read = result.withUnsafeMutableBytes { bytes in
+                we_scene_frame_executor_read_rgba8(
+                    executor,
+                    bytes.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    bytes.count,
+                    &error
+                )
+            }
+            guard read == 1 else { throw failure("readback", error) }
+            return result
+        }
+
+        XCTAssertEqual(
+            we_scene_frame_executor_render_for_drawable(
+                executor, &inputs, 8, 8,
+                WE_SCENE_PRESENTATION_STRETCH, &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertEqual(we_scene_frame_executor_width(executor), 8)
+        XCTAssertEqual(we_scene_frame_executor_height(executor), 8)
+        let authored = try pixels()
+
+        var balancedTarget = WEScenePhysicalRenderTarget(
+            backing_width: 4,
+            backing_height: 4,
+            quality: WE_SCENE_PHYSICAL_RENDER_BALANCED
+        )
+        XCTAssertEqual(
+            we_scene_frame_executor_render_for_drawable_with_physical_render_target(
+                executor, &inputs, 4, 4,
+                WE_SCENE_PRESENTATION_STRETCH,
+                &balancedTarget,
+                &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertEqual(we_scene_frame_executor_width(executor), 4)
+        XCTAssertEqual(we_scene_frame_executor_height(executor), 4)
+        let balanced = try pixels()
+
+        func isRed(_ bytes: [UInt8], _ offset: Int) -> Bool {
+            bytes[offset] > 250 && bytes[offset + 1] < 5 &&
+                bytes[offset + 2] < 5 && bytes[offset + 3] > 250
+        }
+        let authoredRedCount = stride(
+            from: 0, to: authored.count, by: 4
+        ).filter { isRed(authored, $0) }.count
+        let balancedRedCount = stride(
+            from: 0, to: balanced.count, by: 4
+        ).filter { isRed(balanced, $0) }.count
+        XCTAssertGreaterThan(authoredRedCount, 0)
+        XCTAssertLessThan(authoredRedCount, 64)
+        XCTAssertGreaterThan(balancedRedCount, 0)
+        XCTAssertLessThan(balancedRedCount, 16)
+        for y in 0..<4 {
+            for x in 0..<4 {
+                let authoredOffset = ((y * 2 + 1) * 8 + x * 2 + 1) * 4
+                let balancedOffset = (y * 4 + x) * 4
+                XCTAssertEqual(
+                    isRed(balanced, balancedOffset),
+                    isRed(authored, authoredOffset),
+                    "Physical downscaling moved logical content at (\(x), \(y))"
+                )
+            }
+        }
+
+        var powerTarget = WEScenePhysicalRenderTarget(
+            backing_width: 4,
+            backing_height: 4,
+            quality: WE_SCENE_PHYSICAL_RENDER_POWER_SAVING
+        )
+        inputs.time_seconds = 1
+        XCTAssertEqual(
+            we_scene_frame_executor_render_for_drawable_with_physical_render_target(
+                executor, &inputs, 4, 4,
+                WE_SCENE_PRESENTATION_STRETCH,
+                &powerTarget,
+                &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertEqual(we_scene_frame_executor_width(executor), 2)
+        XCTAssertEqual(we_scene_frame_executor_height(executor), 2)
+    }
+
+    func testPhysicalReplayResizesWithoutAdvancingEvaluation() throws {
+        let loaded = try loadEmptyFrameGraph(soundOnly: true)
+        defer {
+            we_scene_frame_graph_destroy(loaded.frameGraph)
+            we_scene_graph_destroy(loaded.graph)
+            we_scene_model_destroy(loaded.model)
+            we_scene_runtime_destroy(loaded.runtime)
+            try? FileManager.default.removeItem(at: loaded.root)
+        }
+        var error: WESceneRuntimeErrorRef?
+        guard let executor = we_scene_frame_executor_create(
+            loaded.frameGraph, &error
+        ) else {
+            throw failure("executor", error)
+        }
+        defer { we_scene_frame_executor_destroy(executor) }
+        var inputs = WESceneFrameInputs(
+            pointer_x: 0.5, pointer_y: 0.5,
+            time_seconds: 1, frame_time_seconds: 1.0 / 60.0
+        )
+        var target = WEScenePhysicalRenderTarget(
+            backing_width: 4,
+            backing_height: 4,
+            quality: WE_SCENE_PHYSICAL_RENDER_BALANCED
+        )
+        XCTAssertEqual(
+            we_scene_frame_executor_render_for_drawable_with_physical_render_target(
+                executor, &inputs, 4, 4,
+                WE_SCENE_PRESENTATION_STRETCH, &target, &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertEqual(we_scene_frame_executor_width(executor), 4)
+
+        var sound = WESceneFrameSoundInfo()
+        XCTAssertEqual(
+            we_scene_frame_executor_sound_info(executor, 0, &sound, &error), 1
+        )
+        XCTAssertEqual(sound.volume, 0.25, accuracy: 1e-6)
+        var changedVolume = WEScenePropertyValue(
+            type: WE_SCENE_VALUE_NUMBER,
+            boolean_value: 0,
+            integer_value: 0,
+            number_value: 0.75,
+            string_value: nil,
+            component_count: 0,
+            vector_value: WESceneVector4()
+        )
+        XCTAssertEqual("volume".withCString {
+            we_scene_model_set_property_value(
+                loaded.model, $0, &changedVolume, &error
+            )
+        }, 1, errorMessage(error))
+
+        target.backing_width = 6
+        target.backing_height = 6
+        XCTAssertEqual(
+            we_scene_frame_executor_replay_for_drawable_with_physical_render_target(
+                executor, 6, 6,
+                WE_SCENE_PRESENTATION_STRETCH, &target, &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertEqual(we_scene_frame_executor_width(executor), 6)
+        XCTAssertEqual(we_scene_frame_executor_height(executor), 6)
+        XCTAssertEqual(
+            we_scene_frame_executor_sound_info(executor, 0, &sound, &error), 1
+        )
+        XCTAssertEqual(
+            sound.volume, 0.25, accuracy: 1e-6,
+            "Replay must keep the frozen evaluation snapshot"
+        )
+
+        inputs.time_seconds = 2
+        XCTAssertEqual(
+            we_scene_frame_executor_render_for_drawable_with_physical_render_target(
+                executor, &inputs, 6, 6,
+                WE_SCENE_PRESENTATION_STRETCH, &target, &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertEqual(
+            we_scene_frame_executor_sound_info(executor, 0, &sound, &error), 1
+        )
+        XCTAssertEqual(sound.volume, 0.75, accuracy: 1e-6)
+    }
+
     func testStartSilentSoundIsSupportedWithoutRuntimeIssue() throws {
         let loaded = try loadEmptyFrameGraph(soundOnly: true, startSilent: true)
         defer {
@@ -1273,6 +1722,208 @@ final class FrameExecutorBridgeTests: XCTestCase {
         )
     }
 
+    private func loadPhysicalRenderFrameGraph() throws -> LoadedFrameGraph {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let assets = root.appendingPathComponent("assets", isDirectory: true)
+        let shaders = assets.appendingPathComponent("shaders", isDirectory: true)
+        let package = root.appendingPathComponent("scene.pkg")
+        try FileManager.default.createDirectory(
+            at: shaders, withIntermediateDirectories: true
+        )
+        let vertexSource = """
+        attribute vec3 a_Position;
+        uniform mat4 g_ModelViewProjectionMatrix;
+        void main() {
+            gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);
+        }
+        """
+        let fragmentSource = """
+        void main() {
+            gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+        }
+        """
+        try Data(vertexSource.utf8).write(
+            to: shaders.appendingPathComponent("physical.vert")
+        )
+        try Data(fragmentSource.utf8).write(
+            to: shaders.appendingPathComponent("physical.frag")
+        )
+        let project: [String: Any] = [
+            "file": "scene.json",
+            "general": ["properties": [:]],
+            "title": "Physical render fixture",
+            "type": "scene",
+            "version": 2,
+        ]
+        let scene: [String: Any] = [
+            "camera": ["center": "0 0 -1", "eye": "0 0 0", "up": "0 1 0"],
+            "general": [
+                "clearcolor": "0 0 0 0",
+                "orthogonalprojection": ["height": 8, "width": 8],
+            ],
+            "objects": [[
+                "id": 1,
+                "image": "models/physical.json",
+                "name": "Off-center image",
+                "origin": "2 2 0",
+                "size": "4 4",
+                "visible": true,
+            ]],
+            "version": 1,
+        ]
+        let material: [String: Any] = [
+            "passes": [[
+                "blending": "normal",
+                "cullmode": "nocull",
+                "depthtest": "disabled",
+                "depthwrite": "disabled",
+                "shader": "physical",
+            ]],
+        ]
+        let encode: (Any) throws -> Data = {
+            try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys])
+        }
+        try makePackage([
+            ("materials/physical.json", try encode(material)),
+            ("models/physical.json", try encode([
+                "material": "materials/physical.json",
+                "solidlayer": true,
+            ])),
+            ("project.json", try encode(project)),
+            ("scene.json", try encode(scene)),
+        ]).write(to: package)
+        return try loadFrameGraph(root: root, assets: assets, package: package)
+    }
+
+    private func loadFramebufferArenaFrameGraph() throws -> LoadedFrameGraph {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let assets = root.appendingPathComponent("assets", isDirectory: true)
+        let shaders = assets.appendingPathComponent("shaders", isDirectory: true)
+        let package = root.appendingPathComponent("scene.pkg")
+        try FileManager.default.createDirectory(
+            at: shaders, withIntermediateDirectories: true
+        )
+        let vertexSource = """
+        attribute vec3 a_Position;
+        attribute vec2 a_TexCoord;
+        uniform mat4 g_ModelViewProjectionMatrix;
+        void main() {
+            gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);
+        }
+        """
+        try Data(vertexSource.utf8).write(
+            to: shaders.appendingPathComponent("color.vert")
+        )
+        try Data(vertexSource.utf8).write(
+            to: shaders.appendingPathComponent("depth.vert")
+        )
+        try Data(vertexSource.utf8).write(
+            to: shaders.appendingPathComponent("alternate.vert")
+        )
+        try Data("void main() { gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0); }".utf8)
+            .write(to: shaders.appendingPathComponent("color.frag"))
+        try Data("void main() { gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0); }".utf8)
+            .write(to: shaders.appendingPathComponent("depth.frag"))
+        try Data("void main() { gl_FragColor = vec4(0.0, 0.0, 1.0, 1.0); }".utf8)
+            .write(to: shaders.appendingPathComponent("alternate.frag"))
+
+        let project: [String: Any] = [
+            "file": "scene.json",
+            "general": ["properties": [
+                "depth_enabled": [
+                    "text": "Depth enabled", "type": "bool", "value": false,
+                ],
+                "alternate_enabled": [
+                    "text": "Alternate enabled", "type": "bool", "value": false,
+                ],
+            ]],
+            "title": "Framebuffer arena fixture",
+            "type": "scene",
+            "version": 2,
+        ]
+        let scene: [String: Any] = [
+            "camera": ["center": "0 0 -1", "eye": "0 0 0", "up": "0 1 0"],
+            "general": [
+                "clearcolor": "0 0 0 0",
+                "orthogonalprojection": ["height": 8, "width": 8],
+            ],
+            "objects": [
+                [
+                    "id": 1, "image": "models/color.json", "name": "Color",
+                    "origin": "4 4 0", "size": "8 8", "visible": true,
+                ],
+                [
+                    "id": 2, "image": "models/depth.json", "name": "Depth",
+                    "origin": "4 4 0", "size": "8 8",
+                    "visible": ["user": "depth_enabled", "value": false],
+                ],
+                [
+                    "id": 3, "image": "models/alternate.json",
+                    "name": "Alternate", "origin": "4 4 0", "size": "8 8",
+                    "visible": ["user": "alternate_enabled", "value": false],
+                ],
+            ],
+            "version": 1,
+        ]
+        let colorMaterial: [String: Any] = [
+            "passes": [[
+                "blending": "normal", "cullmode": "nocull",
+                "depthtest": "disabled", "depthwrite": "disabled",
+                "shader": "color",
+            ]],
+        ]
+        let depthMaterial: [String: Any] = [
+            "passes": [
+                [
+                    "blending": "normal", "cullmode": "nocull",
+                    "depthtest": "disabled", "depthwrite": "disabled",
+                    "shader": "depth",
+                ],
+                [
+                    "blending": "normal", "cullmode": "nocull",
+                    "depthtest": "enabled", "depthwrite": "enabled",
+                    "shader": "depth",
+                ],
+            ],
+        ]
+        let alternateMaterial: [String: Any] = [
+            "passes": [
+                [
+                    "blending": "normal", "cullmode": "nocull",
+                    "depthtest": "disabled", "depthwrite": "disabled",
+                    "shader": "alternate",
+                ],
+                [
+                    "blending": "normal", "cullmode": "nocull",
+                    "depthtest": "disabled", "depthwrite": "disabled",
+                    "shader": "alternate",
+                ],
+            ],
+        ]
+        let encode: (Any) throws -> Data = {
+            try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys])
+        }
+        try makePackage([
+            ("materials/color.json", try encode(colorMaterial)),
+            ("materials/depth.json", try encode(depthMaterial)),
+            ("materials/alternate.json", try encode(alternateMaterial)),
+            ("models/color.json", try encode([
+                "material": "materials/color.json", "solidlayer": true,
+            ])),
+            ("models/depth.json", try encode([
+                "material": "materials/depth.json", "solidlayer": true,
+            ])),
+            ("models/alternate.json", try encode([
+                "material": "materials/alternate.json", "solidlayer": true,
+            ])),
+            ("project.json", try encode(project)),
+            ("scene.json", try encode(scene)),
+        ]).write(to: package)
+        return try loadFrameGraph(root: root, assets: assets, package: package)
+    }
+
     private func loadEmptyFrameGraph(
         soundOnly: Bool = false,
         startSilent: Bool = false,
@@ -1398,6 +2049,70 @@ final class FrameExecutorBridgeTests: XCTestCase {
         )
         keepFixture = true
         return loaded
+    }
+
+    private func loadFrameGraph(
+        root: URL,
+        assets: URL,
+        package: URL
+    ) throws -> LoadedFrameGraph {
+        var error: WESceneRuntimeErrorRef?
+        guard let runtime = assets.path.withCString({ assetsPath in
+            package.path.withCString { packagePath in
+                var configuration = WESceneRuntimeConfiguration(
+                    assets_directory: assetsPath,
+                    scene_package_path: packagePath
+                )
+                return we_scene_runtime_create(&configuration, &error)
+            }
+        }) else {
+            throw failure("runtime", error)
+        }
+        guard let model = "project.json".withCString({
+            we_scene_runtime_model_create(runtime, $0, &error)
+        }) else {
+            we_scene_runtime_destroy(runtime)
+            throw failure("model", error)
+        }
+        guard let graph = we_scene_model_graph_create(model, &error) else {
+            we_scene_model_destroy(model)
+            we_scene_runtime_destroy(runtime)
+            throw failure("graph", error)
+        }
+        guard let frameGraph = we_scene_graph_frame_graph_create(graph, &error) else {
+            we_scene_graph_destroy(graph)
+            we_scene_model_destroy(model)
+            we_scene_runtime_destroy(runtime)
+            throw failure("frame graph", error)
+        }
+        return LoadedFrameGraph(
+            root: root,
+            runtime: runtime,
+            model: model,
+            graph: graph,
+            frameGraph: frameGraph
+        )
+    }
+
+    private func setBoolean(
+        _ model: WESceneModelRef,
+        key: String,
+        value: Bool
+    ) throws {
+        var property = WEScenePropertyValue(
+            type: WE_SCENE_VALUE_BOOLEAN,
+            boolean_value: value ? 1 : 0,
+            integer_value: 0,
+            number_value: 0,
+            string_value: nil,
+            component_count: 0,
+            vector_value: WESceneVector4()
+        )
+        var error: WESceneRuntimeErrorRef?
+        let result = key.withCString {
+            we_scene_model_set_property_value(model, $0, &property, &error)
+        }
+        guard result == 1 else { throw failure("property update", error) }
     }
 
     private func failure(_ phase: String, _ error: WESceneRuntimeErrorRef?) -> Error {

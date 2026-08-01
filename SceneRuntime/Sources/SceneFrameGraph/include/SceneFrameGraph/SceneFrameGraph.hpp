@@ -496,15 +496,17 @@ public:
         const FrameEvaluationState& evaluation,
         std::optional<FrameProjectionSize> drawableFallback = std::nullopt
     ) const;
+    // Resolves the logical scene projection without evaluating scripts. Hosts
+    // use this for pointer mapping before a frame has been rendered; physical
+    // framebuffer quality must never feed back into these world dimensions.
+    [[nodiscard]] FrameProjectionSize projectionSize(
+        std::optional<FrameProjectionSize> drawableFallback = std::nullopt
+    ) const;
     [[nodiscard]] bool requiresDrawableProjectionFallback() const noexcept;
     [[nodiscard]] std::shared_ptr<const SceneGraph> graph() const noexcept;
 
 private:
     explicit SceneFrameGraph(std::shared_ptr<SceneGraph> graph);
-
-    [[nodiscard]] FrameProjectionSize projectionSize(
-        std::optional<FrameProjectionSize> drawableFallback
-    ) const;
 
     std::shared_ptr<SceneGraph> graph_;
     std::optional<FrameProjectionSize> automaticProjectionSize_;

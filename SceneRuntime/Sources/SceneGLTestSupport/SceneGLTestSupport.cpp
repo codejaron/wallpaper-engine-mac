@@ -1,4 +1,5 @@
 #include <SceneGLTestSupport/SceneGLTestSupport.h>
+#include <SceneGL/FramebufferPlanRequirements.hpp>
 #include <SceneGL/FramePlanExecutor.hpp>
 #include "../SceneGL/SceneGLDevice.hpp"
 #include "../SceneGL/SceneGLPresentation.hpp"
@@ -91,7 +92,205 @@ void paintPresentationPattern(
     glDisable(GL_SCISSOR_TEST);
 }
 
+FrameResourceRef framebufferRequirementResource(std::string id) {
+    return {
+        .kind = FrameResourceKind::framebuffer,
+        .id = std::move(id),
+    };
+}
+
+void appendFramebufferRequirementDescriptor(
+    FramePlan& plan,
+    std::string id
+) {
+    plan.framebuffers.push_back({
+        .resource = framebufferRequirementResource(std::move(id)),
+        .format = FramebufferFormat::rgba8,
+        .width = 4,
+        .height = 4,
+        .scale = 1.0,
+    });
+}
+
 }  // namespace
+extern "C" int we_scene_gl_test_framebuffer_plan_requirements(void) {
+    try {
+        FramePlan plan{
+            .width = 4,
+            .height = 4,
+            .output = framebufferRequirementResource("output"),
+        };
+        for (const char* id : {
+                 "output", "input", "previous", "binding", "copy",
+                 "swap", "clear", "text", "unused",
+             }) {
+            appendFramebufferRequirementDescriptor(plan, id);
+        }
+        plan.operations.emplace_back(FrameRenderPass{
+            .depthTest = DepthMode::disabled,
+            .depthWrite = DepthMode::disabled,
+            .input = framebufferRequirementResource("input"),
+            .previousInput = framebufferRequirementResource("previous"),
+            .destination = framebufferRequirementResource("output"),
+            .textures = {{
+                1,
+                FrameTextureBinding{.candidates = {{
+                    .resource = framebufferRequirementResource("binding"),
+                }}},
+            }},
+        });
+        plan.operations.emplace_back(FrameRenderPass{
+            .depthTest = DepthMode::enabled,
+            .destination = framebufferRequirementResource("output"),
+        });
+        plan.operations.emplace_back(FrameCopyCommand{
+            .source = framebufferRequirementResource("copy"),
+            .destination = framebufferRequirementResource("output"),
+        });
+        plan.operations.emplace_back(FrameSwapCommand{
+            .source = framebufferRequirementResource("output"),
+            .destination = framebufferRequirementResource("swap"),
+        });
+        plan.operations.emplace_back(FrameClearCommand{
+            .destination = framebufferRequirementResource("clear"),
+        });
+        plan.operations.emplace_back(FrameTextCommand{
+            .destination = framebufferRequirementResource("text"),
+        });
+        plan.particles.push_back({
+            .depthWrite = DepthMode::enabled,
+            .texture0 = frameAssetTextureResource("particle"),
+        });
+        plan.operations.emplace_back(FrameParticleCommand{
+            .particleIndex = 0,
+            .destination = framebufferRequirementResource("output"),
+        });
+
+        const gl::FramebufferPlanRequirements requirements =
+            gl::analyzeFramebufferPlanRequirements(plan);
+        if (requirements.active.size() != 8 ||
+            requirements.active.contains("unused") ||
+            !requirements.active.at("output").requiresDepthAttachment ||
+            !requirements.active.at("swap").requiresDepthAttachment) {
+            return 0;
+        }
+        for (const auto& [id, requirement] : requirements.active) {
+            if (id != "output" && id != "swap" &&
+                requirement.requiresDepthAttachment) {
+                return 0;
+            }
+        }
+
+        plan.operations.clear();
+        plan.operations.emplace_back(FrameClearCommand{
+            .destination = framebufferRequirementResource("output"),
+        });
+        const gl::FramebufferPlanRequirements colorOnly =
+            gl::analyzeFramebufferPlanRequirements(plan);
+        if (colorOnly.active.size() != 1 ||
+            colorOnly.active.at("output").requiresDepthAttachment) {
+            return 0;
+        }
+        plan.operations.emplace_back(FrameRenderPass{
+            .depthWrite = DepthMode::enabled,
+            .destination = framebufferRequirementResource("output"),
+        });
+        const gl::FramebufferPlanRequirements depthChanged =
+            gl::analyzeFramebufferPlanRequirements(plan);
+        return depthChanged.active.size() == 1 &&
+                depthChanged.active.at("output").requiresDepthAttachment
+            ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+extern "C" int we_scene_gl_test_physical_render_policy(void) {
+    try {
+        FramePlan plan;
+        plan.width = 3840;
+        plan.height = 2160;
+        plan.camera.orthogonalProjectionAuto = true;
+        plan.camera.orthogonalProjectionWidth = 3840;
+        plan.camera.orthogonalProjectionHeight = 2160;
+        plan.output = framebufferRequirementResource("output");
+        plan.framebuffers = {
+            {
+                .resource = plan.output,
+                .format = FramebufferFormat::rgba8,
+                .width = 3840,
+                .height = 2160,
+                .scale = 1.0,
+            },
+            {
+                .resource = framebufferRequirementResource("quarter"),
+                .format = FramebufferFormat::rgba8,
+                .width = 960,
+                .height = 540,
+                .scale = 0.25,
+            },
+        };
+        const gl::PhysicalRenderTarget balancedTarget{
+            .backingWidth = 2560,
+            .backingHeight = 1664,
+            .quality = gl::PhysicalRenderQuality::balanced,
+        };
+        const gl::PhysicalRenderSize cover = gl::physicalRenderSize(
+            plan, balancedTarget, gl::PresentationScaling::aspectFill
+        );
+        const gl::PhysicalRenderSize automatic = gl::physicalRenderSize(
+            plan, balancedTarget, gl::PresentationScaling::automatic
+        );
+        const gl::PhysicalRenderSize stretch = gl::physicalRenderSize(
+            plan, balancedTarget, gl::PresentationScaling::stretch
+        );
+        const gl::PhysicalRenderSize fit = gl::physicalRenderSize(
+            plan, balancedTarget, gl::PresentationScaling::aspectFit
+        );
+        if (cover != gl::PhysicalRenderSize{2958, 1664} ||
+            automatic != cover || stretch != cover ||
+            fit != gl::PhysicalRenderSize{2560, 1440}) {
+            return 0;
+        }
+        const gl::PhysicalRenderSize noUpscale = gl::physicalRenderSize(
+            plan,
+            {
+                .backingWidth = 7680,
+                .backingHeight = 4320,
+                .quality = gl::PhysicalRenderQuality::balanced,
+            },
+            gl::PresentationScaling::aspectFill
+        );
+        if (noUpscale != gl::PhysicalRenderSize{3840, 2160}) return 0;
+        const gl::PhysicalRenderSize power = gl::physicalRenderSize(
+            plan,
+            {
+                .backingWidth = 2560,
+                .backingHeight = 1664,
+                .quality = gl::PhysicalRenderQuality::powerSaving,
+            },
+            gl::PresentationScaling::aspectFill
+        );
+        if (power != gl::PhysicalRenderSize{1479, 832}) return 0;
+
+        const FramePlan physical = gl::withPhysicalRenderSize(plan, cover);
+        if (physical.width != 2958 || physical.height != 1664 ||
+            physical.camera.orthogonalProjectionWidth != 3840 ||
+            physical.camera.orthogonalProjectionHeight != 2160 ||
+            physical.framebuffers.size() != 2 ||
+            physical.framebuffers[0].width != 2958 ||
+            physical.framebuffers[0].height != 1664 ||
+            physical.framebuffers[1].width != 740 ||
+            physical.framebuffers[1].height != 416 ||
+            plan.width != 3840 || plan.height != 2160 ||
+            plan.framebuffers[0].width != 3840 ||
+            plan.framebuffers[1].width != 960) {
+            return 0;
+        }
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
 extern "C" int we_scene_gl_test_render_text(uint8_t* rgba,size_t length,size_t* count){
  try{if(!rgba||length!=8*8*4||!count)return 0;gl::Device device;gl::TextCoverageRenderer renderer;auto s=device.activate();
  auto fb=s.createFramebuffer(gl::PixelFormat::rgba8,8,8,gl::TextureWrap::clampToEdge);glBindFramebuffer(GL_FRAMEBUFFER,fb.framebuffer);glClearColor(0.2F,0.4F,0.6F,1);glClear(GL_COLOR_BUFFER_BIT);

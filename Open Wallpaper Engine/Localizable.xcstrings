@@ -415,6 +415,16 @@
         }
       }
     },
+    "Balanced" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "平衡"
+          }
+        }
+      }
+    },
     "Basic Setup" : {
       "localizations" : {
         "zh-Hans" : {
@@ -855,16 +865,6 @@
         }
       }
     },
-    "FPS, scaling, and spanning apply only to Scene wallpapers. Disabled quality options are not yet supported." : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "帧率、缩放和跨屏设置仅对场景壁纸生效；灰色质量选项尚未支持。"
-          }
-        }
-      }
-    },
     "Fully take over" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -943,6 +943,7 @@
       }
     },
     "High" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -986,8 +987,18 @@
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "高品质"
+            "state" : "translated",
+            "value" : "高质量"
+          }
+        }
+      }
+    },
+    "High Quality uses authored pixels; Balanced caps rendering at the display's backing-pixel density; Power Saving halves that linear resolution. FPS, scaling, and spanning also apply only to Scene wallpapers; disabled options are not yet supported." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "高质量使用壁纸原始像素；平衡以显示器实际像素密度为上限；省电将该线性分辨率减半。帧率、缩放和跨屏设置也仅对场景壁纸生效；其他灰色选项尚未支持。"
           }
         }
       }
@@ -1152,6 +1163,7 @@
 
     },
     "Low" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1193,6 +1205,7 @@
       }
     },
     "Medium" : {
+      "extractionState" : "stale",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1600,6 +1613,16 @@
         }
       }
     },
+    "Power Saving" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "省电"
+          }
+        }
+      }
+    },
     "Power Saving Mode, Sleeping..." : {
       "localizations" : {
         "zh-Hans" : {
@@ -1889,6 +1912,16 @@
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "保存配置"
+          }
+        }
+      }
+    },
+    "Scene render quality" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "场景渲染质量"
           }
         }
       }

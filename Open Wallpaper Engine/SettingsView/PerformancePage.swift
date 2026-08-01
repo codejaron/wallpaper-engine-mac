@@ -78,36 +78,16 @@ struct PerformancePage: SettingsPage {
                 Label("Playback", systemImage: "play.fill")
             }
             Section {
-                HStack(spacing: 1) {
-                    Button {
-                        viewModel.setQuality(.low)
-                    } label: {
-                        Text("Low").frame(maxWidth: .infinity)
-                    }
-                    Divider()
-                    Button {
-                        viewModel.setQuality(.medium)
-                    } label: {
-                        Text("Medium").frame(maxWidth: .infinity)
-                    }
-                    Divider()
-                    Button {
-                        viewModel.setQuality(.high)
-                    } label: {
-                        Text("High").frame(maxWidth: .infinity)
-                    }
-                    Divider()
-                    Button {
-                        viewModel.setQuality(.ultra)
-                    } label: {
-                        Text("Ultra").frame(maxWidth: .infinity)
-                    }
+                Picker(
+                    "Scene render quality",
+                    selection: $viewModel.settings.sceneRenderQuality
+                ) {
+                    Text("High Quality").tag(GSSceneRenderQuality.high)
+                    Text("Balanced").tag(GSSceneRenderQuality.balanced)
+                    Text("Power Saving").tag(GSSceneRenderQuality.powerSaving)
                 }
-                .padding(6)
-                .background(Color(nsColor: NSColor.unemphasizedSelectedContentBackgroundColor))
-                .buttonStyle(.borderless)
-                .clipShape(RoundedRectangle(cornerRadius: 5.0))
-                .disabled(true)
+                .pickerStyle(.segmented)
+                .labelsHidden()
                 Picker("Anti-aliasing", selection: $viewModel.settings.antiAliasing) {
                     Text("None").tag(GSAntiAliasingQuality.none)
                     Text("MSAA x2").tag(GSAntiAliasingQuality.msaa_x2)
@@ -203,7 +183,7 @@ struct PerformancePage: SettingsPage {
                     .fixedSize(horizontal: false, vertical: true)
             } header: {
                 Label("Quality", systemImage: "memorychip.fill")
-                Text("FPS, scaling, and spanning apply only to Scene wallpapers. Disabled quality options are not yet supported.")
+                Text("High Quality uses authored pixels; Balanced caps rendering at the display's backing-pixel density; Power Saving halves that linear resolution. FPS, scaling, and spanning also apply only to Scene wallpapers; disabled options are not yet supported.")
             }
         }
         .formStyle(.grouped)

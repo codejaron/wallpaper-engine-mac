@@ -11,8 +11,9 @@ import SceneAudio
 import SwiftUI
 import ServiceManagement
 
-enum GSQuality {
-    case low, medium, high, ultra
+enum GSSceneRenderQuality: String, CaseIterable, Identifiable, Codable {
+    var id: Self { self }
+    case high, balanced, powerSaving
 }
 
 enum GSAntiAliasingQuality: String, CaseIterable, Identifiable, Codable {
@@ -78,6 +79,9 @@ struct GlobalSettings: Codable, Equatable {
     var antiAliasing = GSAntiAliasingQuality.msaa_x2
     var postProcessing = GSPostProcessingQuality.disabled
     var textureResolution = GSTextureResolutionQuality.automatic
+    // Scene framebuffer sampling density. This is intentionally independent
+    // from texture decoding quality and never adapts to measured frame time.
+    var sceneRenderQuality = GSSceneRenderQuality.high
     var reflections = false
     var fps: Double = 30
 
@@ -125,7 +129,8 @@ struct GlobalSettings: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case otherApplicationFocused, otherApplicationFullscreen,
              otherApplicationPlayingAudio, laptopOnBattery
-        case antiAliasing, postProcessing, textureResolution, reflections, fps
+        case antiAliasing, postProcessing, textureResolution,
+             sceneRenderQuality, reflections, fps
         case scenePresentationScaling, sceneSpanAcrossScreens,
              scenePresentationSettingsVersion
         case autoStart, safeMode, language
@@ -146,6 +151,7 @@ struct GlobalSettings: Codable, Equatable {
         antiAliasing = .msaa_x2
         postProcessing = .disabled
         textureResolution = .automatic
+        sceneRenderQuality = .high
         reflections = false
         fps = 30
         scenePresentationScaling = .automatic
@@ -195,6 +201,11 @@ struct GlobalSettings: Codable, Equatable {
         textureResolution = try container.decodeIfPresent(
             GSTextureResolutionQuality.self, forKey: .textureResolution
         ) ?? .automatic
+        // Existing installations predate render-density tiers. Preserve their
+        // authored-pixel output instead of silently migrating them down.
+        sceneRenderQuality = try container.decodeIfPresent(
+            GSSceneRenderQuality.self, forKey: .sceneRenderQuality
+        ) ?? .high
         reflections = try container.decodeIfPresent(
             Bool.self, forKey: .reflections
         ) ?? false
@@ -479,35 +490,6 @@ class GlobalSettingsViewModel: ObservableObject {
     func save() {
         let data = try! JSONEncoder().encode(settings)
         UserDefaults.standard.set(data, forKey: "GlobalSettings")
-    }
-    
-    func setQuality(_ quality: GSQuality) {
-        switch quality {
-        case .low:
-            self.settings.antiAliasing = .none
-            self.settings.postProcessing = .disabled
-            self.settings.textureResolution = .highQuality
-            self.settings.fps = 10
-            self.settings.reflections = false
-        case .medium:
-            self.settings.antiAliasing = .none
-            self.settings.postProcessing = .enabled
-            self.settings.textureResolution = .highQuality
-            self.settings.fps = 15
-            self.settings.reflections = true
-        case .high:
-            self.settings.antiAliasing = .msaa_x2
-            self.settings.postProcessing = .enabled
-            self.settings.textureResolution = .highQuality
-            self.settings.fps = 25
-            self.settings.reflections = true
-        case .ultra:
-            self.settings.antiAliasing = .msaa_x2
-            self.settings.postProcessing = .ultra
-            self.settings.textureResolution = .highQuality
-            self.settings.fps = 30
-            self.settings.reflections = true
-        }
     }
     
     private func validate() {

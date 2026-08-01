@@ -1,4 +1,5 @@
 import AppKit
+import SceneRuntimeBridge
 import SwiftUI
 import WebKit
 import XCTest
@@ -496,6 +497,78 @@ final class PlaybackPolicyTests: XCTestCase {
 
     func testScenePresentationDefaultsToAutomatic() {
         XCTAssertEqual(GlobalSettings().scenePresentationScaling, .automatic)
+    }
+
+    func testSceneRenderQualityDefaultsToAuthoredPixelsForExistingSettings() throws {
+        let settings = try JSONDecoder().decode(
+            GlobalSettings.self,
+            from: Data("{}".utf8)
+        )
+
+        XCTAssertEqual(settings.sceneRenderQuality, .high)
+    }
+
+    func testSceneRenderQualityRoundTrips() throws {
+        var settings = GlobalSettings()
+        settings.sceneRenderQuality = .balanced
+
+        let restored = try JSONDecoder().decode(
+            GlobalSettings.self,
+            from: JSONEncoder().encode(settings)
+        )
+
+        XCTAssertEqual(restored.sceneRenderQuality, .balanced)
+    }
+
+    func testBalancedSceneRenderTargetUsesDrawableBackingPixels() throws {
+        let layout = ScenePresentationLayout(
+            spanAcrossScreens: false,
+            scaling: .automatic,
+            canvasWidth: 0,
+            canvasHeight: 0,
+            viewportX: 0,
+            viewportY: 0,
+            viewportWidth: 0,
+            viewportHeight: 0
+        )
+
+        XCTAssertNil(try layout.physicalRenderTarget(
+            drawableWidth: 2_560,
+            drawableHeight: 1_664,
+            quality: .high
+        ))
+        let target = try XCTUnwrap(layout.physicalRenderTarget(
+            drawableWidth: 2_560,
+            drawableHeight: 1_664,
+            quality: .balanced
+        ))
+
+        XCTAssertEqual(target.backing_width, 2_560)
+        XCTAssertEqual(target.backing_height, 1_664)
+        XCTAssertEqual(target.quality, WE_SCENE_PHYSICAL_RENDER_BALANCED)
+    }
+
+    func testSpanningSceneRenderTargetUsesOnePhysicalCanvas() throws {
+        let layout = ScenePresentationLayout(
+            spanAcrossScreens: true,
+            scaling: .aspectFill,
+            canvasWidth: 6_048,
+            canvasHeight: 1_964,
+            viewportX: 3_024,
+            viewportY: 0,
+            viewportWidth: 3_024,
+            viewportHeight: 1_964
+        )
+
+        let target = try XCTUnwrap(layout.physicalRenderTarget(
+            drawableWidth: 3_024,
+            drawableHeight: 1_964,
+            quality: .powerSaving
+        ))
+
+        XCTAssertEqual(target.backing_width, 6_048)
+        XCTAssertEqual(target.backing_height, 1_964)
+        XCTAssertEqual(target.quality, WE_SCENE_PHYSICAL_RENDER_POWER_SAVING)
     }
 
     func testUnversionedAspectFillDefaultMigratesToAutomatic() throws {

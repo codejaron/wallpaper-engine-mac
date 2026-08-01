@@ -133,6 +133,55 @@ final class RemoteImagePolicyTests: XCTestCase {
         }
     }
 
+    func testAcceptsGenericBinaryResponseWhenPayloadIsARealImage() throws {
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: URL(string: "https://images.steamusercontent.com/preview")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/octet-stream"]
+        ))
+
+        XCTAssertNoThrow(try RemoteImagePolicy.default.validate(response: response))
+        XCTAssertNoThrow(try RemoteImagePolicy.default.decode(
+            pngData(width: 20, height: 10, color: .red)
+        ))
+    }
+
+    func testGenericBinaryResponseStillRejectsNonImagePayload() throws {
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: URL(string: "https://images.steamusercontent.com/preview")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/octet-stream"]
+        ))
+
+        XCTAssertNoThrow(try RemoteImagePolicy.default.validate(response: response))
+        XCTAssertThrowsError(try RemoteImagePolicy.default.decode(Data("not an image".utf8))) {
+            error in
+            XCTAssertEqual(
+                error as? RemoteImageLoadingError,
+                .unsupportedImageFormat(nil)
+            )
+        }
+    }
+
+    func testRejectsUnrelatedContentTypeBeforeDownloadingPayload() throws {
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: URL(string: "https://images.steamusercontent.com/preview")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "text/html"]
+        ))
+
+        XCTAssertThrowsError(try RemoteImagePolicy.default.validate(response: response)) {
+            error in
+            XCTAssertEqual(
+                error as? RemoteImageLoadingError,
+                .unsupportedContentType("text/html")
+            )
+        }
+    }
+
     func testRejectsImagesBeyondPixelLimits() throws {
         let policy = RemoteImagePolicy(
             maximumDownloadBytes: 1_000_000,

@@ -70,6 +70,8 @@ struct RemoteImagePolicy: Sendable {
         "public.jpeg-2000",
     ]
 
+    private static let genericBinaryContentType = "application/octet-stream"
+
     let maximumDownloadBytes: Int
     let maximumDimension: Int
     let maximumPixels: Int
@@ -108,7 +110,9 @@ struct RemoteImagePolicy: Sendable {
         guard (200..<300).contains(response.statusCode) else {
             throw RemoteImageLoadingError.httpStatus(response.statusCode)
         }
-        guard response.mimeType?.lowercased().hasPrefix("image/") == true else {
+        let contentType = response.mimeType?.lowercased()
+        let isImageContent = contentType?.hasPrefix("image/") == true
+        guard isImageContent || contentType == Self.genericBinaryContentType else {
             throw RemoteImageLoadingError.unsupportedContentType(response.mimeType)
         }
         if response.expectedContentLength > Int64(maximumDownloadBytes) {

@@ -3009,16 +3009,37 @@ struct FramePlanExecutor::Impl final {
         return found->second;
     }
 
-    AssetTextureResource& assetTexture(
+    AssetTextureResource& prepareAssetTexture(
         Device::Session& session,
         const FrameResourceRef& ref,
-        double timeSeconds = 0.0
+        double timeSeconds
     ) {
         AssetTextureResource& result = ensureAssetTexture(session, ref);
         if (result.video) {
-            session.updateVideoTexture(result, timeSeconds);
+            currentFrameVideoAssets.emplace(ref.id);
+            session.requestVideoTextureFrame(result, timeSeconds);
+            if (session.updateVideoTexture(result, traceFrameSequence)) {
+                ++currentVideoTextureUploads;
+            }
         }
         return result;
+    }
+
+    void requestPreviouslyUsedVideoFrames(
+        Device::Session& session,
+        double timeSeconds
+    ) {
+        for (const std::string& identity : videoAssetsToPrefetch) {
+            const auto found = assets.find(identity);
+            if (found == assets.end()) {
+                throw Error(
+                    ErrorCode::internalFailure,
+                    "Video prefetch set references an unknown asset '" +
+                        identity + "'"
+                );
+            }
+            session.requestVideoTextureFrame(found->second, timeSeconds);
+        }
     }
 
     HostTextureSlot& hostTextureSlot(const FrameResourceRef& ref) {
@@ -3108,8 +3129,7 @@ struct FramePlanExecutor::Impl final {
     [[nodiscard]] bool textureReady(
         Device::Session& session,
         const FrameResourceRef& resource,
-        const std::map<std::string, std::string>& aliases,
-        double timeSeconds
+        const std::map<std::string, std::string>& aliases
     ) {
         switch (resource.kind) {
             case FrameResourceKind::framebuffer:
@@ -3127,9 +3147,7 @@ struct FramePlanExecutor::Impl final {
                             : resource.logicalName)) {
                     return false;
                 }
-                static_cast<void>(assetTexture(
-                    session, resource, timeSeconds
-                ));
+                static_cast<void>(ensureAssetTexture(session, resource));
                 return true;
             case FrameResourceKind::hostTexture:
                 // Metadata alone never makes an album cover sampleable. A
@@ -3153,8 +3171,7 @@ struct FramePlanExecutor::Impl final {
         const std::vector<FrameTextureCandidate>& candidates,
         const std::optional<FrameResourceRef>& previousInput,
         const FrameResourceRef& input,
-        const std::map<std::string, std::string>& aliases,
-        double timeSeconds
+        const std::map<std::string, std::string>& aliases
     ) {
         for (auto candidate = candidates.rbegin();
              candidate != candidates.rend(); ++candidate) {
@@ -3162,20 +3179,20 @@ struct FramePlanExecutor::Impl final {
                 candidate->resource
             );
             if (concrete && textureReady(
-                    session, *concrete, aliases, timeSeconds)) {
+                    session, *concrete, aliases)) {
                 return concrete;
             }
         }
         if (previousInput) {
             const auto concrete = concreteTextureResource(*previousInput);
             if (concrete && textureReady(
-                    session, *concrete, aliases, timeSeconds)) {
+                    session, *concrete, aliases)) {
                 return concrete;
             }
         }
         const auto concreteInput = concreteTextureResource(input);
         if (concreteInput && textureReady(
-                session, *concreteInput, aliases, timeSeconds)) {
+                session, *concreteInput, aliases)) {
             return concreteInput;
         }
         return std::nullopt;
@@ -3200,7 +3217,7 @@ struct FramePlanExecutor::Impl final {
             }
             return slot.texture;
         }
-        auto& resource = assetTexture(session, ref, timeSeconds);
+        auto& resource = prepareAssetTexture(session, ref, timeSeconds);
         if (imageIndex >= resource.images.size()) {
             throw Error(
                 ErrorCode::resourceValidation,
@@ -4074,7 +4091,7 @@ struct FramePlanExecutor::Impl final {
         if (image.source.kind == FrameResourceKind::assetTexture) {
             applyTexture0FormatCombo(
                 effectiveCombos,
-                assetTexture(session, image.source, inputs.timeSeconds).format
+                ensureAssetTexture(session, image.source).format
             );
         }
         ProgramResource& programResource = program(
@@ -4090,7 +4107,7 @@ struct FramePlanExecutor::Impl final {
             .program = activeProgram,
         };
         const auto selectTexture0 = [&](const FrameResourceRef& resource) {
-            AssetTextureResource& textureResource = assetTexture(
+            AssetTextureResource& textureResource = prepareAssetTexture(
                 session, resource, inputs.timeSeconds
             );
             if (image.textureAnimation &&
@@ -4187,8 +4204,7 @@ struct FramePlanExecutor::Impl final {
                     candidates,
                     pass.previousInput,
                     pass.input,
-                    aliases,
-                    inputs.timeSeconds
+                    aliases
                 );
             if (!selected) {
                 throw Error(
@@ -5972,7 +5988,7 @@ struct FramePlanExecutor::Impl final {
         }
         static_cast<void>(framebuffer(command.destination, aliases));
 
-        AssetTextureResource& textureResource = assetTexture(
+        AssetTextureResource& textureResource = prepareAssetTexture(
             session, descriptor.texture0, inputs.timeSeconds
         );
         const TextureAnimationSelection texture0Animation =
@@ -6137,8 +6153,7 @@ struct FramePlanExecutor::Impl final {
                     candidates,
                     std::nullopt,
                     descriptor.texture0,
-                    aliases,
-                    inputs.timeSeconds
+                    aliases
                 );
             if (!selected) {
                 throw Error(
@@ -8079,6 +8094,7 @@ struct FramePlanExecutor::Impl final {
         frameStats.vertexSum += vertexCount;
         frameStats.ropeVertexSum += ropeVertexCount;
         frameStats.indexSum += indexCount;
+        frameStats.videoTextureUploadSum += currentVideoTextureUploads;
         if (frameStats.deltaSum < 2.0 || frameStats.frames == 0) return;
 
         const double frameCount = static_cast<double>(frameStats.frames);
@@ -8089,7 +8105,7 @@ struct FramePlanExecutor::Impl final {
             "renderOver16=%llu stagesMs={graph:%.3f arena:%.3f "
             "preflight:%.3f execute:%.3f} workAvg={ops:%.1f alive:%.1f "
             "histories:%.1f samples:%.1f vertices:%.1f ropeVertices:%.1f "
-            "indices:%.1f}",
+            "indices:%.1f videoUploads:%.2f}",
             static_cast<unsigned long long>(frameStats.frames),
             frameStats.deltaSum * 1000.0 /
                 static_cast<double>(frameStats.frames),
@@ -8120,7 +8136,8 @@ struct FramePlanExecutor::Impl final {
             static_cast<double>(frameStats.ropeSampleSum) / frameCount,
             static_cast<double>(frameStats.vertexSum) / frameCount,
             static_cast<double>(frameStats.ropeVertexSum) / frameCount,
-            static_cast<double>(frameStats.indexSum) / frameCount
+            static_cast<double>(frameStats.indexSum) / frameCount,
+            static_cast<double>(frameStats.videoTextureUploadSum) / frameCount
         );
         frameStats = {};
     }
@@ -8136,6 +8153,8 @@ struct FramePlanExecutor::Impl final {
         std::array<double, frameStageCount> stageMilliseconds{};
         std::size_t stageIndex = 0;
         const std::uint64_t currentTraceFrame = ++traceFrameSequence;
+        currentVideoTextureUploads = 0;
+        currentFrameVideoAssets.clear();
         const auto traceStage = [&](const char* stage) {
             const auto now = FrameTraceClock::now();
             frameTraceLog(
@@ -8252,6 +8271,9 @@ struct FramePlanExecutor::Impl final {
                 parallaxDisplacement, plan, resolvedInputs
             );
             auto session = ensureDevice().activate();
+            requestPreviouslyUsedVideoFrames(
+                session, resolvedInputs.timeSeconds
+            );
             prepareFrameArena(session, plan, groups, physicalOutput);
             traceStage("frameArena");
             PreparedFrame prepared = preflightFrameObjects(
@@ -8288,6 +8310,7 @@ struct FramePlanExecutor::Impl final {
             };
             lastFrame.emplace(std::move(published));
             particles.swap(prepared.particleStates);
+            videoAssetsToPrefetch.swap(currentFrameVideoAssets);
             parallaxDisplacement = workingParallax;
             lastPublishedPointer = resolvedInputs.pointerPosition;
             hasPublishedPointer = true;
@@ -8545,6 +8568,9 @@ struct FramePlanExecutor::Impl final {
     HostTextureSlot mediaThumbnailPrevious;
     std::vector<script::ScriptSoundRuntimeSnapshot> soundRuntimeStates;
     std::uint64_t traceFrameSequence = 0;
+    std::uint64_t currentVideoTextureUploads = 0;
+    std::set<std::string> currentFrameVideoAssets;
+    std::set<std::string> videoAssetsToPrefetch;
     struct FrameStatsState final {
         std::uint64_t frames = 0;
         double deltaSum = 0.0;
@@ -8564,6 +8590,7 @@ struct FramePlanExecutor::Impl final {
         std::uint64_t vertexSum = 0;
         std::uint64_t ropeVertexSum = 0;
         std::uint64_t indexSum = 0;
+        std::uint64_t videoTextureUploadSum = 0;
     } frameStats;
 
     [[nodiscard]] FramebufferResourceStats framebufferResourceStats() const noexcept {

@@ -85,6 +85,8 @@ struct AssetTextureResource final {
     // Opaque AVFoundation-backed decoder for TEX video assets. The decoder
     // is owned by this resource; OpenGL images remain owned by Device.
     void* videoDecoder = nullptr;
+    std::uint64_t lastUploadedVideoFrameSerial = 0;
+    std::uint64_t lastVideoUpdateFrame = 0;
     bool video = false;
 
     [[nodiscard]] bool isAnimated() const noexcept {
@@ -132,9 +134,13 @@ public:
             const Texture& texture,
             std::string_view source
         );
-        void updateVideoTexture(
+        void requestVideoTextureFrame(
             AssetTextureResource& texture,
             double timeSeconds
+        );
+        [[nodiscard]] bool updateVideoTexture(
+            AssetTextureResource& texture,
+            std::uint64_t frameSequence
         );
         void destroyTexture(AssetTextureResource& texture) noexcept;
         [[nodiscard]] GLuint uploadCoverageTexture(

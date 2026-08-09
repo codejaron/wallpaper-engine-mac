@@ -23,5 +23,23 @@ final class VideoTextureDecoderTests: XCTestCase {
         XCTAssertEqual(result, 1)
         XCTAssertEqual(width, 16)
         XCTAssertEqual(height, 16)
+
+        var pipeline = WESceneGLTestVideoPipelineResult()
+        let pipelineResult = data.withUnsafeBytes { bytes in
+            "materials/videos/demo.mp4".withCString { source in
+                we_scene_gl_test_video_pipeline(
+                    bytes.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    bytes.count,
+                    source,
+                    0.5,
+                    &pipeline
+                )
+            }
+        }
+        XCTAssertEqual(pipelineResult, 1)
+        XCTAssertGreaterThan(pipeline.initial_serial, 0)
+        XCTAssertGreaterThan(pipeline.decoded_serial, pipeline.initial_serial)
+        XCTAssertGreaterThanOrEqual(pipeline.bytes_per_row, 16 * 4)
+        XCTAssertEqual(pipeline.same_frame_update_skipped, 1)
     }
 }

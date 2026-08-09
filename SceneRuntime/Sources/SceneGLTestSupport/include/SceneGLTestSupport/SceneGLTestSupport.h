@@ -37,6 +37,19 @@ int we_scene_gl_test_decode_video(
     uint32_t* width,
     uint32_t* height
 );
+typedef struct WESceneGLTestVideoPipelineResult {
+    uint64_t initial_serial;
+    uint64_t decoded_serial;
+    uint32_t bytes_per_row;
+    int same_frame_update_skipped;
+} WESceneGLTestVideoPipelineResult;
+int we_scene_gl_test_video_pipeline(
+    const uint8_t* bytes,
+    size_t length,
+    const char* source,
+    double target_time,
+    WESceneGLTestVideoPipelineResult* result
+);
 typedef struct WESceneGLTestPresentationViewport {
     uint32_t canvas_width;
     uint32_t canvas_height;

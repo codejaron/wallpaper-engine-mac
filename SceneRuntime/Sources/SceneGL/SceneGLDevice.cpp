@@ -590,6 +590,10 @@ AssetTextureResource::AssetTextureResource(AssetTextureResource&& other) noexcep
       spritesheetFrameCount(std::exchange(other.spritesheetFrameCount, 0)),
       spritesheetDuration(std::exchange(other.spritesheetDuration, 0.0F)),
       videoDecoder(std::exchange(other.videoDecoder, nullptr)),
+      lastUploadedVideoFrameSerial(std::exchange(
+          other.lastUploadedVideoFrameSerial, 0
+      )),
+      lastVideoUpdateFrame(std::exchange(other.lastVideoUpdateFrame, 0)),
       video(std::exchange(other.video, false)) {
     other.images.clear();
     other.imageWidths.clear();
@@ -628,6 +632,10 @@ AssetTextureResource& AssetTextureResource::operator=(
     spritesheetFrameCount = std::exchange(other.spritesheetFrameCount, 0);
     spritesheetDuration = std::exchange(other.spritesheetDuration, 0.0F);
     videoDecoder = std::exchange(other.videoDecoder, nullptr);
+    lastUploadedVideoFrameSerial = std::exchange(
+        other.lastUploadedVideoFrameSerial, 0
+    );
+    lastVideoUpdateFrame = std::exchange(other.lastVideoUpdateFrame, 0);
     video = std::exchange(other.video, false);
     other.images.clear();
     other.imageWidths.clear();
@@ -957,13 +965,28 @@ AssetTextureResource Device::Session::uploadTexture(
                         std::string(source) + "'"
                 );
             }
-            VideoFrameRGBA8 frame;
-            if (!decodeVideoFrame(result.videoDecoder, 0.0, frame) ||
-                frame.bytes == nullptr || frame.byteCount == 0) {
+            VideoFrame frame;
+            if (!copyLatestVideoFrame(result.videoDecoder, frame) ||
+                frame.bytes == nullptr || frame.byteCount == 0 ||
+                frame.bytesPerRow < static_cast<std::size_t>(frame.width) * 4 ||
+                frame.bytesPerRow % 4 != 0) {
                 throw Error(
                     ErrorCode::textureDecode,
                     "Unable to decode the first frame of video texture '" +
                         std::string(source) + "'"
+                );
+            }
+            validateResourceDimensions(
+                frame.width, frame.height, 4, "Video texture frame"
+            );
+            validateMaximumTextureSize(
+                frame.width, frame.height, "Video texture frame"
+            );
+            if (frame.bytesPerRow / 4 > static_cast<std::size_t>(
+                    std::numeric_limits<GLint>::max())) {
+                throw Error(
+                    ErrorCode::textureUpload,
+                    "Decoded video row length exceeds OpenGL's signed range"
                 );
             }
             result.images.resize(1);
@@ -978,10 +1001,22 @@ AssetTextureResource Device::Session::uploadTexture(
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
             configureTextureParameters(texture, 1);
+            const PixelStoreGuard pixelStore(
+                GL_UNPACK_ALIGNMENT, GL_UNPACK_ROW_LENGTH
+            );
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glPixelStorei(
+                GL_UNPACK_ROW_LENGTH,
+                static_cast<GLint>(frame.bytesPerRow / 4)
+            );
             glTexImage2D(
                 GL_TEXTURE_2D, 0, GL_RGBA8,
                 static_cast<GLsizei>(frame.width), static_cast<GLsizei>(frame.height),
-                0, GL_RGBA, GL_UNSIGNED_BYTE, frame.bytes
+                0,
+                frame.pixelFormat == VideoFramePixelFormat::bgra8
+                    ? GL_BGRA : GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                frame.bytes
             );
             checkError(ErrorCode::textureUpload, "Uploading the first video texture frame");
             result.imageWidths.front() = frame.width;
@@ -990,6 +1025,7 @@ AssetTextureResource Device::Session::uploadTexture(
                 static_cast<float>(frame.width), static_cast<float>(frame.height),
                 static_cast<float>(texture.width), static_cast<float>(texture.height),
             };
+            result.lastUploadedVideoFrameSerial = frame.serial;
             result.video = true;
             return result;
         }
@@ -1127,23 +1163,67 @@ AssetTextureResource Device::Session::uploadTexture(
     }
 }
 
-void Device::Session::updateVideoTexture(
+void Device::Session::requestVideoTextureFrame(
     AssetTextureResource& texture,
     double timeSeconds
 ) {
-    if (!texture.video || texture.videoDecoder == nullptr || texture.images.empty()) return;
-    VideoFrameRGBA8 frame;
-    if (!decodeVideoFrame(texture.videoDecoder, timeSeconds, frame) ||
-        frame.bytes == nullptr || frame.byteCount == 0) {
+    if (!texture.video || texture.videoDecoder == nullptr) return;
+    if (!requestVideoFrame(texture.videoDecoder, timeSeconds)) {
         throw Error(ErrorCode::textureDecode, "Unable to decode a video texture frame");
     }
+}
+
+bool Device::Session::updateVideoTexture(
+    AssetTextureResource& texture,
+    std::uint64_t frameSequence
+) {
+    if (!texture.video || texture.videoDecoder == nullptr ||
+        texture.images.empty()) {
+        return false;
+    }
+    if (texture.lastVideoUpdateFrame == frameSequence) return false;
+    texture.lastVideoUpdateFrame = frameSequence;
+
+    VideoFrame frame;
+    if (!copyLatestVideoFrame(texture.videoDecoder, frame) ||
+        frame.bytes == nullptr || frame.byteCount == 0 ||
+        frame.bytesPerRow < static_cast<std::size_t>(frame.width) * 4 ||
+        frame.bytesPerRow % 4 != 0) {
+        throw Error(ErrorCode::textureDecode, "Unable to decode a video texture frame");
+    }
+    if (frame.serial == texture.lastUploadedVideoFrameSerial) return false;
+    validateResourceDimensions(
+        frame.width, frame.height, 4, "Video texture frame"
+    );
+    validateMaximumTextureSize(
+        frame.width, frame.height, "Video texture frame"
+    );
+    if (frame.bytesPerRow / 4 > static_cast<std::size_t>(
+            std::numeric_limits<GLint>::max())) {
+        throw Error(
+            ErrorCode::textureUpload,
+            "Decoded video row length exceeds OpenGL's signed range"
+        );
+    }
     const TextureBindingGuard textureBinding;
+    const PixelStoreGuard pixelStore(
+        GL_UNPACK_ALIGNMENT, GL_UNPACK_ROW_LENGTH
+    );
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(
+        GL_UNPACK_ROW_LENGTH,
+        static_cast<GLint>(frame.bytesPerRow / 4)
+    );
     glBindTexture(GL_TEXTURE_2D, texture.images.front());
     if (texture.imageWidths.front() != frame.width || texture.imageHeights.front() != frame.height) {
         glTexImage2D(
             GL_TEXTURE_2D, 0, GL_RGBA8,
             static_cast<GLsizei>(frame.width), static_cast<GLsizei>(frame.height),
-            0, GL_RGBA, GL_UNSIGNED_BYTE, frame.bytes
+            0,
+            frame.pixelFormat == VideoFramePixelFormat::bgra8
+                ? GL_BGRA : GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            frame.bytes
         );
         texture.imageWidths.front() = frame.width;
         texture.imageHeights.front() = frame.height;
@@ -1153,10 +1233,15 @@ void Device::Session::updateVideoTexture(
         glTexSubImage2D(
             GL_TEXTURE_2D, 0, 0, 0,
             static_cast<GLsizei>(frame.width), static_cast<GLsizei>(frame.height),
-            GL_RGBA, GL_UNSIGNED_BYTE, frame.bytes
+            frame.pixelFormat == VideoFramePixelFormat::bgra8
+                ? GL_BGRA : GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            frame.bytes
         );
     }
     checkError(ErrorCode::textureUpload, "Updating a video texture frame");
+    texture.lastUploadedVideoFrameSerial = frame.serial;
+    return true;
 }
 
 void Device::Session::destroyTexture(AssetTextureResource& texture) noexcept {
@@ -1184,6 +1269,8 @@ void Device::Session::destroyTexture(AssetTextureResource& texture) noexcept {
     texture.spritesheetRows = 0;
     texture.spritesheetFrameCount = 0;
     texture.spritesheetDuration = 0.0F;
+    texture.lastUploadedVideoFrameSerial = 0;
+    texture.lastVideoUpdateFrame = 0;
     texture.video = false;
 }
 

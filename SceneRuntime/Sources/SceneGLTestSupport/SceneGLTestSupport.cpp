@@ -6,8 +6,11 @@
 #include "../SceneGL/SceneVideoDecoder.hpp"
 #include "../SceneGL/TextCoverageRenderer.hpp"
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <span>
+#include <thread>
+#include <utility>
 using namespace we::scene;
 
 namespace {
@@ -316,7 +319,69 @@ extern "C" int we_scene_gl_test_particle_objects_exist(const WESceneGLTestPartic
 extern "C" int we_scene_gl_test_particle_first_lifetime(const WESceneGLTestParticleObjects* objects,float* lifetime){
  try{if(!objects||!lifetime||CGLGetCurrentContext()==nullptr)return 0;GLint previous=0;glGetIntegerv(GL_ARRAY_BUFFER_BINDING,&previous);glBindBuffer(GL_ARRAY_BUFFER,objects->vertex_buffer);GLint size=0;glGetBufferParameteriv(GL_ARRAY_BUFFER,GL_BUFFER_SIZE,&size);if(size<static_cast<GLint>(15*sizeof(float))){glBindBuffer(GL_ARRAY_BUFFER,static_cast<GLuint>(previous));return 0;}float value=0.0F;glGetBufferSubData(GL_ARRAY_BUFFER,14*sizeof(float),sizeof(float),&value);glBindBuffer(GL_ARRAY_BUFFER,static_cast<GLuint>(previous));if(glGetError()!=GL_NO_ERROR)return 0;*lifetime=value;return 1;}catch(...){return 0;}}
 extern "C" int we_scene_gl_test_decode_video(const uint8_t* bytes,size_t length,const char* source,uint32_t* width,uint32_t* height){
- try{if(!bytes||length==0||!width||!height)return 0;void* decoder=gl::createVideoDecoder(bytes,length,source);if(!decoder)return 0;gl::VideoFrameRGBA8 frame;const bool decoded=gl::decodeVideoFrame(decoder,0.0,frame);gl::destroyVideoDecoder(decoder);if(!decoded||!frame.bytes||frame.byteCount!=static_cast<size_t>(frame.width)*frame.height*4)return 0;*width=frame.width;*height=frame.height;return 1;}catch(...){return 0;}}
+ try{if(!bytes||length==0||!width||!height)return 0;void* decoder=gl::createVideoDecoder(bytes,length,source);if(!decoder)return 0;gl::VideoFrame frame;const bool decoded=gl::copyLatestVideoFrame(decoder,frame);gl::destroyVideoDecoder(decoder);if(!decoded||!frame.bytes||frame.bytesPerRow<static_cast<size_t>(frame.width)*4||frame.byteCount<frame.bytesPerRow*frame.height)return 0;*width=frame.width;*height=frame.height;return 1;}catch(...){return 0;}}
+
+extern "C" int we_scene_gl_test_video_pipeline(
+    const uint8_t* bytes,
+    size_t length,
+    const char* source,
+    double targetTime,
+    WESceneGLTestVideoPipelineResult* result
+) {
+    try {
+        if (bytes == nullptr || length == 0 || result == nullptr) return 0;
+        TextureMipmap mipmap;
+        mipmap.bytes.assign(bytes, bytes + length);
+        Texture texture{
+            .format = TextureFormat::argb8888,
+            .flags = textureFlagVideo,
+            .width = 16,
+            .height = 16,
+            .textureWidth = 16,
+            .textureHeight = 16,
+            .imageCount = 1,
+            .isVideoMp4 = true,
+            .images = {{.mipmaps = {std::move(mipmap)}}},
+        };
+        gl::Device device;
+        auto session = device.activate();
+        gl::AssetTextureResource resource = session.uploadTexture(
+            texture, source == nullptr ? "test-video.mp4" : source
+        );
+        const std::uint64_t initialSerial =
+            resource.lastUploadedVideoFrameSerial;
+        session.requestVideoTextureFrame(resource, targetTime);
+
+        gl::VideoFrame decoded;
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::seconds(2);
+        do {
+            if (!gl::copyLatestVideoFrame(resource.videoDecoder, decoded)) {
+                session.destroyTexture(resource);
+                return 0;
+            }
+            if (decoded.serial != initialSerial) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < deadline);
+
+        if (decoded.serial == initialSerial) {
+            session.destroyTexture(resource);
+            return 0;
+        }
+        const bool firstUpdate = session.updateVideoTexture(resource, 41);
+        const bool secondUpdate = session.updateVideoTexture(resource, 41);
+        *result = {
+            .initial_serial = initialSerial,
+            .decoded_serial = decoded.serial,
+            .bytes_per_row = static_cast<std::uint32_t>(decoded.bytesPerRow),
+            .same_frame_update_skipped = firstUpdate && !secondUpdate ? 1 : 0,
+        };
+        session.destroyTexture(resource);
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
 
 extern "C" int we_scene_gl_test_presentation_transform(
     uint32_t source_width,

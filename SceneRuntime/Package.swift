@@ -159,6 +159,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("OpenGL"),
                 .linkedFramework("CoreGraphics"),
+                .linkedFramework("CoreVideo"),
                 .linkedFramework("ImageIO"),
                 .linkedFramework("AVFoundation"),
             ]

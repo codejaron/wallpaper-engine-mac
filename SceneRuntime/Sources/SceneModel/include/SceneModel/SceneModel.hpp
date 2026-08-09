@@ -836,9 +836,14 @@ struct SceneProject {
     Scene scene;
 };
 
+using PropertyValueMap = std::map<std::string, Value>;
+
 struct PropertyStateSnapshot {
     std::uint64_t revision = 0;
-    std::map<std::string, Value> values;
+    // Property revisions are immutable after publication. Sharing the map keeps
+    // every consumer on the same coherent revision without copying the entire
+    // user-property tree once per rendered frame.
+    std::shared_ptr<const PropertyValueMap> values;
 };
 
 class SceneModelLoader final {

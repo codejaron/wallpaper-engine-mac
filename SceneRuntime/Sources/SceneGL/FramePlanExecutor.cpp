@@ -38,8 +38,6 @@
 #include <variant>
 #include <vector>
 
-#include <os/log.h>
-
 namespace we::scene::gl {
 namespace {
 
@@ -78,12 +76,7 @@ void frameTraceLog(const char* format, ...) noexcept {
     va_start(arguments, format);
     std::vsnprintf(message, sizeof(message), format, arguments);
     va_end(arguments);
-    os_log_with_type(
-        OS_LOG_DEFAULT,
-        OS_LOG_TYPE_INFO,
-        "[SceneFrameTrace] %{public}s",
-        message
-    );
+    std::fprintf(stderr, "[SceneFrameTrace] %s\n", message);
 }
 
 [[nodiscard]] double frameTraceMilliseconds(
@@ -926,8 +919,17 @@ PhysicalRenderSize physicalRenderSize(
     );
 }
 
-FramePlan withPhysicalRenderSize(
-    const FramePlan& logicalPlan,
+struct LogicalFramebufferLayout final {
+    std::vector<FramebufferDescriptor> framebuffers;
+};
+
+struct FrameExecutionLayout final {
+    PhysicalRenderSize physicalOutput;
+    const std::vector<FramebufferDescriptor>& logicalFramebuffers;
+};
+
+LogicalFramebufferLayout applyPhysicalFramebufferSizes(
+    FramePlan& plan,
     PhysicalRenderSize physicalSize
 ) {
     if (physicalSize.width == 0 || physicalSize.height == 0 ||
@@ -938,9 +940,11 @@ FramePlan withPhysicalRenderSize(
             "Physical render dimensions must be non-zero and fit OpenGL's signed range"
         );
     }
-    FramePlan result = logicalPlan;
+    LogicalFramebufferLayout logical{
+        .framebuffers = plan.framebuffers,
+    };
     bool foundOutput = false;
-    for (FramebufferDescriptor& descriptor : result.framebuffers) {
+    for (FramebufferDescriptor& descriptor : plan.framebuffers) {
         if (descriptor.width == 0 || descriptor.height == 0) {
             throw Error(
                 ErrorCode::resourceValidation,
@@ -949,17 +953,17 @@ FramePlan withPhysicalRenderSize(
         }
         descriptor.width = scaledPhysicalDimension(
             descriptor.width,
-            logicalPlan.width,
+            plan.width,
             physicalSize.width,
             "Physical framebuffer width"
         );
         descriptor.height = scaledPhysicalDimension(
             descriptor.height,
-            logicalPlan.height,
+            plan.height,
             physicalSize.height,
             "Physical framebuffer height"
         );
-        if (descriptor.resource == logicalPlan.output) {
+        if (descriptor.resource == plan.output) {
             descriptor.width = physicalSize.width;
             descriptor.height = physicalSize.height;
             foundOutput = true;
@@ -971,9 +975,25 @@ FramePlan withPhysicalRenderSize(
             "Logical frame plan output has no framebuffer descriptor"
         );
     }
+    return logical;
+}
+
+FramePlan withPhysicalRenderSize(
+    const FramePlan& logicalPlan,
+    PhysicalRenderSize physicalSize
+) {
+    FramePlan result = logicalPlan;
+    static_cast<void>(applyPhysicalFramebufferSizes(result, physicalSize));
     result.width = physicalSize.width;
     result.height = physicalSize.height;
     return result;
+}
+
+void restoreLogicalFramebufferLayout(
+    FramePlan& plan,
+    LogicalFramebufferLayout logical
+) {
+    plan.framebuffers = std::move(logical.framebuffers);
 }
 
 FrameVector2 PresentationTransform::map(FrameVector2 drawablePoint) const {
@@ -1474,12 +1494,12 @@ ParticleView particlePerspectiveView(
 }
 
 FrameVector2 sceneParallaxOffset(
-    const FramePlan& plan,
+    std::uint32_t logicalWidth,
     const FrameVector2& depth,
     const FrameVector2& displacement,
     std::string_view subject
 ) {
-    const double referenceSize = static_cast<double>(plan.width);
+    const double referenceSize = static_cast<double>(logicalWidth);
     // The smoothed displacement already includes the global parallax amount.
     // A zero authored depth is the stationary camera plane.
     const FrameVector2 offset{
@@ -2073,6 +2093,22 @@ struct FramePlanExecutor::Impl final {
         std::vector<std::size_t> operationIndexes;
     };
 
+    struct OperationTopologyEntry final {
+        FrameOperationKind kind = FrameOperationKind::render;
+        std::size_t objectIndex = 0;
+        int objectId = 0;
+
+        [[nodiscard]] friend bool operator==(
+            const OperationTopologyEntry& lhs,
+            const OperationTopologyEntry& rhs
+        ) = default;
+    };
+
+    struct CachedOperationGroups final {
+        std::vector<OperationTopologyEntry> topology;
+        std::vector<ObjectOperationGroup> groups;
+    };
+
     struct TextRasterKey final {
         std::string utf8;
         std::string font;
@@ -2558,10 +2594,12 @@ struct FramePlanExecutor::Impl final {
     void ensureFramebuffers(
         Device::Session& session,
         const FramePlan& plan,
-        const FramebufferPlanRequirements& requirements
+        const FramebufferPlanRequirements& requirements,
+        PhysicalRenderSize physicalOutput
     ) {
         const bool outputSizeChanged = width != 0 && height != 0 &&
-            (width != plan.width || height != plan.height);
+            (width != physicalOutput.width ||
+             height != physicalOutput.height);
         // Validate and allocate every non-GL part of the next arena before
         // touching the live cache. A malformed plan therefore cannot evict a
         // previously usable framebuffer set.
@@ -2595,15 +2633,15 @@ struct FramePlanExecutor::Impl final {
         }
         const FramebufferDescriptor& outputDescriptor =
             required.at(plan.output.id).descriptor;
-        if (outputDescriptor.width != plan.width ||
-            outputDescriptor.height != plan.height) {
+        if (outputDescriptor.width != physicalOutput.width ||
+            outputDescriptor.height != physicalOutput.height) {
             throw Error(
                 ErrorCode::resourceValidation,
                 "Frame plan output descriptor dimensions do not match the plan"
             );
         }
         const std::size_t nextByteCount = checkedRGBA8ByteCount(
-            plan.width, plan.height
+            physicalOutput.width, physicalOutput.height
         );
         std::map<std::string, std::string> nextAliases;
         for (const auto& [id, requirement] : required) {
@@ -2904,8 +2942,8 @@ struct FramePlanExecutor::Impl final {
 
         framebufferAliases.swap(nextAliases);
         outputId.swap(nextOutputId);
-        width = plan.width;
-        height = plan.height;
+        width = physicalOutput.width;
+        height = physicalOutput.height;
         byteCount = nextByteCount;
     }
 
@@ -3993,22 +4031,44 @@ struct FramePlanExecutor::Impl final {
 
     [[nodiscard]] PreparedDraw prepareDraw(
         Device::Session& session,
-        const FramePlan& logicalPlan,
-        const FramePlan& physicalPlan,
+        const FramePlan& plan,
+        const FrameExecutionLayout& executionLayout,
         const FrameRenderPass& pass,
         const ResolvedFrameInputs& inputs,
         const FrameVector2& frameParallax,
         const PreparedCamera& camera,
         const std::map<std::string, std::string>& aliases
     ) {
-        if (pass.origin.imageIndex >= logicalPlan.images.size()) {
+        if (pass.origin.imageIndex >= plan.images.size()) {
             throw Error(
                 ErrorCode::resourceValidation,
                 "Render pass image index is invalid"
             );
         }
         const FrameImageDescriptor& image =
-            logicalPlan.images[pass.origin.imageIndex];
+            plan.images[pass.origin.imageIndex];
+        frameTraceLog(
+            "prepare.draw object=%d logical=%ux%u physical=%ux%u "
+            "origin={%.3f,%.3f,%.3f} scale={%.3f,%.3f,%.3f} "
+            "cameraCenter={%.3f,%.3f,%.3f} cameraEye={%.3f,%.3f,%.3f}",
+            image.objectId,
+            plan.width,
+            plan.height,
+            executionLayout.physicalOutput.width,
+            executionLayout.physicalOutput.height,
+            image.worldTransform.origin.x,
+            image.worldTransform.origin.y,
+            image.worldTransform.origin.z,
+            image.worldTransform.scale.x,
+            image.worldTransform.scale.y,
+            image.worldTransform.scale.z,
+            plan.camera.center.x,
+            plan.camera.center.y,
+            plan.camera.center.z,
+            plan.camera.eye.x,
+            plan.camera.eye.y,
+            plan.camera.eye.z
+        );
         auto& destination = framebuffer(pass.destination, aliases);
         ComboMap effectiveCombos = pass.combos;
         if (image.source.kind == FrameResourceKind::assetTexture) {
@@ -4096,7 +4156,7 @@ struct FramePlanExecutor::Impl final {
                     candidates.push_back({
                         .source = source,
                         .resource = samplerDefaultResource(
-                            physicalPlan, pass, name
+                            plan, pass, name
                         ),
                     });
                 }
@@ -4205,8 +4265,8 @@ struct FramePlanExecutor::Impl final {
         const bool puppetGeometry =
             pass.geometry == FrameGeometryKind::puppetMesh;
         const bool puppetSceneSpace = puppetGeometry &&
-            pass.destination.kind == physicalPlan.output.kind &&
-            pass.destination.id == physicalPlan.output.id;
+            pass.destination.kind == plan.output.kind &&
+            pass.destination.id == plan.output.id;
         if (pass.geometry == FrameGeometryKind::imageLocal ||
             (puppetGeometry && !puppetSceneSpace)) {
             left = 0.0F;
@@ -4227,9 +4287,9 @@ struct FramePlanExecutor::Impl final {
             const double scaledHeight = image.size.y * transform.scale.y;
             double centerX =
                 transform.origin.x -
-                    static_cast<double>(logicalPlan.width) * 0.5;
+                    static_cast<double>(plan.width) * 0.5;
             double centerY = centeredWallpaperY(
-                transform.origin.y, logicalPlan.height
+                transform.origin.y, plan.height
             );
             if (image.horizontalAlignment.find("left") != std::string::npos) {
                 centerX += scaledWidth * 0.5;
@@ -4269,14 +4329,14 @@ struct FramePlanExecutor::Impl final {
                     translation(-pivotX, -pivotY, 0.0F)
                 )
             );
-            if (logicalPlan.parallax.enabled) {
+            if (plan.parallax.enabled) {
                 const auto depth = numericComponents(
                     image.parallaxDepth.value,
                     2,
                     "Image parallax depth"
                 );
                 const FrameVector2 parallaxOffset = sceneParallaxOffset(
-                    logicalPlan,
+                    plan.width,
                     {
                         .x = static_cast<double>(depth[0]),
                         .y = static_cast<double>(depth[1]),
@@ -4350,11 +4410,8 @@ struct FramePlanExecutor::Impl final {
         );
         result.commonUniforms = prepareCommonUniforms(
             programResource,
-            logicalPlan,
-            {
-                .width = physicalPlan.width,
-                .height = physicalPlan.height,
-            },
+            plan,
+            executionLayout.physicalOutput,
             inputs,
             result.model,
             result.viewProjection,
@@ -4604,8 +4661,8 @@ struct FramePlanExecutor::Impl final {
 
     [[nodiscard]] PreparedDraw prepareCopy(
         Device::Session& session,
-        const FramePlan& logicalPlan,
-        const FramePlan& physicalPlan,
+        const FramePlan& plan,
+        const FrameExecutionLayout& executionLayout,
         const FrameCopyCommand& command,
         const ResolvedFrameInputs& inputs,
         const FrameVector2& frameParallax,
@@ -4645,7 +4702,7 @@ struct FramePlanExecutor::Impl final {
             .writeAlpha = true,
         };
         return prepareDraw(
-            session, logicalPlan, physicalPlan, pass, inputs, frameParallax,
+            session, plan, executionLayout, pass, inputs, frameParallax,
             camera, aliases
         );
     }
@@ -4722,15 +4779,16 @@ struct FramePlanExecutor::Impl final {
 
     [[nodiscard]] PreparedText prepareText(
         Device::Session& session,
-        const FramePlan& logicalPlan,
+        const FramePlan& plan,
+        const FrameExecutionLayout& executionLayout,
         const FrameTextCommand& command,
         const PreparedCamera& camera,
         const std::map<std::string, std::string>& aliases
     ) {
-        if (command.textIndex >= logicalPlan.texts.size()) {
+        if (command.textIndex >= plan.texts.size()) {
             throw Error(ErrorCode::resourceValidation, "Frame text command index is invalid");
         }
-        const auto& descriptor = logicalPlan.texts[command.textIndex];
+        const auto& descriptor = plan.texts[command.textIndex];
         if (descriptor.objectId != command.objectId) {
             throw Error(ErrorCode::resourceValidation, "Frame text command object identity is inconsistent");
         }
@@ -4777,15 +4835,15 @@ struct FramePlanExecutor::Impl final {
                 );
             }
             const auto logicalDestination = std::find_if(
-                logicalPlan.framebuffers.begin(),
-                logicalPlan.framebuffers.end(),
+                executionLayout.logicalFramebuffers.begin(),
+                executionLayout.logicalFramebuffers.end(),
                 [&destinationAlias](const FramebufferDescriptor& framebuffer) {
                     return framebuffer.resource.kind ==
                             FrameResourceKind::framebuffer &&
                         framebuffer.resource.id == destinationAlias->second;
                 }
             );
-            if (logicalDestination == logicalPlan.framebuffers.end()) {
+            if (logicalDestination == executionLayout.logicalFramebuffers.end()) {
                 throw Error(
                     ErrorCode::resourceValidation,
                     "Text command destination has no logical framebuffer descriptor"
@@ -4810,10 +4868,10 @@ struct FramePlanExecutor::Impl final {
         } else {
             const float originX = static_cast<float>(
                 transform.origin.x -
-                    static_cast<double>(logicalPlan.width) * 0.5
+                    static_cast<double>(plan.width) * 0.5
             );
             const float originY = static_cast<float>(
-                centeredWallpaperY(transform.origin.y, logicalPlan.height)
+                centeredWallpaperY(transform.origin.y, plan.height)
             );
             const Matrix world = multiply(
                 translation(originX, originY, float(transform.origin.z)),
@@ -5865,8 +5923,8 @@ struct FramePlanExecutor::Impl final {
 
     [[nodiscard]] ParticlePreparation prepareParticle(
         Device::Session& session,
-        const FramePlan& logicalPlan,
-        const FramePlan& physicalPlan,
+        const FramePlan& plan,
+        const FrameExecutionLayout& executionLayout,
         const FrameParticleCommand& command,
         std::size_t operationIndex,
         const ResolvedFrameInputs& inputs,
@@ -5876,20 +5934,20 @@ struct FramePlanExecutor::Impl final {
         const ParticleState* previousState,
         const ParticleDrawBatch* frozenBatch
     ) {
-        if (command.particleIndex >= logicalPlan.particles.size()) {
+        if (command.particleIndex >= plan.particles.size()) {
             throw Error(
                 ErrorCode::resourceValidation,
                 "Frame particle command index is invalid"
             );
         }
-        const auto& descriptor = logicalPlan.particles[command.particleIndex];
+        const auto& descriptor = plan.particles[command.particleIndex];
         if (descriptor.objectId != command.objectId) {
             throw Error(
                 ErrorCode::resourceValidation,
                 "Frame particle command object identity is inconsistent"
             );
         }
-        if (command.destination != physicalPlan.output) {
+        if (command.destination != plan.output) {
             throw Error(
                 ErrorCode::resourceValidation,
                 "Particle phase one requires the scene output as its destination"
@@ -6048,7 +6106,7 @@ struct FramePlanExecutor::Impl final {
                     candidates.push_back({
                         .source = source,
                         .resource = particleSamplerDefaultResource(
-                            physicalPlan, descriptor, name
+                            plan, descriptor, name
                         ),
                     });
                 }
@@ -6194,11 +6252,11 @@ struct FramePlanExecutor::Impl final {
         const auto& transform = descriptor.worldTransform;
         const float originX = particleFloat(
             transform.origin.x -
-                static_cast<double>(logicalPlan.width) * 0.5,
+                static_cast<double>(plan.width) * 0.5,
             "object origin"
         );
         const float originY = particleFloat(
-            centeredWallpaperY(transform.origin.y, logicalPlan.height),
+            centeredWallpaperY(transform.origin.y, plan.height),
             "object origin"
         );
         const float originZ = particleFloat(transform.origin.z, "object origin");
@@ -6219,7 +6277,7 @@ struct FramePlanExecutor::Impl final {
                 )
             )
         );
-        if (logicalPlan.parallax.enabled) {
+        if (plan.parallax.enabled) {
             double depthX = descriptor.parallaxDepth.x;
             double depthY = descriptor.parallaxDepth.y;
             constexpr double minimumParticleDepth = 0.65;
@@ -6232,7 +6290,7 @@ struct FramePlanExecutor::Impl final {
                     ? -minimumParticleDepth : minimumParticleDepth;
             }
             const FrameVector2 parallaxOffset = sceneParallaxOffset(
-                logicalPlan,
+                plan.width,
                 {.x = depthX, .y = depthY},
                 frameParallax,
                 "particle"
@@ -6342,11 +6400,8 @@ struct FramePlanExecutor::Impl final {
         const auto& overrides = descriptor.configuration.overrides;
         prepared.commonUniforms = prepareCommonUniforms(
             programResource,
-            logicalPlan,
-            {
-                .width = physicalPlan.width,
-                .height = physicalPlan.height,
-            },
+            plan,
+            executionLayout.physicalOutput,
             inputs,
             prepared.model,
             prepared.viewProjection,
@@ -6827,9 +6882,6 @@ struct FramePlanExecutor::Impl final {
     [[nodiscard]] std::vector<ObjectOperationGroup> objectOperationGroups(
         const FramePlan& plan
     ) const {
-        if (!plan.isExecutable()) {
-            throw Error(ErrorCode::resourceValidation, planIssues(plan));
-        }
         std::vector<ObjectOperationGroup> groups;
         std::set<int> closedObjectIds;
         std::set<int> scheduledParticleIds;
@@ -6870,6 +6922,52 @@ struct FramePlanExecutor::Impl final {
             }
         }
         return groups;
+    }
+
+    [[nodiscard]] const std::vector<ObjectOperationGroup>&
+    cachedObjectOperationGroups(const FramePlan& plan) {
+        // Fatal planning issues are frame data, not topology. They must be
+        // checked on every frame even when the operation grouping is reusable.
+        if (!plan.isExecutable()) {
+            throw Error(ErrorCode::resourceValidation, planIssues(plan));
+        }
+        bool topologyMatches = operationGroupsCache &&
+            operationGroupsCache->topology.size() == plan.operations.size();
+        for (std::size_t operationIndex = 0;
+             operationIndex < plan.operations.size(); ++operationIndex) {
+            const ObjectOperationGroup identity = operationGroup(
+                plan, plan.operations[operationIndex], operationIndex
+            );
+            const OperationTopologyEntry topologyEntry{
+                .kind = operationKind(plan.operations[operationIndex]),
+                .objectIndex = identity.objectIndex,
+                .objectId = identity.objectId,
+            };
+            topologyMatches = topologyMatches &&
+                operationGroupsCache->topology[operationIndex] ==
+                    topologyEntry;
+        }
+        if (topologyMatches) {
+            return operationGroupsCache->groups;
+        }
+        std::vector<OperationTopologyEntry> topology;
+        topology.reserve(plan.operations.size());
+        for (std::size_t operationIndex = 0;
+             operationIndex < plan.operations.size(); ++operationIndex) {
+            const ObjectOperationGroup identity = operationGroup(
+                plan, plan.operations[operationIndex], operationIndex
+            );
+            topology.push_back({
+                .kind = operationKind(plan.operations[operationIndex]),
+                .objectIndex = identity.objectIndex,
+                .objectId = identity.objectId,
+            });
+        }
+        operationGroupsCache = CachedOperationGroups{
+            .topology = std::move(topology),
+            .groups = objectOperationGroups(plan),
+        };
+        return operationGroupsCache->groups;
     }
 
     [[nodiscard]] AssetTextureResource& requirementTexture(
@@ -7173,7 +7271,8 @@ struct FramePlanExecutor::Impl final {
     void prepareFrameArena(
         Device::Session& session,
         const FramePlan& plan,
-        const std::vector<ObjectOperationGroup>& groups
+        const std::vector<ObjectOperationGroup>& groups,
+        PhysicalRenderSize physicalOutput
     ) {
         normalizeGLState();
         session.checkError(
@@ -7182,7 +7281,7 @@ struct FramePlanExecutor::Impl final {
         );
         const FramebufferPlanRequirements requirements =
             framebufferRequirements(session, plan, groups);
-        ensureFramebuffers(session, plan, requirements);
+        ensureFramebuffers(session, plan, requirements, physicalOutput);
         static_cast<void>(framebuffer(plan.output));
 
         bool needsGeometry = false;
@@ -7271,8 +7370,8 @@ struct FramePlanExecutor::Impl final {
 
     [[nodiscard]] PreparedFrame preflightFrameObjects(
         Device::Session& session,
-        const FramePlan& logicalPlan,
-        const FramePlan& physicalPlan,
+        const FramePlan& plan,
+        const FrameExecutionLayout& executionLayout,
         const std::vector<ObjectOperationGroup>& groups,
         const ResolvedFrameInputs& inputs,
         const FrameVector2& frameParallax,
@@ -7282,16 +7381,16 @@ struct FramePlanExecutor::Impl final {
         const std::vector<FrameExecutionIssue>* frozenIssues = nullptr
     ) {
         PreparedFrame result;
-        result.operations.resize(physicalPlan.operations.size());
-        if (physicalPlan.operations.size() <=
+        result.operations.resize(plan.operations.size());
+        if (plan.operations.size() <=
             static_cast<std::size_t>(
                 std::numeric_limits<GLint>::max()) / 6U) {
-            result.imageVertices.reserve(physicalPlan.operations.size() * 6U);
+            result.imageVertices.reserve(plan.operations.size() * 6U);
         }
         result.frozenParticleBatches = frozenParticleBatches;
         if (frozenParticleBatches == nullptr) {
             result.particleStates = particles;
-            initializeParticleStates(logicalPlan, result.particleStates);
+            initializeParticleStates(plan, result.particleStates);
         }
         std::map<std::string, std::string> aliases = framebufferAliases;
 
@@ -7334,13 +7433,13 @@ struct FramePlanExecutor::Impl final {
                      group.operationIndexes) {
                     failingOperation = operationIndex;
                     const FrameOperation& operation =
-                        physicalPlan.operations[operationIndex];
+                        plan.operations[operationIndex];
                     if (const auto* pass =
                             std::get_if<FrameRenderPass>(&operation)) {
                         candidateOperations.emplace_back(
                             operationIndex,
                             prepareDraw(
-                                session, logicalPlan, physicalPlan, *pass,
+                                session, plan, executionLayout, *pass,
                                 inputs, frameParallax, camera, candidateAliases
                             )
                         );
@@ -7349,7 +7448,7 @@ struct FramePlanExecutor::Impl final {
                         candidateOperations.emplace_back(
                             operationIndex,
                             prepareCopy(
-                                session, logicalPlan, physicalPlan, *command, inputs,
+                                session, plan, executionLayout, *command, inputs,
                                 frameParallax, camera, candidateAliases
                             )
                         );
@@ -7370,7 +7469,7 @@ struct FramePlanExecutor::Impl final {
                         candidateOperations.emplace_back(
                             operationIndex,
                             prepareText(
-                                session, logicalPlan, *command, camera,
+                                session, plan, executionLayout, *command, camera,
                                 candidateAliases
                             )
                         );
@@ -7401,7 +7500,7 @@ struct FramePlanExecutor::Impl final {
                             frozenBatch = &found->second;
                         }
                         ParticlePreparation prepared = prepareParticle(
-                            session, logicalPlan, physicalPlan, *command,
+                            session, plan, executionLayout, *command,
                             operationIndex, inputs, frameParallax, camera,
                             candidateAliases,
                             previousState, frozenBatch
@@ -8120,9 +8219,12 @@ struct FramePlanExecutor::Impl final {
             traceStage("frameGraphEvaluate");
             resolveTextEffectGeometry(evaluated.plan);
             traceStage("textGeometry");
-            const FramePlan& logicalPlan = evaluated.plan;
-            std::optional<FramePlan> physicalPlan;
-            const FramePlan* executionPlan = &logicalPlan;
+            FramePlan& plan = evaluated.plan;
+            PhysicalRenderSize physicalOutput{
+                .width = plan.width,
+                .height = plan.height,
+            };
+            std::optional<LogicalFramebufferLayout> logicalLayout;
             if (physicalTarget) {
                 if (!scaling) {
                     throw Error(
@@ -8130,26 +8232,32 @@ struct FramePlanExecutor::Impl final {
                         "Physical rendering requires a presentation scaling mode"
                     );
                 }
-                physicalPlan.emplace(withPhysicalRenderSize(
-                    logicalPlan,
-                    physicalRenderSize(logicalPlan, *physicalTarget, *scaling)
+                physicalOutput = physicalRenderSize(
+                    plan, *physicalTarget, *scaling
+                );
+                logicalLayout.emplace(applyPhysicalFramebufferSizes(
+                    plan, physicalOutput
                 ));
-                executionPlan = &*physicalPlan;
             }
-            const FramePlan& plan = *executionPlan;
-            const std::vector<ObjectOperationGroup> groups =
-                objectOperationGroups(plan);
-            const PreparedCamera camera = prepareCamera(logicalPlan);
+            const FrameExecutionLayout executionLayout{
+                .physicalOutput = physicalOutput,
+                .logicalFramebuffers = logicalLayout
+                    ? logicalLayout->framebuffers
+                    : plan.framebuffers,
+            };
+            const std::vector<ObjectOperationGroup>& groups =
+                cachedObjectOperationGroups(plan);
+            const PreparedCamera camera = prepareCamera(plan);
             const FrameVector2 workingParallax = nextParallax(
-                parallaxDisplacement, logicalPlan, resolvedInputs
+                parallaxDisplacement, plan, resolvedInputs
             );
             auto session = ensureDevice().activate();
-            prepareFrameArena(session, plan, groups);
+            prepareFrameArena(session, plan, groups, physicalOutput);
             traceStage("frameArena");
             PreparedFrame prepared = preflightFrameObjects(
                 session,
-                logicalPlan,
                 plan,
+                executionLayout,
                 groups,
                 resolvedInputs,
                 workingParallax,
@@ -8162,6 +8270,14 @@ struct FramePlanExecutor::Impl final {
             traceStage("execute");
             textRenderer.trimCache(session);
             traceStage("trimCache");
+
+            if (logicalLayout) {
+                restoreLogicalFramebufferLayout(
+                    plan, std::move(*logicalLayout)
+                );
+            }
+
+            const std::size_t operationCount = plan.operations.size();
 
             LastFrameState published{
                 .sourcePlan = std::move(evaluated.plan),
@@ -8183,7 +8299,7 @@ struct FramePlanExecutor::Impl final {
                 "particleObjects=%zu particleBatches=%zu",
                 static_cast<unsigned long long>(currentTraceFrame),
                 totalMilliseconds,
-                plan.operations.size(),
+                operationCount,
                 particles.size(),
                 lastFrame->particleBatches.size()
             );
@@ -8191,7 +8307,7 @@ struct FramePlanExecutor::Impl final {
                 resolvedInputs.frameTimeSeconds,
                 totalMilliseconds,
                 stageMilliseconds,
-                plan.operations.size()
+                operationCount
             );
         } catch (...) {
             frameTraceLog(
@@ -8232,8 +8348,11 @@ struct FramePlanExecutor::Impl final {
             if (needsReprojection) {
                 resolveTextEffectGeometry(logicalReplayPlan);
             }
-            std::optional<FramePlan> physicalReplayPlan;
-            const FramePlan* executionPlan = &logicalReplayPlan;
+            PhysicalRenderSize physicalOutput{
+                .width = logicalReplayPlan.width,
+                .height = logicalReplayPlan.height,
+            };
+            std::optional<LogicalFramebufferLayout> logicalLayout;
             if (physicalTarget) {
                 if (!scaling) {
                     throw Error(
@@ -8241,28 +8360,35 @@ struct FramePlanExecutor::Impl final {
                         "Physical replay requires a presentation scaling mode"
                     );
                 }
-                physicalReplayPlan.emplace(withPhysicalRenderSize(
-                    logicalReplayPlan,
-                    physicalRenderSize(
-                        logicalReplayPlan, *physicalTarget, *scaling
-                    )
+                physicalOutput = physicalRenderSize(
+                    logicalReplayPlan, *physicalTarget, *scaling
+                );
+                logicalLayout.emplace(applyPhysicalFramebufferSizes(
+                    logicalReplayPlan, physicalOutput
                 ));
-                executionPlan = &*physicalReplayPlan;
             }
-            const FramePlan& replayPlan = *executionPlan;
             if (!needsReprojection &&
-                width == replayPlan.width && height == replayPlan.height) {
+                width == physicalOutput.width &&
+                height == physicalOutput.height) {
                 return;
             }
-            const std::vector<ObjectOperationGroup> groups =
-                objectOperationGroups(replayPlan);
+            const FrameExecutionLayout executionLayout{
+                .physicalOutput = physicalOutput,
+                .logicalFramebuffers = logicalLayout
+                    ? logicalLayout->framebuffers
+                    : logicalReplayPlan.framebuffers,
+            };
+            const std::vector<ObjectOperationGroup>& groups =
+                cachedObjectOperationGroups(logicalReplayPlan);
             const PreparedCamera camera = prepareCamera(logicalReplayPlan);
             auto session = ensureDevice().activate();
-            prepareFrameArena(session, replayPlan, groups);
+            prepareFrameArena(
+                session, logicalReplayPlan, groups, physicalOutput
+            );
             PreparedFrame prepared = preflightFrameObjects(
                 session,
                 logicalReplayPlan,
-                replayPlan,
+                executionLayout,
                 groups,
                 lastFrame->inputs,
                 parallaxDisplacement,
@@ -8270,13 +8396,18 @@ struct FramePlanExecutor::Impl final {
                 &lastFrame->particleBatches,
                 &lastFrame->issues
             );
-            beginFrameOutput(session, replayPlan);
+            beginFrameOutput(session, logicalReplayPlan);
             executePreparedOperations(session, prepared);
             textRenderer.trimCache(session);
             if (needsReprojection) {
                 // Reprojection changes only the frozen logical layout used by
                 // future hit tests/replays. It neither evaluates scripts nor
                 // advances particle simulation or frame time.
+                if (logicalLayout) {
+                    restoreLogicalFramebufferLayout(
+                        logicalReplayPlan, std::move(*logicalLayout)
+                    );
+                }
                 lastFrame->sourcePlan = std::move(logicalReplayPlan);
             }
             lastFrame->issues = std::move(prepared.issues);
@@ -8391,6 +8522,7 @@ struct FramePlanExecutor::Impl final {
     std::uint32_t height = 0;
     std::size_t byteCount = 0;
     std::optional<LastFrameState> lastFrame;
+    std::optional<CachedOperationGroups> operationGroupsCache;
     FrameVector2 parallaxDisplacement;
     FrameVector2 lastPublishedPointer;
     bool hasPublishedPointer = false;

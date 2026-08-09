@@ -586,7 +586,7 @@ struct SceneModel::State {
     std::shared_ptr<const Runtime> runtime;
     SceneProject project;
     std::vector<std::string> propertyKeys;
-    std::map<std::string, Value> propertyValues;
+    std::shared_ptr<const PropertyValueMap> propertyValues;
     mutable std::shared_mutex propertyMutex;
     std::atomic<std::uint64_t> revision = 0;
 };
@@ -612,12 +612,16 @@ std::shared_ptr<SceneModel> SceneModel::load(
         projectPath
     );
     state->propertyKeys.reserve(state->project.properties.size());
+    PropertyValueMap propertyValues;
     for (const auto& [key, property] : state->project.properties) {
         state->propertyKeys.push_back(key);
         if (property.value) {
-            state->propertyValues.emplace(key, *property.value);
+            propertyValues.emplace(key, *property.value);
         }
     }
+    state->propertyValues = std::make_shared<const PropertyValueMap>(
+        std::move(propertyValues)
+    );
 
     constexpr int missingSortValue = std::numeric_limits<int>::max();
     std::ranges::sort(
@@ -660,15 +664,15 @@ const std::vector<std::string>& SceneModel::propertyKeys() const noexcept {
 
 std::optional<Value> SceneModel::propertyValue(std::string_view property) const {
     const std::shared_lock lock(state_->propertyMutex);
-    const auto found = state_->propertyValues.find(std::string(property));
-    if (found == state_->propertyValues.end()) {
+    const auto found = state_->propertyValues->find(std::string(property));
+    if (found == state_->propertyValues->end()) {
         return std::nullopt;
     }
     return found->second;
 }
 
 std::map<std::string, Value> SceneModel::propertyValues() const {
-    return propertyState().values;
+    return *propertyState().values;
 }
 
 PropertyStateSnapshot SceneModel::propertyState() const {
@@ -715,16 +719,20 @@ void SceneModel::setPropertyValues(
     const std::unique_lock lock(state_->propertyMutex);
     bool changed = false;
     for (const auto& [propertyName, value] : validatedValues) {
-        const auto current = state_->propertyValues.find(propertyName);
-        if (current == state_->propertyValues.end() || current->second != value) {
+        const auto current = state_->propertyValues->find(propertyName);
+        if (current == state_->propertyValues->end() || current->second != value) {
             changed = true;
             break;
         }
     }
     if (!changed) return;
+    PropertyValueMap updated = *state_->propertyValues;
     for (auto& [propertyName, value] : validatedValues) {
-        state_->propertyValues[propertyName] = std::move(value);
+        updated[propertyName] = std::move(value);
     }
+    state_->propertyValues = std::make_shared<const PropertyValueMap>(
+        std::move(updated)
+    );
     state_->revision.fetch_add(1, std::memory_order_release);
 }
 

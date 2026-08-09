@@ -1976,9 +1976,33 @@ struct ScriptLayerRegistry::Impl final {
     std::set<int> destroyedBaseIds;
     int nextDynamicId = -1;
     double runtimeSeconds = 0.0;
+    std::uint64_t topologyRevision = 0;
     std::function<std::optional<ScriptTextureAnimationMetadata>(
         std::string_view
     )> textureAnimationResolver;
+
+    void bumpTopologyRevision() {
+        if (topologyRevision == std::numeric_limits<std::uint64_t>::max()) {
+            throw std::overflow_error(
+                "SceneScript layer topology revision overflowed"
+            );
+        }
+        ++topologyRevision;
+    }
+
+    void commitPendingDestroys() {
+        const bool changed = !pendingDestroy.empty();
+        for (const int id : pendingDestroy) {
+            const auto found = layers.find(id);
+            if (found != layers.end() && !found->second.base.dynamic) {
+                destroyedBaseIds.emplace(id);
+            }
+            layers.erase(id);
+            std::erase(order, id);
+        }
+        pendingDestroy.clear();
+        if (changed) bumpTopologyRevision();
+    }
 
     void initializeTimelines(Layer& layer, double anchorRuntimeSeconds) {
         layer.timeline.synchronize(
@@ -2176,15 +2200,7 @@ void ScriptLayerRegistry::setBaseLayers(
     std::vector<ScriptLayerDescriptor> descriptors
 ) {
     std::lock_guard lock(impl_->mutex);
-    for (const int id : impl_->pendingDestroy) {
-        const auto found = impl_->layers.find(id);
-        if (found != impl_->layers.end() && !found->second.base.dynamic) {
-            impl_->destroyedBaseIds.emplace(id);
-        }
-        impl_->layers.erase(id);
-        std::erase(impl_->order, id);
-    }
-    impl_->pendingDestroy.clear();
+    impl_->commitPendingDestroys();
 
     std::set<int> incomingIds;
     std::vector<int> newBaseIds;
@@ -2261,6 +2277,12 @@ void ScriptLayerRegistry::setBaseLayers(
             impl_->order.push_back(id);
         }
     }
+    impl_->bumpTopologyRevision();
+}
+
+void ScriptLayerRegistry::beginFrame() {
+    std::lock_guard lock(impl_->mutex);
+    impl_->commitPendingDestroys();
 }
 
 void ScriptLayerRegistry::setRuntimeSeconds(double runtimeSeconds) {
@@ -2288,6 +2310,48 @@ std::vector<ScriptLayerDescriptor> ScriptLayerRegistry::enumerate() const {
     result.reserve(impl_->order.size());
     for (const int id : impl_->order) {
         result.push_back(impl_->effective(impl_->layers.at(id)));
+    }
+    return result;
+}
+
+std::vector<ScriptLayerReference> ScriptLayerRegistry::references() const {
+    std::lock_guard lock(impl_->mutex);
+    std::vector<ScriptLayerReference> result;
+    result.reserve(impl_->order.size());
+    for (const int id : impl_->order) {
+        const Impl::Layer& layer = impl_->layers.at(id);
+        result.push_back({
+            .id = id,
+            .sourceObjectIndex = layer.base.sourceObjectIndex,
+            .dynamic = layer.base.dynamic,
+        });
+    }
+    return result;
+}
+
+ScriptLayerRegistrySnapshot ScriptLayerRegistry::snapshot() const {
+    std::lock_guard lock(impl_->mutex);
+    ScriptLayerRegistrySnapshot result{
+        .topologyRevision = impl_->topologyRevision,
+    };
+    result.layers.reserve(impl_->order.size());
+    for (const int id : impl_->order) {
+        Impl::Layer& layer = impl_->layers.at(id);
+        ScriptLayerSnapshot snapshot{
+            .id = id,
+            .sourceObjectIndex = layer.base.sourceObjectIndex,
+            .parent = layer.base.parent,
+            .disablePropagation = layer.base.disablePropagation,
+            .dynamic = layer.base.dynamic,
+        };
+        for (const auto& [property, value] : layer.base.properties) {
+            static_cast<void>(value);
+            snapshot.properties.emplace(
+                property,
+                impl_->effectiveProperty(layer, property)
+            );
+        }
+        result.layers.push_back(std::move(snapshot));
     }
     return result;
 }
@@ -2439,6 +2503,7 @@ ScriptLayerDescriptor ScriptLayerRegistry::createLayer(
     const int id = layer.base.id;
     impl_->layers.emplace(id, std::move(layer));
     impl_->order.push_back(id);
+    impl_->bumpTopologyRevision();
     return impl_->effective(impl_->layers.at(id));
 }
 
@@ -2470,6 +2535,7 @@ bool ScriptLayerRegistry::sortLayer(int id, std::size_t index) {
     const int value = *found;
     impl_->order.erase(found);
     impl_->order.insert(impl_->order.begin() + static_cast<std::ptrdiff_t>(index), value);
+    impl_->bumpTopologyRevision();
     return true;
 }
 

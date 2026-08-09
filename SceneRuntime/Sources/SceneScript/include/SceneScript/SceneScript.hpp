@@ -284,6 +284,29 @@ struct ScriptLayerDescriptor final {
     bool soundStartsAutomatically = false;
 };
 
+struct ScriptLayerReference final {
+    int id = 0;
+    std::size_t sourceObjectIndex = 0;
+    bool dynamic = false;
+};
+
+// Minimal immutable view consumed by frame planning. Authoring metadata,
+// animation definitions, and initial configuration remain owned by the live
+// registry and are not deep-copied at presentation frequency.
+struct ScriptLayerSnapshot final {
+    int id = 0;
+    std::size_t sourceObjectIndex = 0;
+    std::optional<int> parent;
+    bool disablePropagation = false;
+    bool dynamic = false;
+    std::map<std::string, RuntimeValue> properties;
+};
+
+struct ScriptLayerRegistrySnapshot final {
+    std::uint64_t topologyRevision = 0;
+    std::vector<ScriptLayerSnapshot> layers;
+};
+
 struct ScriptTimelineAnimationSnapshot final {
     int layerId = 0;
     std::string property;
@@ -409,6 +432,9 @@ public:
     // Replaces host-owned values while retaining script-owned overlays for
     // layers that still exist.  Ordering is preserved for enumerateLayers().
     void setBaseLayers(std::vector<ScriptLayerDescriptor> layers);
+    // Applies destroys requested by the previous script frame even when the
+    // immutable base-layer descriptors did not change.
+    void beginFrame();
     void setRuntimeSeconds(double runtimeSeconds);
     void setTextureAnimationResolver(
         std::function<std::optional<ScriptTextureAnimationMetadata>(
@@ -417,6 +443,8 @@ public:
     );
 
     [[nodiscard]] std::vector<ScriptLayerDescriptor> enumerate() const;
+    [[nodiscard]] std::vector<ScriptLayerReference> references() const;
+    [[nodiscard]] ScriptLayerRegistrySnapshot snapshot() const;
     [[nodiscard]] std::optional<ScriptLayerDescriptor> find(int id) const;
     [[nodiscard]] std::optional<ScriptLayerDescriptor> find(
         std::string_view name

@@ -101,8 +101,9 @@ struct SceneGraphSnapshot {
     // property revision as transforms and visibility. Keeping the values in
     // the immutable snapshot prevents a property update between graph and
     // material evaluation from producing a torn frame.
-    std::map<std::string, Value> propertyValues;
+    std::shared_ptr<const PropertyValueMap> propertyValues;
     std::vector<SceneGraphNodeSnapshot> nodes;
+    std::shared_ptr<const std::map<int, std::size_t>> nodeIndices;
     // Behavior state is copied only after all scripts participating in the
     // frame have run. Downstream planning consumes this immutable snapshot;
     // it never reaches back into QuickJS or a mutable registry.
@@ -192,6 +193,8 @@ public:
     void commitScriptPropertyObjects();
     [[nodiscard]] std::uint64_t modelRevision() const noexcept;
     [[nodiscard]] const std::map<std::string, Value>& propertyValues() const noexcept;
+    [[nodiscard]] std::shared_ptr<const PropertyValueMap>
+    propertyValuesSnapshot() const noexcept;
     [[nodiscard]] const std::map<std::string, EvaluatedValue>&
     evaluatedScriptValues() const noexcept;
     [[nodiscard]] std::vector<ScriptEvaluationStats> scriptEvaluationStats() const;

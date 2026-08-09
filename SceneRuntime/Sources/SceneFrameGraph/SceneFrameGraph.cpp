@@ -25,8 +25,6 @@
 #include <type_traits>
 #include <utility>
 
-#include <os/log.h>
-
 namespace we::scene {
 
 FrameResourceRef frameAssetTextureResource(std::string_view name) {
@@ -66,12 +64,7 @@ void frameGraphTraceLog(const char* format, ...) noexcept {
     va_start(arguments, format);
     std::vsnprintf(message, sizeof(message), format, arguments);
     va_end(arguments);
-    os_log_with_type(
-        OS_LOG_DEFAULT,
-        OS_LOG_TYPE_INFO,
-        "[SceneFrameTrace] %{public}s",
-        message
-    );
+    std::fprintf(stderr, "[SceneFrameTrace] %s\n", message);
 }
 
 [[nodiscard]] double frameGraphTraceMilliseconds(
@@ -737,7 +730,7 @@ public:
                         evaluateDynamicValue(
                             *model_,
                             instance.visible,
-                            graphSnapshot_.propertyValues,
+                            *graphSnapshot_.propertyValues,
                             effectPointer + "/visible"
                         ).value,
                     }},
@@ -864,7 +857,7 @@ private:
             result = found->second;
         } else {
             result = evaluateDynamicValue(
-                *model_, value, graphSnapshot_.propertyValues, pointer
+                *model_, value, *graphSnapshot_.propertyValues, pointer
             );
         }
         if (result.source == DynamicValueSource::scriptInitial) {
@@ -948,7 +941,7 @@ private:
                 evaluateDynamicValue(
                     *model_,
                     value,
-                    graphSnapshot_.propertyValues,
+                    *graphSnapshot_.propertyValues,
                     pointerPrefix + '/' + property
                 ).value
             );
@@ -1303,8 +1296,8 @@ private:
         std::string selectedAsset;
         if (property != model_->project().properties.end() &&
             property->second.type == PropertyType::sceneTexture) {
-            const auto selected = graphSnapshot_.propertyValues.find(name);
-            if (selected != graphSnapshot_.propertyValues.end()) {
+            const auto selected = graphSnapshot_.propertyValues->find(name);
+            if (selected != graphSnapshot_.propertyValues->end()) {
                 if (const auto* value = std::get_if<std::string>(
                         &selected->second.storage)) {
                     selectedAsset = *value;
@@ -3363,7 +3356,7 @@ private:
                         evaluateDynamicValue(
                             *model_,
                             effectInstance.visible,
-                            graphSnapshot_.propertyValues,
+                            *graphSnapshot_.propertyValues,
                             effectPointer + "/visible"
                         ).value,
                     }},
@@ -4719,7 +4712,7 @@ SceneFrameGraph::SceneFrameGraph(std::shared_ptr<SceneGraph> graph)
         const FrameVector2 size = vector2Value(
             *graph_->model(),
             evaluateDynamicValue(
-                *graph_->model(), image->size, initial.propertyValues, pointer
+                *graph_->model(), image->size, *initial.propertyValues, pointer
             ),
             pointer,
             "Image size"
@@ -4835,7 +4828,7 @@ EvaluatedFramePlan SceneFrameGraph::evaluate(
     traceStage("evaluationFrame");
     SceneGraphSnapshot initializationSnapshot;
     initializationSnapshot.modelRevision = evaluation->modelRevision();
-    initializationSnapshot.propertyValues = evaluation->propertyValues();
+    initializationSnapshot.propertyValues = evaluation->propertyValuesSnapshot();
     PlanBuilder(
         graph_->model(),
         initializationSnapshot,

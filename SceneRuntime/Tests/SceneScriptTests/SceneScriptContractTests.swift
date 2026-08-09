@@ -1138,6 +1138,35 @@ final class SceneScriptContractTests: XCTestCase {
         )
     }
 
+    func testSharedVectorFromInitSurvivesUpdateAndCrossContextRead() throws {
+        let runtime = try makeRuntime()
+        defer { we_scene_script_test_runtime_destroy(runtime) }
+
+        let owner = try makeInstance(
+            runtime: runtime,
+            source: """
+            export function init(value) { shared.vector = value; }
+            export function update(value) { return value; }
+            """,
+            initialJSON: #"{"x":1,"y":2,"z":3}"#
+        )
+        defer { we_scene_script_test_destroy(owner) }
+        _ = try evaluate(owner, runtime: 0, frameTime: 0)
+
+        let consumer = try makeInstance(
+            runtime: runtime,
+            source: """
+            export function update() { return shared.vector.x; }
+            """,
+            initialJSON: "0"
+        )
+        defer { we_scene_script_test_destroy(consumer) }
+        XCTAssertEqual(
+            try evaluate(consumer, runtime: 1, frameTime: 0.016) as? Int,
+            1
+        )
+    }
+
     func testTimerCancellationRetainsCreatingInstanceAcrossSharedContexts() throws {
         let runtime = try makeRuntime()
         defer { we_scene_script_test_runtime_destroy(runtime) }

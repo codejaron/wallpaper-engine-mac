@@ -1058,7 +1058,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
     }
 
-    func testAutomaticProjectionUsesTheSameCenteredOriginAsFixedProjection() throws {
+    func testAutomaticProjectionUsesTheSameBottomUpOriginAsFixedProjection() throws {
         let loaded = try loadFixture(
             fragmentSource: automaticOriginContractFragmentShader,
             projectionAuto: true,
@@ -1079,8 +1079,8 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
         XCTAssertEqual(
             greenPixels,
-            Set([10, 11, 18, 19]),
-            "An auto-projected image must bake its top-left origin into centered scene geometry"
+            Set([26, 27, 34, 35]),
+            "An auto-projected image must bake its bottom-up origin into centered scene geometry"
         )
     }
 
@@ -1229,10 +1229,10 @@ final class FrameExecutorPixelTests: XCTestCase {
 
         XCTAssertEqual(
             try readPixels(loaded.executor),
-            repeatedPixel([0, 0, 0, 255], count: 4) +
+            repeatedPixel([0, 0, 0, 255], count: 2) +
                 repeatedPixel([255, 0, 0, 255], count: 2) +
-                repeatedPixel([0, 0, 0, 255], count: 4),
-            "The crop maps the host top to bottom-left Y=0.6, then Linux parallax consumes top-left Y=0.4 and moves the visible strip upward"
+                repeatedPixel([0, 0, 0, 255], count: 6),
+            "The crop maps the host pointer through Linux parallax while preserving the bottom-up scene Y axis"
         )
     }
 
@@ -1802,8 +1802,8 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertEqual(we_scene_frame_executor_height(loaded.executor), 2)
         XCTAssertEqual(
             try readPixels(loaded.executor),
-            [255, 0, 0, 255, 255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255,
-             0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]
+            [0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255,
+             255, 0, 0, 255, 255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]
         )
     }
 

@@ -1040,7 +1040,7 @@ final class ParticleExecutorTests: XCTestCase {
         try assertNoExecutionIssues(loaded.executor)
     }
 
-    func testAnimatedSingleImageParticleAtlasUsesPerParticleSequence() throws {
+    func testAnimatedSingleImageParticleAtlasUsesNormalizedParticleLifetime() throws {
         let atlasPixels: [[UInt8]] = [
             [255, 0, 0, 255],
             [0, 255, 0, 255],
@@ -1062,6 +1062,7 @@ final class ParticleExecutorTests: XCTestCase {
                 animationMode: "sequence",
                 sequenceMultiplier: 2,
                 particleVelocity: "0 0 0",
+                particleColor: "255 255 255",
                 particleTextureData: animatedAtlas
             ),
             context: nil
@@ -1070,15 +1071,18 @@ final class ParticleExecutorTests: XCTestCase {
 
         try render(loaded.executor, time: 1, delta: 0.25)
         let pixels = try readPixels(loaded.executor)
-        let visibleOffsets = stride(from: 0, to: pixels.count, by: 4).filter {
+        let renderedOffsets = stride(from: 0, to: pixels.count, by: 4).filter {
             pixels[$0] != 0 || pixels[$0 + 1] != 0 || pixels[$0 + 2] != 0
         }
-        XCTAssertFalse(visibleOffsets.isEmpty)
+        XCTAssertFalse(renderedOffsets.isEmpty)
+        let renderedColors = Set(renderedOffsets.map {
+            Array(pixels[$0 ..< $0 + 4])
+        })
         XCTAssertTrue(
-            visibleOffsets.allSatisfy {
-                Array(pixels[$0 ..< $0 + 4]) == [0, 255, 0, 255]
+            renderedOffsets.allSatisfy {
+                Array(pixels[$0 ..< $0 + 4]) == [0, 0, 255, 255]
             },
-            "Animated single-image atlas must retain SPRITESHEET per-particle sequencing"
+            "Animated single-image atlases must select frames from normalized particle lifetime; got \(renderedColors)"
         )
         try assertNoExecutionIssues(loaded.executor)
     }
@@ -1239,9 +1243,9 @@ final class ParticleExecutorTests: XCTestCase {
         })
         XCTAssertTrue(
             visibleOffsets.allSatisfy {
-                Array(pixels[$0 ..< $0 + 4]) == [255, 255, 0, 255]
+                Array(pixels[$0 ..< $0 + 4]) == [0, 0, 255, 255]
             },
-            "Sequence lifetime must use TEX cycle duration and particle age; got \(visibleColors)"
+            "Sequence animation must use normalized particle lifetime rather than TEX cycle duration; got \(visibleColors)"
         )
     }
 
@@ -1375,7 +1379,7 @@ final class ParticleExecutorTests: XCTestCase {
         )
     }
 
-    func testParticleOriginUsesTopDownSceneCoordinates() throws {
+    func testParticleOriginUsesBottomUpSceneCoordinates() throws {
         let loaded = try loadPipeline(
             fixture: makeFixture(
                 includeText: false,
@@ -1393,8 +1397,8 @@ final class ParticleExecutorTests: XCTestCase {
         let rows = greenRows(pixels, width: 16)
         XCTAssertFalse(rows.isEmpty)
         XCTAssertTrue(
-            rows.allSatisfy { $0 < 4 },
-            "A particle authored near the scene top must remain in the user-visible top half; rows=\(rows)"
+            rows.allSatisfy { $0 >= 4 },
+            "A particle authored near the scene bottom must remain in the user-visible bottom half; rows=\(rows)"
         )
     }
 

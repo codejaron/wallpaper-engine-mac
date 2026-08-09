@@ -2507,7 +2507,11 @@ struct FramePlanExecutor::Impl final {
             const double sine = std::sin(angle);
             imageDescriptor.worldTransform.origin.x +=
                 cosine * scaledCenterX + sine * scaledCenterY;
-            imageDescriptor.worldTransform.origin.y +=
+            // Authored scene Y grows upward, while centeredWallpaperY mirrors
+            // authored origins into the offscreen framebuffer. Apply the
+            // inverse authored-space displacement so the generated proxy lands
+            // on the same render-space center as direct text geometry.
+            imageDescriptor.worldTransform.origin.y -=
                 -sine * scaledCenterX + cosine * scaledCenterY;
         }
     }

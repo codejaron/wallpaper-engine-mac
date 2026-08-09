@@ -34,12 +34,64 @@ using we::scene::script::ScriptLayerDescriptor;
 using we::scene::script::ScriptLayerRegistry;
 using we::scene::script::ScriptLayerType;
 using we::scene::script::ScriptLimits;
+using we::scene::script::ScriptLocalStorage;
+using we::scene::script::ScriptLocalStorageLocation;
 using we::scene::script::ScriptRuntime;
 using we::scene::script::ScriptTextureAnimationMetadata;
 
-struct WESceneScriptTestRuntimeStorage {
-    explicit WESceneScriptTestRuntimeStorage(ScriptLimits limits = {}) : runtime(limits) {}
+class TestLocalStorage final : public ScriptLocalStorage {
+public:
+    std::optional<std::string> get(
+        std::string_view key,
+        ScriptLocalStorageLocation location
+    ) override {
+        const auto found = values.find({location, std::string(key)});
+        return found == values.end()
+            ? std::nullopt
+            : std::optional<std::string>(found->second);
+    }
 
+    void set(
+        std::string_view key,
+        std::string_view jsonValue,
+        ScriptLocalStorageLocation location
+    ) override {
+        values.insert_or_assign(
+            {location, std::string(key)},
+            std::string(jsonValue)
+        );
+    }
+
+    bool erase(
+        std::string_view key,
+        ScriptLocalStorageLocation location
+    ) override {
+        return values.erase({location, std::string(key)}) != 0;
+    }
+
+    void clear(ScriptLocalStorageLocation location) override {
+        for (auto iterator = values.begin(); iterator != values.end();) {
+            if (iterator->first.first == location) {
+                iterator = values.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
+    }
+
+private:
+    std::map<
+        std::pair<ScriptLocalStorageLocation, std::string>,
+        std::string
+    > values;
+};
+
+struct WESceneScriptTestRuntimeStorage {
+    explicit WESceneScriptTestRuntimeStorage(ScriptLimits limits = {})
+        : localStorage(std::make_shared<TestLocalStorage>()),
+          runtime(limits, localStorage) {}
+
+    std::shared_ptr<TestLocalStorage> localStorage;
     ScriptRuntime runtime;
 };
 
@@ -293,6 +345,9 @@ std::vector<ScriptLayerDescriptor> layersFromInputs(
             .id = layer.id,
             .name = layer.name,
             .type = type,
+            .parent = layer.has_parent != 0
+                ? std::optional<int>{layer.parent_id}
+                : std::nullopt,
             .properties = propertiesFromJson(layer.properties_json),
         };
         if (layer.texture_animation_json != nullptr) {

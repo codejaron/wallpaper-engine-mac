@@ -334,6 +334,111 @@ final class SceneAudioTests: XCTestCase {
         XCTAssertEqual(values.right[1], 1, accuracy: 0.0001)
     }
 
+    func testRealtimePCMBufferConsumesOnlyTheNewestCompleteWindow() throws {
+        let sampleCount = WallpaperEngineAudioSpectrumAnalyzer.sampleCount
+        let buffer = try XCTUnwrap(
+            RealtimeStereoPCMBuffer(capacityFrames: sampleCount * 4)
+        )
+        var left = (0..<(sampleCount * 2)).map(Float.init)
+        var right = left.map { -$0 }
+        let format = AudioStreamBasicDescription(
+            mSampleRate: 48_000,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagsNativeFloatPacked |
+                kAudioFormatFlagIsNonInterleaved,
+            mBytesPerPacket: 4,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 4,
+            mChannelsPerFrame: 2,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+
+        let didWrite = left.withUnsafeMutableBytes { leftBytes in
+            right.withUnsafeMutableBytes { rightBytes in
+                withAudioBufferList(maximumBuffers: 2) { buffers in
+                    buffers[0] = AudioBuffer(
+                        mNumberChannels: 1,
+                        mDataByteSize: UInt32(leftBytes.count),
+                        mData: leftBytes.baseAddress
+                    )
+                    buffers[1] = AudioBuffer(
+                        mNumberChannels: 1,
+                        mDataByteSize: UInt32(rightBytes.count),
+                        mData: rightBytes.baseAddress
+                    )
+                    return buffer.write(
+                        buffers.unsafePointer,
+                        frameCount: sampleCount * 2,
+                        format: format
+                    )
+                }
+            }
+        }
+        XCTAssertTrue(didWrite)
+
+        var latestLeft = [Float](repeating: 0, count: sampleCount)
+        var latestRight = [Float](repeating: 0, count: sampleCount)
+        XCTAssertEqual(
+            buffer.readLatest(left: &latestLeft, right: &latestRight),
+            48_000
+        )
+        XCTAssertEqual(latestLeft, Array(left.suffix(sampleCount)))
+        XCTAssertEqual(latestRight, Array(right.suffix(sampleCount)))
+        XCTAssertNil(buffer.readLatest(left: &latestLeft, right: &latestRight))
+        XCTAssertEqual(buffer.droppedFrameCount, 0)
+    }
+
+    func testRealtimePCMBufferReportsBackpressureWithoutOverwritingUnreadFrames() throws {
+        let sampleCount = WallpaperEngineAudioSpectrumAnalyzer.sampleCount
+        let buffer = try XCTUnwrap(
+            RealtimeStereoPCMBuffer(capacityFrames: sampleCount * 2)
+        )
+        var samples = [Float](repeating: 0.25, count: sampleCount * 4)
+        let format = AudioStreamBasicDescription(
+            mSampleRate: 44_100,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagsNativeFloatPacked,
+            mBytesPerPacket: 8,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 8,
+            mChannelsPerFrame: 2,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+
+        let write: (Int) -> Bool = { frameCount in
+            samples.withUnsafeMutableBytes { bytes in
+                self.withAudioBufferList(maximumBuffers: 1) { buffers in
+                    buffers[0] = AudioBuffer(
+                        mNumberChannels: 2,
+                        mDataByteSize: UInt32(frameCount * 8),
+                        mData: bytes.baseAddress
+                    )
+                    return buffer.write(
+                        buffers.unsafePointer,
+                        frameCount: frameCount,
+                        format: format
+                    )
+                }
+            }
+        }
+
+        XCTAssertTrue(write(sampleCount))
+        XCTAssertFalse(write(sampleCount * 2))
+        XCTAssertEqual(buffer.droppedFrameCount, UInt64(sampleCount * 2))
+
+        var left = [Float](repeating: 0, count: sampleCount)
+        var right = [Float](repeating: 0, count: sampleCount)
+        XCTAssertEqual(buffer.readLatest(left: &left, right: &right), 44_100)
+        XCTAssertTrue(left.allSatisfy { $0 == 0.25 })
+        XCTAssertTrue(right.allSatisfy { $0 == 0.25 })
+
+        buffer.reset()
+        XCTAssertEqual(buffer.droppedFrameCount, 0)
+        XCTAssertNil(buffer.readLatest(left: &left, right: &right))
+    }
+
     func testPlayerDecodesWaveAndPreservesLoopAndVolume() throws {
         let player = try SceneAudioPlayer(data: waveData(), loop: true, volume: 0.25)
 

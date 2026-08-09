@@ -68,7 +68,9 @@ final class SceneScriptContractTests: XCTestCase {
                                         name: ownerName,
                                         type: ownerLayerType,
                                         properties_json: ownerProperties,
-                                        texture_animation_json: animationPointer
+                                        texture_animation_json: animationPointer,
+                                        parent_id: 0,
+                                        has_parent: 0
                                     )
                                     return withUnsafePointer(to: &layer) {
                                         we_scene_script_test_create_with_layers(
@@ -479,6 +481,27 @@ final class SceneScriptContractTests: XCTestCase {
         XCTAssertEqual(second["z"] as? Double, 2)
     }
 
+    func testInitReturnReplacesInitialValueWithoutAnUpdateExport() throws {
+        let instance = try makeInstanceWithOwnerLayer(
+            source: """
+            export function init(value) {
+                return new Vec3(9, value.y + 1, value.z + 2);
+            }
+            """,
+            initialJSON: #"{"x":1,"y":2,"z":3}"#,
+            ownerPropertiesJSON:
+                #"{"origin":{"x":1,"y":2,"z":3},"visible":true}"#
+        )
+        defer { we_scene_script_test_destroy(instance) }
+
+        let result = try XCTUnwrap(
+            try evaluate(instance, runtime: 0, frameTime: 0) as? [String: Any]
+        )
+        XCTAssertEqual(result["x"] as? Double, 9)
+        XCTAssertEqual(result["y"] as? Double, 3)
+        XCTAssertEqual(result["z"] as? Double, 5)
+    }
+
     func testTopLevelAwaitRemainsSupported() throws {
         let instance = try makeInstance(
             source: """
@@ -859,12 +882,53 @@ final class SceneScriptContractTests: XCTestCase {
         )
     }
 
-    func testThisObjectIsTheSameLiveLayerViewAsThisLayer() throws {
+    func testUnchangedProjectUserPropertiesReuseTheFrameSnapshotObject() throws {
+        let instance = try makeInstance(
+            source: """
+            let previous;
+            export function update() {
+                const current = engine.userProperties;
+                const reused = previous === undefined || previous === current;
+                previous = current;
+                return reused;
+            }
+            """,
+            initialJSON: #""""#
+        )
+        defer { we_scene_script_test_destroy(instance) }
+
+        try setUserProperties(instance, json: #"{"speed":2}"#)
+        XCTAssertEqual(
+            try evaluate(instance, runtime: 0, frameTime: 0) as? Bool,
+            true
+        )
+
+        try setUserProperties(instance, json: #"{"speed":2}"#)
+        XCTAssertEqual(
+            try evaluate(instance, runtime: 1, frameTime: 0.1) as? Bool,
+            true
+        )
+
+        try setUserProperties(instance, json: #"{"speed":3}"#)
+        XCTAssertEqual(
+            try evaluate(instance, runtime: 2, frameTime: 0.1) as? Bool,
+            false
+        )
+        XCTAssertEqual(
+            try evaluate(instance, runtime: 3, frameTime: 0.1) as? Bool,
+            true
+        )
+    }
+
+    func testThisObjectAndThisLayerShareLiveStateWithoutSharingAnimationBinding() throws {
         let instance = try makeInstanceWithOwnerLayer(
             source: """
             export function update() {
-                if (thisObject !== thisLayer) throw new Error('thisObject identity mismatch');
                 thisObject.origin = new Vec3(9, 8, 7);
+                if (thisLayer.origin.x !== 9) throw new Error('layer state is not shared');
+                let rejected = false;
+                try { thisLayer.getAnimation(); } catch (_) { rejected = true; }
+                if (!rejected) throw new Error('thisLayer accepted an unbound animation');
                 return undefined;
             }
             """,
@@ -936,6 +1000,63 @@ final class SceneScriptContractTests: XCTestCase {
         defer { we_scene_script_test_destroy(instance) }
 
         XCTAssertEqual(try evaluate(instance, runtime: 0, frameTime: 0) as? Int, 7)
+    }
+
+    func testLocalStorageMatchesWallpaperEngineScopeAndValueContract() throws {
+        let runtime = try makeRuntime()
+        defer { we_scene_script_test_runtime_destroy(runtime) }
+
+        let writer = try makeInstance(
+            runtime: runtime,
+            source: """
+            export function init() {
+                if (localStorage.LOCATION_SCREEN !== 'screen' ||
+                    localStorage.LOCATION_GLOBAL !== 'global') {
+                    throw new Error('localStorage constants mismatch');
+                }
+                localStorage.set('state', { count: 3, tags: ['a', 'b'] });
+                localStorage.set(
+                    'state',
+                    { count: 9 },
+                    localStorage.LOCATION_GLOBAL
+                );
+            }
+            export function update() { return 1; }
+            """,
+            initialJSON: "0"
+        )
+        defer { we_scene_script_test_destroy(writer) }
+        XCTAssertEqual(try evaluate(writer, runtime: 0, frameTime: 0) as? Int, 1)
+
+        let reader = try makeInstance(
+            runtime: runtime,
+            source: """
+            export function update() {
+                const screen = localStorage.get('state');
+                const global = localStorage.get(
+                    'state',
+                    localStorage.LOCATION_GLOBAL
+                );
+                if (screen.count !== 3 || screen.tags[1] !== 'b' ||
+                    global.count !== 9) {
+                    throw new Error('localStorage value or scope mismatch');
+                }
+                if (!localStorage.delete('state') ||
+                    localStorage.delete('state')) {
+                    throw new Error('localStorage.delete result mismatch');
+                }
+                localStorage.clear(localStorage.LOCATION_GLOBAL);
+                if (localStorage.get('state') !== undefined ||
+                    localStorage.get('state', 'global') !== undefined) {
+                    throw new Error('localStorage clear mismatch');
+                }
+                return 2;
+            }
+            """,
+            initialJSON: "0"
+        )
+        defer { we_scene_script_test_destroy(reader) }
+        XCTAssertEqual(try evaluate(reader, runtime: 1, frameTime: 0.016) as? Int, 2)
     }
 
     func testSharedObjectAndStoredRealmFunctionSurviveAcrossRuntimeContexts() throws {
@@ -2124,6 +2245,118 @@ final class SceneScriptContractTests: XCTestCase {
         )
     }
 
+    func testLayerParentAndWorldTransformUseLiveRegistryState() throws {
+        let source = """
+        let parent;
+        let before;
+        let oldPos;
+        export function init(value) {
+            parent = thisLayer.getParent();
+            before = thisLayer.getTransformMatrix();
+            if (parent !== thisScene.getLayer(7) ||
+                thisLayer.getParent() !== parent) {
+                throw new Error("parent identity mismatch");
+            }
+            if (parent.getParent() !== undefined) {
+                throw new Error("root parent must be undefined");
+            }
+            if (!(before instanceof Mat4) || before.m.length !== 16) {
+                throw new Error("world transform is not a Mat4");
+            }
+            oldPos = before.m[13] > 200;
+            return value;
+        }
+        export function update() {
+            parent.origin = new Vec3(110, 210, 0);
+            const after = thisLayer.getTransformMatrix();
+            const copied = before.copy().translation();
+            return JSON.stringify({
+                oldPos,
+                before: [before.m[12], before.m[13], before.m[14]],
+                after: [after.m[12], after.m[13], after.m[14]],
+                copied: [copied.x, copied.y, copied.z]
+            });
+        }
+        """
+        var error: WESceneScriptTestErrorRef?
+        let instance = source.withCString { sourcePointer in
+            #""seed""#.withCString { initialPointer in
+                "{}".withCString { propertiesPointer in
+                    "Parent".withCString { parentName in
+                        #"{"origin":{"x":100,"y":200,"z":0},"scale":{"x":2,"y":3,"z":1},"angles":{"x":0,"y":0,"z":1.5707963267948966},"visible":true}"#
+                            .withCString { parentProperties in
+                                "Child".withCString { childName in
+                                    #"{"origin":{"x":10,"y":20,"z":0},"scale":{"x":1,"y":1,"z":1},"angles":{"x":0,"y":0,"z":0},"visible":true,"state":"seed"}"#
+                                        .withCString { childProperties in
+                                            "state".withCString { ownerProperty in
+                                                let layers = [
+                                                    WESceneScriptTestLayer(
+                                                        id: 7,
+                                                        name: parentName,
+                                                        type: WE_SCENE_SCRIPT_TEST_LAYER_GROUP,
+                                                        properties_json: parentProperties,
+                                                        texture_animation_json: nil,
+                                                        parent_id: 0,
+                                                        has_parent: 0
+                                                    ),
+                                                    WESceneScriptTestLayer(
+                                                        id: 8,
+                                                        name: childName,
+                                                        type: WE_SCENE_SCRIPT_TEST_LAYER_GROUP,
+                                                        properties_json: childProperties,
+                                                        texture_animation_json: nil,
+                                                        parent_id: 7,
+                                                        has_parent: 1
+                                                    ),
+                                                ]
+                                                return layers.withUnsafeBufferPointer {
+                                                    we_scene_script_test_create_with_layers(
+                                                        sourcePointer,
+                                                        initialPointer,
+                                                        propertiesPointer,
+                                                        $0.baseAddress,
+                                                        $0.count,
+                                                        8,
+                                                        ownerProperty,
+                                                        &error
+                                                    )
+                                                }
+                                            }
+                                        }
+                                }
+                            }
+                    }
+                }
+            }
+        }
+        guard let instance else {
+            defer { we_scene_script_test_error_destroy(error) }
+            throw TestFailure.create(message(error))
+        }
+        defer { we_scene_script_test_destroy(instance) }
+
+        let encoded = try XCTUnwrap(
+            try evaluate(instance, runtime: 0, frameTime: 0) as? String
+        )
+        let result = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(encoded.utf8))
+                as? [String: Any]
+        )
+        XCTAssertEqual(result["oldPos"] as? Bool, true)
+        let before = try XCTUnwrap(result["before"] as? [Double])
+        let after = try XCTUnwrap(result["after"] as? [Double])
+        let copied = try XCTUnwrap(result["copied"] as? [Double])
+        for (actual, expected) in zip(before, [40.0, 220.0, 0.0]) {
+            XCTAssertEqual(actual, expected, accuracy: 0.000_01)
+        }
+        for (actual, expected) in zip(after, [50.0, 230.0, 0.0]) {
+            XCTAssertEqual(actual, expected, accuracy: 0.000_01)
+        }
+        for (actual, expected) in zip(copied, [40.0, 220.0, 0.0]) {
+            XCTAssertEqual(actual, expected, accuracy: 0.000_01)
+        }
+    }
+
     func testLayerRegistryUsesStableRealViewsAndPreservesUndefinedWriteback() throws {
         let source = """
         const cachedOwner = thisScene.getLayer(7);
@@ -2156,14 +2389,18 @@ final class SceneScriptContractTests: XCTestCase {
                                                         name: ownerName,
                                                         type: WE_SCENE_SCRIPT_TEST_LAYER_IMAGE,
                                                         properties_json: ownerProperties,
-                                                        texture_animation_json: nil
+                                                        texture_animation_json: nil,
+                                                        parent_id: 0,
+                                                        has_parent: 0
                                                     ),
                                                     WESceneScriptTestLayer(
                                                         id: 8,
                                                         name: targetName,
                                                         type: WE_SCENE_SCRIPT_TEST_LAYER_IMAGE,
                                                         properties_json: targetProperties,
-                                                        texture_animation_json: nil
+                                                        texture_animation_json: nil,
+                                                        parent_id: 0,
+                                                        has_parent: 0
                                                     ),
                                                 ]
                                                 return layers.withUnsafeBufferPointer {
@@ -2392,14 +2629,18 @@ final class SceneScriptContractTests: XCTestCase {
                                                 name: soundName,
                                                 type: WE_SCENE_SCRIPT_TEST_LAYER_SOUND,
                                                 properties_json: soundProperties,
-                                                texture_animation_json: nil
+                                                texture_animation_json: nil,
+                                                parent_id: 0,
+                                                has_parent: 0
                                             ),
                                             WESceneScriptTestLayer(
                                                 id: 8,
                                                 name: targetName,
                                                 type: WE_SCENE_SCRIPT_TEST_LAYER_IMAGE,
                                                 properties_json: targetProperties,
-                                                texture_animation_json: nil
+                                                texture_animation_json: nil,
+                                                parent_id: 0,
+                                                has_parent: 0
                                             ),
                                         ]
                                         return layers.withUnsafeMutableBufferPointer {
@@ -2716,6 +2957,47 @@ final class SceneScriptContractTests: XCTestCase {
         XCTAssertEqual(
             try evaluateWithEvents(instance, runtime: 4, frameTime: 1.0 / 60.0, mediaSnapshotJSON: unavailable) as? String,
             "status:true|properties|playback|timeline:1.25|thumbnail|timeline:2.5|status:false"
+        )
+    }
+
+    func testMediaTimelineEventWaitsForAUsableDuration() throws {
+        let instance = try makeInstance(
+            source: """
+            let timelineCalls = 0;
+            export function mediaTimelineChanged(event) {
+                timelineCalls += 1;
+                if (!(event.duration > 0)) throw new Error('invalid time base');
+            }
+            export function update(value) {
+                return value + timelineCalls;
+            }
+            """,
+            initialJSON: "0"
+        )
+        defer { we_scene_script_test_destroy(instance) }
+
+        let missingTimeline = #"{"statusRevision":1,"metadataRevision":1,"playbackRevision":1,"timelineRevision":1,"thumbnailRevision":1,"available":true,"playbackState":1,"position":0,"duration":0}"#
+        XCTAssertEqual(
+            try evaluateWithEvents(
+                instance,
+                runtime: 1,
+                frameTime: 1.0 / 60.0,
+                mediaSnapshotJSON: missingTimeline
+            ) as? Double,
+            0,
+            "Unavailable timeline data must not be exposed as a zero-duration event"
+        )
+
+        let usableTimeline = #"{"statusRevision":1,"metadataRevision":1,"playbackRevision":1,"timelineRevision":2,"thumbnailRevision":1,"available":true,"playbackState":1,"position":12,"duration":180}"#
+        XCTAssertEqual(
+            try evaluateWithEvents(
+                instance,
+                runtime: 2,
+                frameTime: 1.0 / 60.0,
+                mediaSnapshotJSON: usableTimeline
+            ) as? Double,
+            1,
+            "The first usable timeline must still be delivered after an unavailable one"
         )
     }
 }

@@ -677,6 +677,10 @@ ObjectTransform combine(
 }  // namespace
 
 struct SceneGraph::ScriptState final {
+    explicit ScriptState(
+        std::shared_ptr<script::ScriptLocalStorage> localStorage
+    ) : runtime({}, std::move(localStorage)) {}
+
     struct Instance final {
         std::unique_ptr<script::ScriptInstance> script;
         std::optional<RuntimeValue> connectedUserValue;
@@ -700,8 +704,13 @@ struct SceneGraph::EvaluationFrame::Impl final {
             !std::isfinite(inputs.frameTimeSeconds) || inputs.frameTimeSeconds < 0 ||
             (inputs.timeOfDay &&
                 (!std::isfinite(*inputs.timeOfDay) || *inputs.timeOfDay < 0 || *inputs.timeOfDay > 1)) ||
-          (inputs.audioSpectrum &&
+            (inputs.audioSpectrum &&
                 !audioSpectrumIsValid(*inputs.audioSpectrum)) ||
+            (inputs.canvasSize &&
+                (!std::isfinite((*inputs.canvasSize)[0]) ||
+                 !std::isfinite((*inputs.canvasSize)[1]) ||
+                 (*inputs.canvasSize)[0] <= 0.0 ||
+                 (*inputs.canvasSize)[1] <= 0.0)) ||
             !std::isfinite(inputs.pointerX) || !std::isfinite(inputs.pointerY)) {
             graphError(
                 *graph.model_, SceneModelErrorCode::invalidValue, "/frameInputs", {},
@@ -722,12 +731,137 @@ struct SceneGraph::EvaluationFrame::Impl final {
         graph.scriptState_->layerRegistry->setRuntimeSeconds(
             inputs.runtimeSeconds
         );
+        graph.scriptState_->propertyObjectRegistry->setRuntimeSeconds(
+            inputs.runtimeSeconds
+        );
         graph.scriptState_->layerRegistry->setBaseLayers(
             sceneLayerDescriptors(*graph.model_, properties.values)
         );
         graph.scriptState_->layerRegistry->setSoundRuntimeStates(
             inputs.soundRuntimeStates
         );
+    }
+
+    [[nodiscard]] script::ScriptFrameInputs scriptInputs() const {
+        return {
+            .runtimeSeconds = inputs.runtimeSeconds,
+            .frameTimeSeconds = inputs.frameTimeSeconds,
+            .timeOfDay = inputs.timeOfDay,
+            .isScreensaver = inputs.isScreensaver,
+            .audioSpectrum = inputs.audioSpectrum,
+            .canvasSize = inputs.canvasSize,
+            .sceneSnapshot = inputs.sceneSnapshot,
+            .userProperties = userProperties,
+            .pointerX = inputs.pointerX,
+            .pointerY = inputs.pointerY,
+            .cursorWorldPosition = inputs.cursorWorldPosition,
+            .pointerLeftDown = inputs.pointerLeftDown,
+            .cursorEvents = inputs.cursorEvents,
+            .mediaSnapshot = inputs.mediaSnapshot,
+        };
+    }
+
+    void resolveOwner(
+        const std::string& pointer,
+        script::ScriptPropertyOwner& owner
+    ) const {
+        if (owner.type != script::ScriptPropertyOwnerType::none) return;
+        if (const auto layerOwner = layerScriptOwner(*graph.model_, pointer)) {
+            owner.layerId = layerOwner->id;
+            owner.type = script::ScriptPropertyOwnerType::layer;
+            owner.property = layerOwner->property;
+        }
+    }
+
+    [[nodiscard]] ScriptState::Instance& prepareInstance(
+        const DynamicValue& dynamic,
+        const std::string& pointer,
+        const EvaluatedValue& connected,
+        std::map<std::string, RuntimeValue> scriptProperties,
+        const script::ScriptPropertyOwner& owner
+    ) {
+        auto& instance = graph.scriptState_->instances[pointer];
+        if (!instance.script) {
+            instance.script = graph.scriptState_->runtime.createInstance(
+                *dynamic.script,
+                connected.value,
+                std::move(scriptProperties),
+                dynamic.user ? dynamic.user->condition : std::nullopt,
+                graph.scriptState_->layerRegistry,
+                graph.scriptState_->propertyObjectRegistry,
+                owner
+            );
+            if (dynamic.user) {
+                instance.connectedUserValue = connected.value;
+            }
+        } else {
+            if (dynamic.user &&
+                (!instance.connectedUserValue ||
+                 *instance.connectedUserValue != connected.value)) {
+                instance.script->updateCurrent(connected.value);
+                instance.connectedUserValue = connected.value;
+            }
+            instance.script->updateProperties(std::move(scriptProperties));
+        }
+        return instance;
+    }
+
+    void initialize(
+        const DynamicValue& dynamic,
+        const std::string& pointer,
+        script::ScriptPropertyOwner owner
+    ) {
+        if (!dynamic.script || values.contains(pointer)) return;
+        resolveOwner(pointer, owner);
+        if (!evaluating.emplace(pointer).second) {
+            graphError(
+                *graph.model_, SceneModelErrorCode::referenceCycle, pointer, {},
+                "Dynamic script properties contain a recursive initialization cycle"
+            );
+        }
+        struct EraseGuard final {
+            std::set<std::string>& set;
+            const std::string& key;
+            ~EraseGuard() { set.erase(key); }
+        } guard{evaluating, pointer};
+
+        const EvaluatedValue connected = evaluateDynamicValue(
+            *graph.model_, dynamic, properties.values, pointer
+        );
+        std::map<std::string, RuntimeValue> scriptProperties;
+        for (const auto& [name, child] : dynamic.scriptProperties) {
+            script::ScriptPropertyOwner childOwner;
+            childOwner.layerId = owner.layerId;
+            scriptProperties.emplace(
+                name,
+                evaluate(
+                    child,
+                    pointer + "/scriptproperties/" + name,
+                    childOwner
+                ).value
+            );
+        }
+        auto& instance = prepareInstance(
+            dynamic,
+            pointer,
+            connected,
+            std::move(scriptProperties),
+            owner
+        );
+        try {
+            instance.script->initialize(scriptInputs());
+            if (owner.layerId && instance.script->hasCursorCallbacks()) {
+                cursorInteractiveLayerIds.insert(*owner.layerId);
+            }
+        } catch (const script::ScriptError& error) {
+            if (error.code() == script::ScriptErrorCode::audioInputUnavailable) {
+                return;
+            }
+            graphError(
+                *graph.model_, SceneModelErrorCode::invalidValue, pointer, {},
+                std::string("Dynamic script failed: ") + error.what()
+            );
+        }
     }
 
     EvaluatedValue evaluate(
@@ -738,13 +872,7 @@ struct SceneGraph::EvaluationFrame::Impl final {
         const EvaluatedValue connected = evaluateDynamicValue(
             *graph.model_, dynamic, properties.values, pointer
         );
-        if (owner.type == script::ScriptPropertyOwnerType::none) {
-            if (const auto layerOwner = layerScriptOwner(*graph.model_, pointer)) {
-                owner.layerId = layerOwner->id;
-                owner.type = script::ScriptPropertyOwnerType::layer;
-                owner.property = layerOwner->property;
-            }
-        }
+        resolveOwner(pointer, owner);
         EvaluatedValue connectedWithOverlay = connected;
         const auto readOwner = [&]() -> std::optional<RuntimeValue> {
             if (owner.type == script::ScriptPropertyOwnerType::layer &&
@@ -803,48 +931,18 @@ struct SceneGraph::EvaluationFrame::Impl final {
             );
         }
 
-        auto& instance = graph.scriptState_->instances[pointer];
+        auto& instance = prepareInstance(
+            dynamic,
+            pointer,
+            connected,
+            std::move(scriptProperties),
+            owner
+        );
         auto& stats = scriptStats[pointer];
         stats.jsonPointer = pointer;
         ++stats.executionCount;
         try {
-            if (!instance.script) {
-                instance.script = graph.scriptState_->runtime.createInstance(
-                    *dynamic.script,
-                    connected.value,
-                    scriptProperties,
-                    dynamic.user ? dynamic.user->condition : std::nullopt,
-                    graph.scriptState_->layerRegistry,
-                    graph.scriptState_->propertyObjectRegistry,
-                    owner
-                );
-                if (dynamic.user) {
-                    instance.connectedUserValue = connected.value;
-                }
-            } else {
-                if (dynamic.user &&
-                    (!instance.connectedUserValue ||
-                     *instance.connectedUserValue != connected.value)) {
-                    instance.script->updateCurrent(connected.value);
-                    instance.connectedUserValue = connected.value;
-                }
-                instance.script->updateProperties(std::move(scriptProperties));
-            }
-            RuntimeValue evaluated = instance.script->evaluate({
-                .runtimeSeconds = inputs.runtimeSeconds,
-                .frameTimeSeconds = inputs.frameTimeSeconds,
-                .timeOfDay = inputs.timeOfDay,
-                .isScreensaver = inputs.isScreensaver,
-                .audioSpectrum = inputs.audioSpectrum,
-                .sceneSnapshot = inputs.sceneSnapshot,
-                .userProperties = userProperties,
-                .pointerX = inputs.pointerX,
-                .pointerY = inputs.pointerY,
-                .cursorWorldPosition = inputs.cursorWorldPosition,
-                .pointerLeftDown = inputs.pointerLeftDown,
-                .cursorEvents = inputs.cursorEvents,
-                .mediaSnapshot = inputs.mediaSnapshot,
-            });
+            RuntimeValue evaluated = instance.script->evaluate(scriptInputs());
             if (owner.layerId && instance.script->hasCursorCallbacks()) {
                 cursorInteractiveLayerIds.insert(*owner.layerId);
             }
@@ -971,13 +1069,20 @@ const SceneGraphNodeSnapshot* SceneGraphSnapshot::node(int id) const noexcept {
 }
 
 std::shared_ptr<SceneGraph> SceneGraph::create(
-    std::shared_ptr<SceneModel> model
+    std::shared_ptr<SceneModel> model,
+    std::shared_ptr<script::ScriptLocalStorage> localStorage
 ) {
-    return std::shared_ptr<SceneGraph>(new SceneGraph(std::move(model)));
+    return std::shared_ptr<SceneGraph>(new SceneGraph(
+        std::move(model),
+        std::move(localStorage)
+    ));
 }
 
-SceneGraph::SceneGraph(std::shared_ptr<SceneModel> model)
-    : model_(std::move(model)), scriptState_(std::make_unique<ScriptState>()) {
+SceneGraph::SceneGraph(
+    std::shared_ptr<SceneModel> model,
+    std::shared_ptr<script::ScriptLocalStorage> localStorage
+) : model_(std::move(model)),
+    scriptState_(std::make_unique<ScriptState>(std::move(localStorage))) {
     if (!model_) {
         throw SceneModelError(
             SceneModelErrorCode::invalidValue,
@@ -1118,12 +1223,27 @@ EvaluatedValue SceneGraph::EvaluationFrame::evaluate(
 ) {
     return impl_->evaluate(dynamic, pointer, std::move(owner));
 }
+void SceneGraph::EvaluationFrame::initialize(
+    const DynamicValue& dynamic,
+    std::string pointer,
+    script::ScriptPropertyOwner owner
+) {
+    impl_->initialize(dynamic, pointer, std::move(owner));
+}
 void SceneGraph::EvaluationFrame::registerScriptPropertyObject(
     script::ScriptPropertyObjectDescriptor descriptor
 ) {
     impl_->graph.scriptState_->propertyObjectRegistry->setBaseObject(
         std::move(descriptor)
     );
+}
+bool SceneGraph::EvaluationFrame::scriptPropertyObjectsCurrent() const {
+    return impl_->graph.scriptState_->propertyObjectRegistry
+        ->baseObjectsCurrent(impl_->properties.revision);
+}
+void SceneGraph::EvaluationFrame::commitScriptPropertyObjects() {
+    impl_->graph.scriptState_->propertyObjectRegistry
+        ->commitBaseObjectsRevision(impl_->properties.revision);
 }
 std::uint64_t SceneGraph::EvaluationFrame::modelRevision() const noexcept {
     return impl_->properties.revision;

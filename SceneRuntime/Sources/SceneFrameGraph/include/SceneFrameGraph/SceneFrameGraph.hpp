@@ -187,6 +187,13 @@ struct FrameTextureAnimationOverride final {
     std::size_t frame = 0;
 };
 
+struct FramePuppetAnimationLayer final {
+    int animationId = 0;
+    double rate = 1.0;
+    double blend = 1.0;
+    bool additive = false;
+};
+
 struct FrameImageDescriptor {
     std::size_t objectIndex = 0;
     int objectId = 0;
@@ -207,6 +214,7 @@ struct FrameImageDescriptor {
     FrameResourceRef compositeA;
     FrameResourceRef compositeB;
     std::shared_ptr<const PuppetMesh> puppetMesh;
+    std::vector<FramePuppetAnimationLayer> puppetAnimationLayers;
     EvaluatedValue alpha;
     EvaluatedValue color;
     EvaluatedValue brightness;

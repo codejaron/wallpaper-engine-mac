@@ -38,6 +38,36 @@ private:
     ScriptErrorCode code_;
 };
 
+enum class ScriptLocalStorageLocation : std::int32_t {
+    screen = 0,
+    global = 1,
+};
+
+// Values cross the host boundary as JSON so localStorage can retain arbitrary
+// SceneScript arrays and objects without collapsing them into DynamicValue's
+// scalar/vector-only RuntimeValue contract. Implementations own persistence,
+// wallpaper/screen namespacing, synchronization, and the official 100 KiB
+// quota.
+class ScriptLocalStorage {
+public:
+    virtual ~ScriptLocalStorage() = default;
+
+    [[nodiscard]] virtual std::optional<std::string> get(
+        std::string_view key,
+        ScriptLocalStorageLocation location
+    ) = 0;
+    virtual void set(
+        std::string_view key,
+        std::string_view jsonValue,
+        ScriptLocalStorageLocation location
+    ) = 0;
+    [[nodiscard]] virtual bool erase(
+        std::string_view key,
+        ScriptLocalStorageLocation location
+    ) = 0;
+    virtual void clear(ScriptLocalStorageLocation location) = 0;
+};
+
 enum class ScriptCursorEventType : std::int32_t {
     enter = 0,
     leave = 1,
@@ -140,6 +170,10 @@ struct ScriptFrameInputs {
     // buffers fail with audioInputUnavailable instead of seeing zero-filled
     // data when the host capture path is not connected.
     std::optional<AudioSpectrumFrame> audioSpectrum;
+    // Logical authored scene dimensions. SceneFrameGraph resolves these from
+    // the same projection used to evaluate the frame; direct SceneGraph users
+    // must supply them explicitly if a script reads engine.canvasSize.
+    std::optional<std::array<double, 2>> canvasSize;
     // Absent means the host has not connected scene-level state. Getters on
     // `thisScene` fail explicitly in that case; they never expose fabricated
     // values that could silently drive a wallpaper in the wrong state.
@@ -276,6 +310,7 @@ struct ScriptPropertyObjectDescriptor final {
     ScriptPropertyObjectType type = ScriptPropertyObjectType::material;
     std::string name;
     std::map<std::string, RuntimeValue> properties;
+    std::map<std::string, TimelineAnimation> propertyAnimations;
     std::vector<std::string> materialIds;
 };
 
@@ -309,6 +344,11 @@ public:
     // Updates host-owned values for one stable effect/material instance while
     // retaining script overlays for properties that still exist.
     void setBaseObject(ScriptPropertyObjectDescriptor object);
+    [[nodiscard]] bool baseObjectsCurrent(
+        std::uint64_t modelRevision
+    ) const;
+    void commitBaseObjectsRevision(std::uint64_t modelRevision);
+    void setRuntimeSeconds(double runtimeSeconds);
     [[nodiscard]] std::optional<ScriptPropertyObjectDescriptor> find(
         std::string_view id
     ) const;
@@ -325,6 +365,32 @@ public:
         std::string_view id,
         std::string_view property,
         RuntimeValue value
+    );
+    [[nodiscard]] ScriptTimelineAnimationSnapshot timelineAnimationSnapshot(
+        std::string_view id,
+        std::string_view name
+    );
+    void setTimelineAnimationRate(
+        std::string_view id,
+        std::string_view name,
+        double rate
+    );
+    void playTimelineAnimation(
+        std::string_view id,
+        std::string_view name
+    );
+    void pauseTimelineAnimation(
+        std::string_view id,
+        std::string_view name
+    );
+    void stopTimelineAnimation(
+        std::string_view id,
+        std::string_view name
+    );
+    void setTimelineAnimationFrame(
+        std::string_view id,
+        std::string_view name,
+        double frame
     );
 
 private:
@@ -359,6 +425,11 @@ public:
         int id,
         std::string_view property
     ) const;
+    // Resolves the current world transform from the same live property
+    // overlays exposed through ILayer. The returned matrix is column-major,
+    // matching SceneScript Mat4.m and Wallpaper Engine's translation slots
+    // m[12], m[13], and m[14].
+    [[nodiscard]] std::array<double, 16> worldTransformMatrix(int id) const;
     [[nodiscard]] std::optional<Value> initialLayerConfig(int id) const;
     [[nodiscard]] std::optional<ScriptLayerDescriptor> initialLayerDescriptor(
         int id
@@ -437,7 +508,10 @@ class ScriptInstance;
 
 class ScriptRuntime final {
 public:
-    explicit ScriptRuntime(ScriptLimits limits = {});
+    explicit ScriptRuntime(
+        ScriptLimits limits = {},
+        std::shared_ptr<ScriptLocalStorage> localStorage = nullptr
+    );
     ~ScriptRuntime();
 
     ScriptRuntime(const ScriptRuntime&) = delete;
@@ -477,6 +551,10 @@ public:
     // events and changed media snapshots are delivered synchronously after
     // init and before the frame's update callback.
     [[nodiscard]] RuntimeValue evaluate(const ScriptFrameInputs& inputs);
+    // Runs module evaluation and init without dispatching frame events or
+    // update. FrameGraph uses this to establish cross-property shared state
+    // before any DynamicValue update callbacks are evaluated.
+    void initialize(const ScriptFrameInputs& inputs);
     [[nodiscard]] RuntimeValue currentValue() const;
     // True after module initialization finds at least one cursor callback
     // export. Module exports are immutable for the instance lifetime.

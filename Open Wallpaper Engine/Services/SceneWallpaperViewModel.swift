@@ -1,5 +1,6 @@
 import Foundation
 import OpenGL
+import QuartzCore
 import SceneAudio
 import SceneRuntimeBridge
 
@@ -49,6 +50,7 @@ final class SceneRuntimeSession {
     init(
         wallpaper: WEWallpaper,
         assetsDirectory: String?,
+        localStorageScreenIdentity: String,
         cglContext: CGLContextObj,
         isScreensaver: Bool
     ) throws {
@@ -91,7 +93,19 @@ final class SceneRuntimeSession {
             requiresAudioSpectrum = projectInfo.supports_audio_processing == 1
             properties = try loadProperties(from: model)
 
-            graph = we_scene_model_graph_create(model, &error)
+            graph = wallpaper.scenePropertyIdentity.withCString { wallpaperIdentity in
+                localStorageScreenIdentity.withCString { screenIdentity in
+                    var configuration = WESceneLocalStorageConfiguration(
+                        wallpaper_identity: wallpaperIdentity,
+                        screen_identity: screenIdentity
+                    )
+                    return we_scene_model_graph_create_with_local_storage(
+                        model,
+                        &configuration,
+                        &error
+                    )
+                }
+            }
             guard let graph else { throw bridgeError("Creating Scene graph", error) }
 
             frameGraph = we_scene_graph_frame_graph_create(graph, &error)
@@ -206,6 +220,7 @@ final class SceneRuntimeSession {
             drawableHeight: drawableHeight,
             quality: renderQuality
         )
+        let bridgeRenderStarted = CACurrentMediaTime()
         if var viewport = try presentation.viewport(
             drawableWidth: drawableWidth,
             drawableHeight: drawableHeight
@@ -266,17 +281,38 @@ final class SceneRuntimeSession {
             invalidateExecutorIssueSnapshot()
             throw bridgeError("Rendering Scene frame", error)
         }
+        let bridgeRenderMilliseconds =
+            (CACurrentMediaTime() - bridgeRenderStarted) * 1_000
+        SceneFrameTrace.log(
+            "session.bridge runtime=\(String(format: "%.6f", runtimeSeconds)) "
+                + "delta=\(String(format: "%.6f", frameTimeSeconds)) "
+                + "ms=\(String(format: "%.3f", bridgeRenderMilliseconds))"
+        )
         reportExecutorIssues(from: executor)
+        let presentStarted = CACurrentMediaTime()
         try present(
             drawableWidth: drawableWidth,
             drawableHeight: drawableHeight,
             presentation: presentation
         )
+        let presentMilliseconds =
+            (CACurrentMediaTime() - presentStarted) * 1_000
+        SceneFrameTrace.log(
+            "session.present runtime=\(String(format: "%.6f", runtimeSeconds)) "
+                + "ms=\(String(format: "%.3f", presentMilliseconds))"
+        )
+        let audioStarted = CACurrentMediaTime()
         synchronizeAudio(
             from: executor,
             masterVolume: masterVolume,
             audioOutputEnabled: audioOutputEnabled,
             isAudibleOwner: isAudibleOwner
+        )
+        let audioMilliseconds =
+            (CACurrentMediaTime() - audioStarted) * 1_000
+        SceneFrameTrace.log(
+            "session.audio runtime=\(String(format: "%.6f", runtimeSeconds)) "
+                + "ms=\(String(format: "%.3f", audioMilliseconds))"
         )
     }
 

@@ -30,6 +30,10 @@ struct SceneFrameInputs final {
     std::optional<double> timeOfDay;
     std::optional<bool> isScreensaver;
     std::optional<AudioSpectrumFrame> audioSpectrum;
+    // Filled by SceneFrameGraph from its authoritative logical projection.
+    // Standalone SceneGraph callers may supply it when their scripts consume
+    // engine.canvasSize; the graph never invents a drawable-size fallback.
+    std::optional<std::array<double, 2>> canvasSize;
     // Optional host override. When absent, EvaluationFrame derives the
     // snapshot from the model's coherent DynamicValue state before invoking
     // scripts. Keeping this on the graph input also lets an embedding host
@@ -127,7 +131,8 @@ struct SceneGraphSnapshot {
 class SceneGraph final {
 public:
     [[nodiscard]] static std::shared_ptr<SceneGraph> create(
-        std::shared_ptr<SceneModel> model
+        std::shared_ptr<SceneModel> model,
+        std::shared_ptr<script::ScriptLocalStorage> localStorage = nullptr
     );
 
     SceneGraph(const SceneGraph&) = delete;
@@ -143,7 +148,10 @@ public:
     [[nodiscard]] std::shared_ptr<const SceneModel> model() const noexcept;
 
 private:
-    explicit SceneGraph(std::shared_ptr<SceneModel> model);
+    explicit SceneGraph(
+        std::shared_ptr<SceneModel> model,
+        std::shared_ptr<script::ScriptLocalStorage> localStorage
+    );
 
     std::shared_ptr<SceneModel> model_;
     std::map<int, std::size_t> objectIndices_;
@@ -172,9 +180,16 @@ public:
         std::string pointer,
         script::ScriptPropertyOwner owner = {}
     );
+    void initialize(
+        const DynamicValue& dynamic,
+        std::string pointer,
+        script::ScriptPropertyOwner owner = {}
+    );
     void registerScriptPropertyObject(
         script::ScriptPropertyObjectDescriptor descriptor
     );
+    [[nodiscard]] bool scriptPropertyObjectsCurrent() const;
+    void commitScriptPropertyObjects();
     [[nodiscard]] std::uint64_t modelRevision() const noexcept;
     [[nodiscard]] const std::map<std::string, Value>& propertyValues() const noexcept;
     [[nodiscard]] const std::map<std::string, EvaluatedValue>&

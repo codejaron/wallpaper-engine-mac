@@ -7,16 +7,34 @@
 
 namespace we::scene::gl {
 
-// Copies a logical presentation slice from Wallpaper Engine's top-left scene
-// framebuffer into an ordinary OpenGL drawable. Source Y is both remapped and
-// reversed here so vertically sliced displays select the correct scene region.
-void blitWallpaperEngineOutput(
-    const FramebufferResource& source,
-    GLuint destinationFramebuffer,
-    GLenum destinationBuffer,
-    const PresentationSlice& slice,
-    GLenum filter
-);
+// Draws a logical presentation slice from Wallpaper Engine's top-left scene
+// texture into an ordinary OpenGL drawable. A textured draw keeps the scene
+// and presentation work in one driver command stream. Apple's OpenGL-to-Metal
+// bridge otherwise turns glBlitFramebuffer into a synchronous command-buffer
+// submission on every frame.
+class PresentationRenderer final {
+public:
+    void draw(
+        Device::Session& session,
+        const FramebufferResource& source,
+        GLuint destinationFramebuffer,
+        GLenum destinationBuffer,
+        std::uint32_t destinationWidth,
+        std::uint32_t destinationHeight,
+        const PresentationSlice& slice,
+        GLenum filter
+    );
+    void release(Device::Session& session) noexcept;
+
+private:
+    void initialize(Device::Session& session);
+
+    GLuint program_ = 0;
+    GLuint vertexArray_ = 0;
+    GLint sourceTextureLocation_ = -1;
+    GLint sourceRectangleLocation_ = -1;
+    GLint destinationRectangleLocation_ = -1;
+};
 
 }  // namespace we::scene::gl
 

@@ -245,6 +245,42 @@ final class ParticleExecutorTests: XCTestCase {
         )
     }
 
+    func testAnimatedAtlasRenderVarUsesAuthoredFrameAspectRatio() throws {
+        let pixels = Array(
+            repeating: [UInt8](arrayLiteral: 255, 255, 255, 255),
+            count: 4
+        ).flatMap { $0 }
+        let atlas = makeAnimatedParticleTexture(
+            images: [pixels],
+            frames: [
+                (0, 0.5, 0, 0, 2, 0, 0, 1),
+                (0, 0.5, 0, 1, 2, 0, 0, 1),
+            ],
+            gifWidth: 2,
+            gifHeight: 1
+        )
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleTextureData: atlas,
+                particleVertexShaderSource: minimalParticleVertexShader,
+                particleFragmentShaderSource: particleAspectFragmentShader
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 1.0 / 120.0)
+        let rendered = try readPixels(loaded.executor)
+        XCTAssertTrue(
+            stride(from: 0, to: rendered.count, by: 4).contains {
+                rendered[$0] == 0 && rendered[$0 + 1] == 255
+            },
+            "Animated particle geometry must use the authored frame height/width, not the padded atlas ratio"
+        )
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
     func testParticleBindsLinuxCommonAndInverseModelUniforms() throws {
         let fixture = try makeFixture(
             includeText: false,
@@ -644,6 +680,24 @@ final class ParticleExecutorTests: XCTestCase {
         try assertNoExecutionIssues(loaded.executor)
     }
 
+    func testSpriteParticleWithBackfaceCullingRendersFrontFacingQuad() throws {
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleCullMode: "normal"
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, time: 1, delta: 1.0 / 120.0)
+        XCTAssertFalse(
+            greenColumns(try readPixels(loaded.executor), width: 16).isEmpty,
+            "Sprite particles must remain front-facing when their material enables backface culling"
+        )
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
     func testRopeRendererBuildsThickGeometryAndUsesRopeShader() throws {
         let loaded = try loadPipeline(
             fixture: makeFixture(
@@ -691,12 +745,154 @@ final class ParticleExecutorTests: XCTestCase {
         )
         defer { destroy(loaded) }
 
-        try render(loaded.executor, time: 1, delta: 0.1)
+        try render(loaded.executor, time: 0.1, delta: 0.1)
+        try render(loaded.executor, time: 0.2, delta: 0.1)
         let pixels = try readPixels(loaded.executor)
         XCTAssertTrue(
             stride(from: 0, to: pixels.count, by: 4).contains {
                 pixels[$0] != 0 || pixels[$0 + 1] != 0 || pixels[$0 + 2] != 0
             }
+        )
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
+    func testRopeTrailKeepsIndependentHistoryPerParticle() throws {
+        let fixedEmitter: (String) -> [String: Any] = { origin in
+            [
+                "directions": "1 1 0",
+                "distancemax": 0,
+                "distancemin": 0,
+                "instantaneous": 1,
+                "name": "boxrandom",
+                "origin": origin,
+                "rate": 0,
+            ]
+        }
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleRendererName: "ropetrail",
+                particleRendererParameters: [
+                    "length": 0.4,
+                    "segments": 4,
+                    "subdivision": 1,
+                ],
+                particleMaxCount: 2,
+                particleOrigin: "8 2 0",
+                particleVelocity: "0 10 0",
+                particleEmitters: [
+                    fixedEmitter("-4 0 0"),
+                    fixedEmitter("4 0 0"),
+                ]
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        for frame in 1 ... 4 {
+            try render(
+                loaded.executor,
+                time: Double(frame) * 0.1,
+                delta: 0.1
+            )
+        }
+        let columns = greenColumns(
+            try readPixels(loaded.executor),
+            width: 16
+        )
+        XCTAssertFalse(columns.isEmpty)
+        XCTAssertFalse(
+            columns.contains(8),
+            "Rope trails must not connect unrelated particles across their spawn gap"
+        )
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
+    func testRopeTrailPresentsAccumulatorBetweenFixedSimulationSteps() throws {
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleRendererName: "ropetrail",
+                particleRendererParameters: [
+                    "length": 0.4,
+                    "segments": 4,
+                    "subdivision": 1,
+                ],
+                particleMaxCount: 1,
+                particleOrigin: "4 4 0",
+                particleVelocity: "240 0 0"
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        let fixedStep = 1.0 / 120.0
+        try render(loaded.executor, time: fixedStep, delta: fixedStep)
+        try render(loaded.executor, time: fixedStep * 2, delta: fixedStep)
+        let fixedBoundary = try readPixels(loaded.executor)
+
+        try render(
+            loaded.executor,
+            time: fixedStep * 2.5,
+            delta: fixedStep * 0.5
+        )
+        let betweenSteps = try readPixels(loaded.executor)
+
+        XCTAssertNotEqual(
+            betweenSteps,
+            fixedBoundary,
+            "Rope trails must use the presentation accumulator instead of freezing until the next fixed simulation step"
+        )
+        try assertNoExecutionIssues(loaded.executor)
+    }
+
+    func testRopeTrailSegmentCountDoesNotThrottleHistoryFrameRate() throws {
+        let loaded = try loadPipeline(
+            fixture: makeFixture(
+                includeText: false,
+                particleRendererName: "ropetrail",
+                particleRendererParameters: [
+                    "length": 0.4,
+                    "segments": 4,
+                    "subdivision": 1,
+                ],
+                particleMaxCount: 1,
+                particleOrigin: "10 8 0",
+                particleVelocity: "120 0 0",
+                projectionWidth: 128,
+                projectionHeight: 16
+            ),
+            context: nil
+        )
+        defer { destroy(loaded) }
+
+        let frameDuration = 1.0 / 60.0
+        for frame in 1 ... 30 {
+            try render(
+                loaded.executor,
+                time: Double(frame) * frameDuration,
+                delta: frameDuration
+            )
+        }
+
+        var trailStarts: [Int] = []
+        for frame in 31 ... 35 {
+            try render(
+                loaded.executor,
+                time: Double(frame) * frameDuration,
+                delta: frameDuration
+            )
+            let columns = greenColumns(
+                try readPixels(loaded.executor),
+                width: 128
+            )
+            trailStarts.append(try XCTUnwrap(columns.min()))
+        }
+
+        XCTAssertEqual(
+            Set(trailStarts).count,
+            trailStarts.count,
+            "Authored Rope Trail segments must control geometry density, not reduce history motion to length / segments"
         )
         try assertNoExecutionIssues(loaded.executor)
     }
@@ -943,12 +1139,20 @@ final class ParticleExecutorTests: XCTestCase {
         XCTAssertEqual(lifetime, 0.05, accuracy: 0.0001)
     }
 
-    func testParticleSpritesheetSequenceDurationAndRandomFrameAreStable() throws {
-        let sequenceFixture = try makeFixture(
+    func testParticleSpritesheetSequenceUsesParticleLifetimeAndRandomFrameIsStable() throws {
+        let shortDurationFixture = try makeFixture(
             includeText: false,
             animationMode: "sequence",
             sequenceMultiplier: 2,
-            spritesheet: true
+            spritesheet: true,
+            spritesheetDuration: 0.25
+        )
+        let longDurationFixture = try makeFixture(
+            includeText: false,
+            animationMode: "sequence",
+            sequenceMultiplier: 2,
+            spritesheet: true,
+            spritesheetDuration: 9
         )
         let randomFixture = try makeFixture(
             includeText: false,
@@ -961,25 +1165,33 @@ final class ParticleExecutorTests: XCTestCase {
         defer {
             CGLSetCurrentContext(original)
             CGLDestroyContext(context)
-            try? FileManager.default.removeItem(at: sequenceFixture.root)
+            try? FileManager.default.removeItem(at: shortDurationFixture.root)
+            try? FileManager.default.removeItem(at: longDurationFixture.root)
             try? FileManager.default.removeItem(at: randomFixture.root)
         }
 
-        let sequence = try loadPipeline(fixture: sequenceFixture, context: context)
-        defer { destroy(sequence) }
-        try render(sequence.executor, time: 1, delta: 0.25)
-        var sequenceObjects = WESceneGLTestParticleObjects(
-            vertex_array: 0,
-            vertex_buffer: 0,
-            element_buffer: 0
-        )
-        XCTAssertEqual(we_scene_gl_test_current_particle_objects(&sequenceObjects), 1)
-        var sequenceLifetime: Float = 0
-        XCTAssertEqual(
-            we_scene_gl_test_particle_first_lifetime(&sequenceObjects, &sequenceLifetime),
-            1
-        )
-        XCTAssertEqual(sequenceLifetime, 0.25, accuracy: 0.0001)
+        func sequenceLifetime(_ fixture: Fixture) throws -> Float {
+            let loaded = try loadPipeline(fixture: fixture, context: context)
+            defer { destroy(loaded) }
+            try render(loaded.executor, time: 1, delta: 0.25)
+            var objects = WESceneGLTestParticleObjects(
+                vertex_array: 0,
+                vertex_buffer: 0,
+                element_buffer: 0
+            )
+            XCTAssertEqual(we_scene_gl_test_current_particle_objects(&objects), 1)
+            var lifetime: Float = 0
+            XCTAssertEqual(
+                we_scene_gl_test_particle_first_lifetime(&objects, &lifetime),
+                1
+            )
+            return lifetime
+        }
+        let shortDurationLifetime = try sequenceLifetime(shortDurationFixture)
+        let longDurationLifetime = try sequenceLifetime(longDurationFixture)
+        XCTAssertEqual(shortDurationLifetime, 0.05, accuracy: 0.0001)
+        XCTAssertEqual(longDurationLifetime, 0.05, accuracy: 0.0001)
+        XCTAssertEqual(shortDurationLifetime, longDurationLifetime, accuracy: 0.0001)
 
         let random = try loadPipeline(fixture: randomFixture, context: context)
         defer { destroy(random) }
@@ -1009,7 +1221,8 @@ final class ParticleExecutorTests: XCTestCase {
                 animationMode: "sequence",
                 sequenceMultiplier: 2,
                 spritesheet: true,
-                particleVelocity: "0 0 0"
+                particleVelocity: "0 0 0",
+                particleColor: "255 255 255"
             ),
             context: nil
         )
@@ -1021,11 +1234,14 @@ final class ParticleExecutorTests: XCTestCase {
             pixels[$0] != 0 || pixels[$0 + 1] != 0 || pixels[$0 + 2] != 0
         }
         XCTAssertFalse(visibleOffsets.isEmpty)
+        let visibleColors = Set(visibleOffsets.map {
+            Array(pixels[$0 ..< $0 + 4])
+        })
         XCTAssertTrue(
             visibleOffsets.allSatisfy {
-                Array(pixels[$0 ..< $0 + 4]) == [0, 255, 0, 255]
+                Array(pixels[$0 ..< $0 + 4]) == [255, 255, 0, 255]
             },
-            "Sequence lifetime 0.25 must select the green second frame from the colored atlas"
+            "Sequence lifetime must use TEX cycle duration and particle age; got \(visibleColors)"
         )
     }
 
@@ -1420,6 +1636,7 @@ final class ParticleExecutorTests: XCTestCase {
         animationMode: String = "sequence",
         sequenceMultiplier: Double = 1,
         spritesheet: Bool = false,
+        spritesheetDuration: Double = 2,
         particleRendererName: String = "sprite",
         particleRendererParameters: [String: Any] = [:],
         particleShaderName: String = "genericparticle",
@@ -1432,6 +1649,7 @@ final class ParticleExecutorTests: XCTestCase {
         parallaxDelay: Double = 0,
         parallaxDepth: String = "0 0",
         particleVelocity: String = "120 0 0",
+        particleColor: String = "0 255 0",
         particleInstanceOverride: [String: Any]? = nil,
         particleTextureName: String = "dot",
         particleTextureSize: (width: UInt32, height: UInt32) = (2, 2),
@@ -1441,16 +1659,20 @@ final class ParticleExecutorTests: XCTestCase {
         particleUserTextureName: String? = nil,
         includeStaticAnimationResetParticle: Bool = false,
         particleMaterialCombos: [String: Int] = [:],
+        particleCullMode: String = "nocull",
         particleVertexShaderSource: String? = nil,
         particleFragmentShaderSource: String? = nil,
         particleInstantaneousCount: Int = 1,
+        particleEmitters: [[String: Any]]? = nil,
         textValue: String = "I",
         textOrigin: String = "5 0 0",
         textAngles: String? = nil,
         includeDiscardImageBeforeParticle: Bool = false,
         clearColor: String = "0 0 0 0",
         cameraNearPlane: Double? = nil,
-        cameraFarPlane: Double? = nil
+        cameraFarPlane: Double? = nil,
+        projectionWidth: Double = 16,
+        projectionHeight: Double = 8
     ) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1591,7 +1813,7 @@ final class ParticleExecutorTests: XCTestCase {
             "clearcolor": clearColor,
             "orthogonalprojection": projectionAuto
                 ? ["auto": true]
-                : ["height": 8, "width": 16],
+                : ["height": projectionHeight, "width": projectionWidth],
         ]
         var camera: [String: Any] = [
             "center": "0 0 -1", "eye": "0 0 0", "up": "0 1 0",
@@ -1629,8 +1851,8 @@ final class ParticleExecutorTests: XCTestCase {
                 "name": "sizerandom",
             ],
             [
-                "max": "0 255 0",
-                "min": stochasticParticles ? "0 128 0" : "0 255 0",
+                "max": particleColor,
+                "min": stochasticParticles ? "0 128 0" : particleColor,
                 "name": "colorrandom",
             ],
             ["max": 1, "min": 1, "name": "alpharandom"],
@@ -1647,7 +1869,7 @@ final class ParticleExecutorTests: XCTestCase {
         ]
         let definition: [String: Any] = [
             "animationmode": animationMode,
-            "emitter": [emitter],
+            "emitter": particleEmitters ?? [emitter],
             "flags": perspective ? 4 : 0,
             "initializer": initializer,
             "material": "materials/particle.json",
@@ -1672,7 +1894,7 @@ final class ParticleExecutorTests: XCTestCase {
         }
         var materialPass: [String: Any] = [
             "blending": "translucent",
-            "cullmode": "nocull",
+            "cullmode": particleCullMode,
             "depthtest": "disabled",
             "depthwrite": "disabled",
             "shader": particleShaderName,
@@ -1736,7 +1958,7 @@ final class ParticleExecutorTests: XCTestCase {
                     try json([
                         "spritesheetsequences": [
                             [
-                                "duration": 2,
+                                "duration": spritesheetDuration,
                                 "frames": 4,
                                 "height": 1,
                                 "width": 1,
@@ -2155,7 +2377,9 @@ final class ParticleExecutorTests: XCTestCase {
 
     private func makeAnimatedParticleTexture(
         images: [[UInt8]],
-        frames: [AnimatedParticleFrame]
+        frames: [AnimatedParticleFrame],
+        gifWidth: UInt32 = 2,
+        gifHeight: UInt32 = 2
     ) -> Data {
         precondition(!images.isEmpty && !frames.isEmpty)
         precondition(images.allSatisfy { $0.count == 16 })
@@ -2183,8 +2407,8 @@ final class ParticleExecutorTests: XCTestCase {
         }
         appendMagic("TEXS0003", to: &result)
         appendUInt32(UInt32(frames.count), to: &result)
-        appendUInt32(2, to: &result)
-        appendUInt32(2, to: &result)
+        appendUInt32(gifWidth, to: &result)
+        appendUInt32(gifHeight, to: &result)
         for frame in frames {
             appendUInt32(frame.image, to: &result)
             appendFloat32(frame.duration, to: &result)

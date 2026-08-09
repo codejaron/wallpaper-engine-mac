@@ -47,12 +47,12 @@ final class CoreAudioSystemCapture: @unchecked Sendable {
         label: "com.winddog.wallpaper-engine.system-audio-tap",
         qos: .userInteractive
     )
-    private let sampleHandler: @Sendable (CapturedAudioSamples) -> Void
+    private let ringBuffer: RealtimeStereoPCMBuffer
     private let lock = NSLock()
     private var resources: Resources?
 
-    init(sampleHandler: @escaping @Sendable (CapturedAudioSamples) -> Void) {
-        self.sampleHandler = sampleHandler
+    init(ringBuffer: RealtimeStereoPCMBuffer) {
+        self.ringBuffer = ringBuffer
     }
 
     deinit {
@@ -143,13 +143,8 @@ final class CoreAudioSystemCapture: @unchecked Sendable {
         let list = UnsafeMutableAudioBufferListPointer(
             UnsafeMutablePointer(mutating: inputData)
         )
-        guard let frameCount = frameCount(for: list, format: format),
-              let samples = decodePCMBufferList(
-                  list,
-                  frameCount: frameCount,
-                  format: format
-              ) else { return }
-        sampleHandler(samples)
+        guard let frameCount = frameCount(for: list, format: format) else { return }
+        ringBuffer.write(inputData, frameCount: frameCount, format: format)
     }
 
     private func cleanUp(_ resources: Resources, logFailures: Bool) {

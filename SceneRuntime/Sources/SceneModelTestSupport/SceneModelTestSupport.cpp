@@ -872,7 +872,9 @@ extern "C" int we_scene_model_test_text_info(
         }
         const std::string* initialText = stringValue(text->text);
         const std::optional<double> pointSize = numberValue(text->pointSize);
-        if (initialText == nullptr || !pointSize.has_value()) {
+        const std::optional<double> maxWidth = numberValue(text->maxWidth);
+        if (initialText == nullptr || !pointSize.has_value() ||
+            !maxWidth.has_value()) {
             return failQuery(
                 errorBuffer,
                 errorBufferSize,
@@ -919,7 +921,7 @@ extern "C" int we_scene_model_test_text_info(
         outInfo->limit_use_ellipsis = text->limitUseEllipsis;
         outInfo->limit_width = text->limitWidth;
         outInfo->max_rows = text->maxRows;
-        outInfo->max_width = text->maxWidth;
+        outInfo->max_width = *maxWidth;
         return 1;
     });
 }

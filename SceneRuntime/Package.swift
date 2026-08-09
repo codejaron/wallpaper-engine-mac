@@ -179,8 +179,16 @@ let package = Package(
             publicHeadersPath: "include"
         ),
         .target(
+            name: "CSceneAudioRealtime",
+            path: "Sources/CSceneAudioRealtime",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedFramework("CoreAudio"),
+            ]
+        ),
+        .target(
             name: "SceneAudio",
-            dependencies: ["SceneRuntimeBridge"],
+            dependencies: ["CSceneAudioRealtime", "SceneRuntimeBridge"],
             path: "Sources/SceneAudio",
             linkerSettings: [
                 .linkedFramework("AVFoundation"),

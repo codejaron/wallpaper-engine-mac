@@ -33,33 +33,14 @@ constexpr std::array<Vertex, 6> coverageQuad{{
     {1, 0, 1, 0},
 }};
 
-struct Key final {
-    std::uint64_t a = 1469598103934665603ULL;
-    std::uint64_t b = 1099511628211ULL;
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
-
-    bool operator==(const Key&) const = default;
-};
-
 struct KeyHash final {
-    std::size_t operator()(const Key& key) const noexcept {
+    std::size_t operator()(const TextCoverageKey& key) const noexcept {
         return std::size_t(
             key.a ^ (key.b << 1) ^
             (std::uint64_t(key.width) << 32) ^ key.height
         );
     }
 };
-
-Key keyFor(const text::RasterizedText& value) {
-    Key key{.width = value.width, .height = value.height};
-    for (const auto byte : value.coverage) {
-        key.a = (key.a ^ byte) * 1099511628211ULL;
-        key.b = (key.b + byte + 0x9e3779b97f4a7c15ULL) *
-            0xbf58476d1ce4e5b9ULL;
-    }
-    return key;
-}
 
 void validateCoverageLayout(const text::RasterizedText& value) {
     if (value.width == 0 || value.height == 0) {
@@ -89,10 +70,10 @@ void validateDestination(const FramebufferResource& destination) {
 
 void validateDrawRequest(const TextDrawRequest& request) {
     for (const float component : request.color) {
-        if (!std::isfinite(component) || component < 0.0F || component > 1.0F) {
+        if (!std::isfinite(component)) {
             throw Error(
                 ErrorCode::invalidArgument,
-                "Text color components must be finite values in [0, 1]"
+                "Text color components must be finite"
             );
         }
     }
@@ -112,7 +93,7 @@ struct TextCoverageRenderer::Impl final {
     struct Entry final {
         GLuint texture = 0;
         std::size_t bytes = 0;
-        std::list<Key>::iterator lru;
+        std::list<TextCoverageKey>::iterator lru;
     };
 
     static constexpr std::size_t maxEntries = 64;
@@ -124,8 +105,8 @@ struct TextCoverageRenderer::Impl final {
     GLint coverageTextureLocation = -1;
     GLint textColorLocation = -1;
     GLint modelViewProjectionLocation = -1;
-    std::unordered_map<Key, Entry, KeyHash> textures;
-    std::list<Key> recency;
+    std::unordered_map<TextCoverageKey, Entry, KeyHash> textures;
+    std::list<TextCoverageKey> recency;
     std::size_t cachedBytes = 0;
     std::uint64_t generation = 1;
 
@@ -210,11 +191,37 @@ PreparedTextCoverage TextCoverageRenderer::prepare(
     Device::Session& session,
     const text::RasterizedText& value
 ) {
+    return prepare(session, value, keyFor(value));
+}
+
+TextCoverageKey TextCoverageRenderer::keyFor(
+    const text::RasterizedText& value
+) {
     validateCoverageLayout(value);
+    TextCoverageKey key{.width = value.width, .height = value.height};
+    for (const auto byte : value.coverage) {
+        key.a = (key.a ^ byte) * 1099511628211ULL;
+        key.b = (key.b + byte + 0x9e3779b97f4a7c15ULL) *
+            0xbf58476d1ce4e5b9ULL;
+    }
+    return key;
+}
+
+PreparedTextCoverage TextCoverageRenderer::prepare(
+    Device::Session& session,
+    const text::RasterizedText& value,
+    const TextCoverageKey& key
+) {
+    validateCoverageLayout(value);
+    if (key.width != value.width || key.height != value.height) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Text coverage key dimensions do not match the raster"
+        );
+    }
 
     impl_->ensurePipeline(session);
 
-    const Key key = keyFor(value);
     auto found = impl_->textures.find(key);
     if (found != impl_->textures.end()) {
         impl_->recency.splice(
@@ -394,7 +401,7 @@ void TextCoverageRenderer::trimCache(Device::Session& session) {
                 "Text coverage cache metadata is inconsistent"
             );
         }
-        const Key oldest = impl_->recency.back();
+        const TextCoverageKey oldest = impl_->recency.back();
         const auto victim = impl_->textures.find(oldest);
         if (victim == impl_->textures.end() ||
             victim->second.bytes > impl_->cachedBytes) {

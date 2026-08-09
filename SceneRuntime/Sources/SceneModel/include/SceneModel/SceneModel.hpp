@@ -337,6 +337,16 @@ struct ImageEffect {
     std::shared_ptr<const Effect> effect;
 };
 
+struct PuppetAnimationLayer {
+    int id = 0;
+    std::string name;
+    DynamicValue rate;
+    DynamicValue visible;
+    DynamicValue blend;
+    DynamicValue animation;
+    bool additive = false;
+};
+
 // Wallpaper Engine uses both a shorthand integer dependency and an expanded
 // authoring form carrying the role/index used by particle systems. Retain the
 // metadata here even when the current render stage only needs the object id;
@@ -386,6 +396,7 @@ struct ImageObject {
     TextureSlots instanceTextures;
     TextureSlots instanceUserTextures;
     std::vector<ImageEffect> effects;
+    std::vector<PuppetAnimationLayer> animationLayers;
 };
 
 struct TextObject {
@@ -411,7 +422,7 @@ struct TextObject {
     bool limitUseEllipsis = false;
     bool limitWidth = false;
     int maxRows = 0;
-    double maxWidth = 0.0;
+    DynamicValue maxWidth;
 };
 
 enum class SoundPlaybackMode {
@@ -725,6 +736,7 @@ struct ParticleInstanceOverride {
     DynamicValue count;
     DynamicValue color;
     DynamicValue colorMultiplier;
+    std::map<int, DynamicValue> controlPoints;
 };
 
 // Linux currently parses child systems and carries their metadata on the

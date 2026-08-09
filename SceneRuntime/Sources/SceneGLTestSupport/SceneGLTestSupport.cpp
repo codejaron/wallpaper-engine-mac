@@ -246,9 +246,9 @@ extern "C" int we_scene_gl_test_physical_render_policy(void) {
         const gl::PhysicalRenderSize fit = gl::physicalRenderSize(
             plan, balancedTarget, gl::PresentationScaling::aspectFit
         );
-        if (cover != gl::PhysicalRenderSize{2958, 1664} ||
+        if (cover != gl::PhysicalRenderSize{1920, 1080} ||
             automatic != cover || stretch != cover ||
-            fit != gl::PhysicalRenderSize{2560, 1440}) {
+            fit != cover) {
             return 0;
         }
         const gl::PhysicalRenderSize noUpscale = gl::physicalRenderSize(
@@ -260,7 +260,7 @@ extern "C" int we_scene_gl_test_physical_render_policy(void) {
             },
             gl::PresentationScaling::aspectFill
         );
-        if (noUpscale != gl::PhysicalRenderSize{3840, 2160}) return 0;
+        if (noUpscale != gl::PhysicalRenderSize{1920, 1080}) return 0;
         const gl::PhysicalRenderSize power = gl::physicalRenderSize(
             plan,
             {
@@ -270,17 +270,17 @@ extern "C" int we_scene_gl_test_physical_render_policy(void) {
             },
             gl::PresentationScaling::aspectFill
         );
-        if (power != gl::PhysicalRenderSize{1479, 832}) return 0;
+        if (power != gl::PhysicalRenderSize{960, 540}) return 0;
 
         const FramePlan physical = gl::withPhysicalRenderSize(plan, cover);
-        if (physical.width != 2958 || physical.height != 1664 ||
+        if (physical.width != 1920 || physical.height != 1080 ||
             physical.camera.orthogonalProjectionWidth != 3840 ||
             physical.camera.orthogonalProjectionHeight != 2160 ||
             physical.framebuffers.size() != 2 ||
-            physical.framebuffers[0].width != 2958 ||
-            physical.framebuffers[0].height != 1664 ||
-            physical.framebuffers[1].width != 740 ||
-            physical.framebuffers[1].height != 416 ||
+            physical.framebuffers[0].width != 1920 ||
+            physical.framebuffers[0].height != 1080 ||
+            physical.framebuffers[1].width != 480 ||
+            physical.framebuffers[1].height != 270 ||
             plan.width != 3840 || plan.height != 2160 ||
             plan.framebuffers[0].width != 3840 ||
             plan.framebuffers[1].width != 960) {
@@ -404,11 +404,15 @@ extern "C" int we_scene_gl_test_present_pattern(
             source_width, source_height, nativeViewport, mode
         );
         const auto slice = transform.slice();
+        gl::PresentationRenderer renderer;
         if (slice.hasContent) {
-            gl::blitWallpaperEngineOutput(
+            renderer.draw(
+                session,
                 source,
                 destination.framebuffer,
                 GL_COLOR_ATTACHMENT0,
+                nativeViewport.drawableWidth,
+                nativeViewport.drawableHeight,
                 slice,
                 GL_NEAREST
             );
@@ -418,6 +422,7 @@ extern "C" int we_scene_gl_test_present_pattern(
             "testing cover presentation"
         );
         session.readRGBA8(destination, std::span<uint8_t>(rgba, length));
+        renderer.release(session);
         session.destroyFramebuffer(destination);
         session.destroyFramebuffer(source);
         return 1;
@@ -486,17 +491,22 @@ extern "C" int we_scene_gl_test_blit_presentation_slice(
         const auto slice = gl::makePresentationTransform(
             4, 4, nativeViewport, mode
         ).slice();
+        gl::PresentationRenderer renderer;
         if (slice.hasContent) {
-            gl::blitWallpaperEngineOutput(
+            renderer.draw(
+                session,
                 source,
                 destination.framebuffer,
                 GL_COLOR_ATTACHMENT0,
+                nativeViewport.drawableWidth,
+                nativeViewport.drawableHeight,
                 slice,
                 GL_NEAREST
             );
         }
         session.checkError(gl::ErrorCode::draw, "testing presentation slicing");
         session.readRGBA8(destination, std::span<uint8_t>(rgba, length));
+        renderer.release(session);
         session.destroyFramebuffer(destination);
         session.destroyFramebuffer(source);
         return 1;

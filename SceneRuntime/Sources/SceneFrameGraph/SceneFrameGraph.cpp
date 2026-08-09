@@ -3,12 +3,17 @@
 #include <SceneCore/AssetResolver.hpp>
 #include <SceneCore/FormatError.hpp>
 #include <SceneCore/Package.hpp>
+#include <SceneCore/PuppetMesh.hpp>
 #include <SceneCore/Runtime.hpp>
 #include <SceneCore/Texture.hpp>
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
+#include <cstdarg>
+#include <cstdlib>
+#include <cstdio>
 #include <exception>
 #include <limits>
 #include <map>
@@ -19,6 +24,8 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+
+#include <os/log.h>
 
 namespace we::scene {
 
@@ -41,6 +48,38 @@ FrameResourceRef frameAssetTextureResource(std::string_view name) {
 }
 
 namespace {
+
+using FrameGraphTraceClock = std::chrono::steady_clock;
+
+[[nodiscard]] bool frameGraphTraceEnabled() noexcept {
+    static const bool enabled = [] {
+        const char* value = std::getenv("WE_SCENE_FRAME_TRACE");
+        return value != nullptr && std::string_view(value) == "1";
+    }();
+    return enabled;
+}
+
+void frameGraphTraceLog(const char* format, ...) noexcept {
+    if (!frameGraphTraceEnabled()) return;
+    char message[1024];
+    va_list arguments;
+    va_start(arguments, format);
+    std::vsnprintf(message, sizeof(message), format, arguments);
+    va_end(arguments);
+    os_log_with_type(
+        OS_LOG_DEFAULT,
+        OS_LOG_TYPE_INFO,
+        "[SceneFrameTrace] %{public}s",
+        message
+    );
+}
+
+[[nodiscard]] double frameGraphTraceMilliseconds(
+    FrameGraphTraceClock::time_point start,
+    FrameGraphTraceClock::time_point end = FrameGraphTraceClock::now()
+) noexcept {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
 
 FrameResourceRef frameHostTextureResource(std::string_view name) {
     return {
@@ -626,6 +665,142 @@ public:
         return std::move(plan_);
     }
 
+    void initializeMaterialScripts() {
+        if (!evaluationFrame_ ||
+            evaluationFrame_->scriptPropertyObjectsCurrent()) {
+            return;
+        }
+        const auto& objects = model_->project().scene.objects;
+        for (std::size_t objectIndex = 0; objectIndex < objects.size(); ++objectIndex) {
+            const auto* image = std::get_if<ImageObject>(&objects[objectIndex].data);
+            if (image == nullptr) continue;
+            const int layerId = objects[objectIndex].base.id;
+
+            if (image->model && image->model->material) {
+                for (std::size_t passIndex = 0;
+                     passIndex < image->model->material->passes.size();
+                     ++passIndex) {
+                    const std::string id =
+                        "layer:" + std::to_string(layerId) +
+                        "/image/material/pass:" + std::to_string(passIndex);
+                    const std::string pointer =
+                        objectPointer(objectIndex, "image") +
+                        "/material/passes/" + std::to_string(passIndex) +
+                        "/constants";
+                    initializeMaterialConstants(
+                        id,
+                        image->model->material->assetPath,
+                        image->model->material->passes[passIndex],
+                        nullptr,
+                        pointer,
+                        layerId
+                    );
+                }
+            }
+
+            for (std::size_t effectIndex = 0;
+                 effectIndex < image->effects.size();
+                 ++effectIndex) {
+                const ImageEffect& instance = image->effects[effectIndex];
+                if (!instance.effect) continue;
+                const std::string effectPointer =
+                    objectPointer(objectIndex, "effects") + '/' +
+                    std::to_string(effectIndex);
+                const std::string effectId =
+                    "layer:" + std::to_string(layerId) + "/effect:" +
+                    std::to_string(effectIndex);
+                std::vector<std::string> materialIds;
+                for (std::size_t passIndex = 0;
+                     passIndex < instance.effect->passes.size();
+                     ++passIndex) {
+                    const EffectPass& effectPass =
+                        instance.effect->passes[passIndex];
+                    if (!effectPass.material) continue;
+                    for (std::size_t materialPassIndex = 0;
+                         materialPassIndex < effectPass.material->passes.size();
+                         ++materialPassIndex) {
+                        materialIds.push_back(
+                            effectId + "/pass:" + std::to_string(passIndex) +
+                            "/material-pass:" +
+                            std::to_string(materialPassIndex)
+                        );
+                    }
+                }
+                evaluationFrame_->registerScriptPropertyObject({
+                    .id = effectId,
+                    .type = script::ScriptPropertyObjectType::effect,
+                    .name = instance.name.empty()
+                        ? instance.effect->name
+                        : instance.name,
+                    .properties = {{
+                        "visible",
+                        evaluateDynamicValue(
+                            *model_,
+                            instance.visible,
+                            graphSnapshot_.propertyValues,
+                            effectPointer + "/visible"
+                        ).value,
+                    }},
+                    .propertyAnimations = instance.visible.animation
+                        ? std::map<std::string, TimelineAnimation>{{
+                            "visible", *instance.visible.animation,
+                        }}
+                        : std::map<std::string, TimelineAnimation>{},
+                    .materialIds = std::move(materialIds),
+                });
+                evaluationFrame_->initialize(
+                    instance.visible,
+                    effectPointer + "/visible",
+                    script::ScriptPropertyOwner{
+                        .layerId = layerId,
+                        .type = script::ScriptPropertyOwnerType::effect,
+                        .objectId = effectId,
+                        .property = "visible",
+                    }
+                );
+
+                std::size_t overrideIndex = 0;
+                for (std::size_t passIndex = 0;
+                     passIndex < instance.effect->passes.size();
+                     ++passIndex) {
+                    const EffectPass& effectPass =
+                        instance.effect->passes[passIndex];
+                    if (!effectPass.material) continue;
+                    const EffectPassOverride* overridePass =
+                        overrideIndex < instance.passOverrides.size()
+                            ? &instance.passOverrides[overrideIndex]
+                            : nullptr;
+                    ++overrideIndex;
+                    for (std::size_t materialPassIndex = 0;
+                         materialPassIndex < effectPass.material->passes.size();
+                         ++materialPassIndex) {
+                        const std::string id =
+                            effectId + "/pass:" + std::to_string(passIndex) +
+                            "/material-pass:" +
+                            std::to_string(materialPassIndex);
+                        const std::string pointer =
+                            effectPointer + "/passes/" +
+                            std::to_string(passIndex) + "/material/passes/" +
+                            std::to_string(materialPassIndex) + "/constants";
+                        initializeMaterialConstants(
+                            id,
+                            effectPass.material->assetPath,
+                            effectPass.material->passes[materialPassIndex],
+                            overridePass,
+                            pointer,
+                            layerId
+                        );
+                    }
+                }
+            }
+        }
+        // Material/effect base descriptors are a function of the immutable
+        // model plus the coherent user-property revision. Keep the registry's
+        // existing overlays and timeline controllers between frames instead
+        // of rebuilding every descriptor at presentation frequency.
+        evaluationFrame_->commitScriptPropertyObjects();
+    }
+
 private:
     [[nodiscard]] EvaluatedValue evaluate(
         const DynamicValue& value,
@@ -718,17 +893,37 @@ private:
         return result;
     }
 
-    [[nodiscard]] ConstantMap mergedConstants(
+    template <typename Callback>
+    static void forEachMergedConstant(
         const MaterialPass& material,
-        const EffectPassOverride* overridePass
-    ) const {
-        ConstantMap result = material.constants;
-        if (overridePass != nullptr) {
-            for (const auto& [name, value] : overridePass->constants) {
-                result.insert_or_assign(name, value);
+        const EffectPassOverride* overridePass,
+        Callback&& callback
+    ) {
+        const ConstantMap empty;
+        const ConstantMap& overrides = overridePass == nullptr
+            ? empty
+            : overridePass->constants;
+        auto base = material.constants.begin();
+        auto replacement = overrides.begin();
+        while (base != material.constants.end() ||
+               replacement != overrides.end()) {
+            if (replacement == overrides.end() ||
+                (base != material.constants.end() &&
+                 base->first < replacement->first)) {
+                callback(base->first, base->second);
+                ++base;
+                continue;
             }
+            if (base == material.constants.end() ||
+                replacement->first < base->first) {
+                callback(replacement->first, replacement->second);
+                ++replacement;
+                continue;
+            }
+            callback(replacement->first, replacement->second);
+            ++base;
+            ++replacement;
         }
-        return result;
     }
 
     void registerMaterialObject(
@@ -744,8 +939,10 @@ private:
             .type = script::ScriptPropertyObjectType::material,
             .name = std::move(name),
         };
-        for (const auto& [property, value] :
-             mergedConstants(material, overridePass)) {
+        forEachMergedConstant(material, overridePass, [&](
+            const std::string& property,
+            const DynamicValue& value
+        ) {
             descriptor.properties.emplace(
                 property,
                 evaluateDynamicValue(
@@ -755,8 +952,42 @@ private:
                     pointerPrefix + '/' + property
                 ).value
             );
-        }
+            if (value.animation) {
+                descriptor.propertyAnimations.emplace(
+                    property, *value.animation
+                );
+            }
+        });
         evaluationFrame_->registerScriptPropertyObject(std::move(descriptor));
+    }
+
+    void initializeMaterialConstants(
+        const std::string& id,
+        const std::string& name,
+        const MaterialPass& material,
+        const EffectPassOverride* overridePass,
+        const std::string& pointerPrefix,
+        int layerId
+    ) {
+        if (!evaluationFrame_) return;
+        registerMaterialObject(
+            id, name, material, overridePass, pointerPrefix
+        );
+        forEachMergedConstant(material, overridePass, [&](
+            const std::string& property,
+            const DynamicValue& value
+        ) {
+            evaluationFrame_->initialize(
+                value,
+                pointerPrefix + '/' + property,
+                script::ScriptPropertyOwner{
+                    .layerId = layerId,
+                    .type = script::ScriptPropertyOwnerType::material,
+                    .objectId = id,
+                    .property = property,
+                }
+            );
+        });
     }
 
     [[nodiscard]] FrameCameraDescriptor snapshotCamera(
@@ -1333,6 +1564,87 @@ private:
                     0.0,
                 };
             }
+            std::vector<FramePuppetAnimationLayer> puppetAnimationLayers;
+            puppetAnimationLayers.reserve(image->animationLayers.size());
+            for (std::size_t layerIndex = 0;
+                 layerIndex < image->animationLayers.size();
+                 ++layerIndex) {
+                const PuppetAnimationLayer& layer =
+                    image->animationLayers[layerIndex];
+                const std::string layerPointer = objectPointer(
+                    objectIndex,
+                    "animationlayers/" + std::to_string(layerIndex)
+                );
+                const bool visible = booleanValue(
+                    *model_,
+                    evaluate(
+                        layer.visible,
+                        layerPointer + "/visible",
+                        node.id
+                    ),
+                    layerPointer + "/visible",
+                    "Puppet animation visibility"
+                );
+                if (!visible) continue;
+                const double rate = numberValue(
+                    *model_,
+                    evaluate(layer.rate, layerPointer + "/rate", node.id),
+                    layerPointer + "/rate",
+                    "Puppet animation rate"
+                );
+                const double blend = numberValue(
+                    *model_,
+                    evaluate(layer.blend, layerPointer + "/blend", node.id),
+                    layerPointer + "/blend",
+                    "Puppet animation blend"
+                );
+                const double animationNumber = numberValue(
+                    *model_,
+                    evaluate(
+                        layer.animation,
+                        layerPointer + "/animation",
+                        node.id
+                    ),
+                    layerPointer + "/animation",
+                    "Puppet animation id"
+                );
+                if (blend < 0.0 || blend > 1.0) {
+                    frameError(
+                        *model_,
+                        SceneModelErrorCode::invalidValue,
+                        layerPointer + "/blend",
+                        "Puppet animation blend must resolve inside 0...1"
+                    );
+                }
+                if (std::floor(animationNumber) != animationNumber ||
+                    animationNumber < std::numeric_limits<int>::min() ||
+                    animationNumber > std::numeric_limits<int>::max()) {
+                    frameError(
+                        *model_,
+                        SceneModelErrorCode::invalidValue,
+                        layerPointer + "/animation",
+                        "Puppet animation id must resolve to an integer"
+                    );
+                }
+                const int animationId = static_cast<int>(animationNumber);
+                if (!image->model || !image->model->puppetMesh ||
+                    image->model->puppetMesh->animation(animationId) == nullptr) {
+                    frameError(
+                        *model_,
+                        SceneModelErrorCode::danglingReference,
+                        layerPointer + "/animation",
+                        "Puppet animation layer references unknown animation id " +
+                            std::to_string(animationId)
+                    );
+                }
+                if (blend == 0.0) continue;
+                puppetAnimationLayers.push_back({
+                    .animationId = animationId,
+                    .rate = rate,
+                    .blend = blend,
+                    .additive = layer.additive,
+                });
+            }
             plan_.images.push_back({
                 .objectIndex = objectIndex,
                 .objectId = node.id,
@@ -1346,6 +1658,7 @@ private:
                 .compositeA = compositeA.resource,
                 .compositeB = compositeB.resource,
                 .puppetMesh = image->model ? image->model->puppetMesh : nullptr,
+                .puppetAnimationLayers = std::move(puppetAnimationLayers),
                 .alpha = evaluate(image->alpha, objectPointer(objectIndex, "alpha"), node.id),
                 .color = evaluate(image->color, objectPointer(objectIndex, "color"), node.id),
                 .brightness = evaluate(image->brightness, objectPointer(objectIndex, "brightness"), node.id),
@@ -1423,6 +1736,10 @@ private:
                 *model_, evaluate(text->spacing, base + "/spacing", node.id),
                 base + "/spacing", "Text spacing"
             );
+            const double maxWidth = numberValue(
+                *model_, evaluate(text->maxWidth, base + "/maxwidth", node.id),
+                base + "/maxwidth", "Text maximum width"
+            );
             if (text->limitRows && text->maxRows <= 0) {
                 frameError(
                     *model_, SceneModelErrorCode::invalidValue,
@@ -1431,7 +1748,7 @@ private:
                 );
             }
             if (text->limitWidth &&
-                (!std::isfinite(text->maxWidth) || text->maxWidth <= 0.0)) {
+                (!std::isfinite(maxWidth) || maxWidth <= 0.0)) {
                 frameError(
                     *model_, SceneModelErrorCode::invalidValue,
                     base + "/maxwidth",
@@ -1461,7 +1778,7 @@ private:
                 .limitUseEllipsis = text->limitUseEllipsis,
                 .limitWidth = text->limitWidth,
                 .maxRows = text->maxRows,
-                .maxWidth = text->maxWidth,
+                .maxWidth = maxWidth,
             });
             return descriptorIndex;
     }
@@ -1845,15 +2162,27 @@ private:
 
     [[nodiscard]] particle::ControlPoint concreteParticleControlPoint(
         const ParticleControlPoint& source,
+        const ParticleInstanceOverride& instanceOverride,
         const SceneGraphNodeSnapshot& node,
         std::size_t objectIndex,
-        std::size_t controlPointIndex
-    ) const {
+        std::size_t controlPointIndex,
+        int objectId
+    ) {
         const std::string pointer = objectPointer(objectIndex, "particle") +
             "/controlpoint/" + std::to_string(controlPointIndex);
-        const particle::Vector3 authoredOffset = concreteParticleVector(
-            source.offset
-        );
+        particle::Vector3 authoredOffset = concreteParticleVector(source.offset);
+        if (const auto found = instanceOverride.controlPoints.find(source.id);
+            found != instanceOverride.controlPoints.end()) {
+            const std::string overridePointer =
+                objectPointer(objectIndex, "instanceoverride") +
+                "/controlpoint" + std::to_string(source.id);
+            authoredOffset = evaluatedParticleVector(
+                found->second,
+                overridePointer,
+                objectId,
+                "Particle instance control point"
+            );
+        }
         particle::Vector3 position = authoredOffset;
         if (source.lockToPointer) {
             const particle::Vector3 pointerScene{
@@ -1872,7 +2201,7 @@ private:
             );
         } else if ((source.flags & 2U) != 0U) {
             position = particleLocalPoint(
-                authoredWorldParticlePoint(source.offset),
+                authoredOffset,
                 node.worldTransform,
                 objectIndex
             );
@@ -2737,9 +3066,11 @@ private:
                 particle::ControlPoint controlPoint =
                     concreteParticleControlPoint(
                         definition.controlPoints[index],
+                        object->instanceOverride,
                         node,
                         objectIndex,
-                        index
+                        index,
+                        node.id
                     );
                 controlPoints.insert_or_assign(
                     controlPoint.id, std::move(controlPoint)
@@ -3036,6 +3367,11 @@ private:
                             effectPointer + "/visible"
                         ).value,
                     }},
+                    .propertyAnimations = effectInstance.visible.animation
+                        ? std::map<std::string, TimelineAnimation>{{
+                            "visible", *effectInstance.visible.animation,
+                        }}
+                        : std::map<std::string, TimelineAnimation>{},
                     .materialIds = effectMaterialIds,
                 };
                 evaluationFrame_->registerScriptPropertyObject(
@@ -3424,9 +3760,6 @@ private:
         const PendingRender& pending,
         int objectId
     ) {
-        const ConstantMap constants = mergedConstants(
-            pending.material, pending.overridePass
-        );
         registerMaterialObject(
             pending.materialObjectId,
             pending.material.shader,
@@ -3435,7 +3768,10 @@ private:
             pending.constantPointerPrefix
         );
         std::map<std::string, EvaluatedValue> result;
-        for (const auto& [name, value] : constants) {
+        forEachMergedConstant(pending.material, pending.overridePass, [&] (
+            const std::string& name,
+            const DynamicValue& value
+        ) {
             result.emplace(
                 name,
                 evaluate(
@@ -3450,7 +3786,7 @@ private:
                     }
                 )
             );
-        }
+        });
         return result;
     }
 
@@ -3833,10 +4169,18 @@ private:
         FrameImageDescriptor& image = plan_.images.at(context.planImageIndex);
         const bool offscreenDependency =
             !image.visible && dependencyObjectIds_.contains(image.objectId);
+        std::vector<PendingOperation> pending = pendingOperations(context);
         if (!image.visible && !offscreenDependency) {
+            // SceneScript is a scene-state system, not a draw-call callback.
+            // Material scripts on hidden layers still initialize/update shared
+            // values that later layer scripts may consume in the same frame.
+            for (const PendingOperation& operation : pending) {
+                if (const auto* render = std::get_if<PendingRender>(&operation)) {
+                    (void)resolveConstants(*render, context.node->id);
+                }
+            }
             return;
         }
-        std::vector<PendingOperation> pending = pendingOperations(context);
         if (pending.empty()) {
             return;
         }
@@ -4044,11 +4388,11 @@ private:
         }
 
         std::set<std::string> missingDescriptorIds;
-        const auto requireDescriptor = [&](
+        const auto requireDescriptor = [&]<typename PointerFactory>(
             const FrameResourceRef& resource,
-            std::string pointer,
+            PointerFactory&& pointer,
             std::optional<int> objectId,
-            FramePlanIssueSeverity severity = FramePlanIssueSeverity::skipPass
+            FramePlanIssueSeverity severity
         ) -> bool {
             if (resource.kind != FrameResourceKind::framebuffer ||
                 descriptorIds.contains(resource.id)) {
@@ -4058,7 +4402,7 @@ private:
                 addIssue(
                     FramePlanIssueCode::framebufferDescriptorMissing,
                     objectId,
-                    std::move(pointer),
+                    std::forward<PointerFactory>(pointer)(),
                     "Framebuffer resource '" + resource.id +
                         "' has no descriptor in the frame plan",
                     severity
@@ -4069,22 +4413,43 @@ private:
 
         requireDescriptor(
             plan_.output,
-            "/framePlan/output",
+            [] { return std::string("/framePlan/output"); },
             std::nullopt,
             FramePlanIssueSeverity::frameFatal
         );
         for (const FrameImageDescriptor& image : plan_.images) {
-            const std::string pointer = objectPointer(image.objectIndex, "image");
-            requireDescriptor(image.source, pointer + "/source", image.objectId);
-            requireDescriptor(image.compositeA, pointer + "/composite_a", image.objectId);
-            requireDescriptor(image.compositeB, pointer + "/composite_b", image.objectId);
+            std::optional<std::string> pointer;
+            const auto imagePointer = [&]() -> const std::string& {
+                if (!pointer) {
+                    pointer = objectPointer(image.objectIndex, "image");
+                }
+                return *pointer;
+            };
+            requireDescriptor(
+                image.source,
+                [&] { return imagePointer() + "/source"; },
+                image.objectId,
+                FramePlanIssueSeverity::skipPass
+            );
+            requireDescriptor(
+                image.compositeA,
+                [&] { return imagePointer() + "/composite_a"; },
+                image.objectId,
+                FramePlanIssueSeverity::skipPass
+            );
+            requireDescriptor(
+                image.compositeB,
+                [&] { return imagePointer() + "/composite_b"; },
+                image.objectId,
+                FramePlanIssueSeverity::skipPass
+            );
         }
 
         std::vector<FrameOperation> validOperations;
         validOperations.reserve(plan_.operations.size());
         for (std::size_t operationIndex = 0;
              operationIndex < plan_.operations.size(); ++operationIndex) {
-            const FrameOperation& operation = plan_.operations[operationIndex];
+            FrameOperation& operation = plan_.operations[operationIndex];
             const FramePassOrigin* origin = std::visit(
                 [](const auto& value) -> const FramePassOrigin* {
                     using Operation = std::decay_t<decltype(value)>;
@@ -4100,19 +4465,31 @@ private:
             const std::optional<int> objectId = origin
                 ? std::optional<int>(origin->objectId)
                 : std::optional<int>(text ? text->objectId : particle->objectId);
-            const std::string operationObjectPointer = origin
-                ? operationPointer(*origin)
-                : text
-                    ? objectPointer(plan_.texts.at(text->textIndex).objectIndex, "text")
-                    : objectPointer(
-                        plan_.particles.at(particle->particleIndex).objectIndex,
-                        "particle"
-                    );
-            const std::string basePointer = operationObjectPointer +
-                "/frameOperation/" + std::to_string(operationIndex);
-            std::set<std::string> operationReads;
+            std::optional<std::string> basePointer;
+            const auto operationBasePointer = [&]() -> const std::string& {
+                if (!basePointer) {
+                    std::string operationObjectPointer = origin
+                        ? operationPointer(*origin)
+                        : text
+                            ? objectPointer(
+                                plan_.texts.at(text->textIndex).objectIndex,
+                                "text"
+                            )
+                            : objectPointer(
+                                plan_.particles.at(particle->particleIndex).objectIndex,
+                                "particle"
+                            );
+                    basePointer = std::move(operationObjectPointer) +
+                        "/frameOperation/" + std::to_string(operationIndex);
+                }
+                return *basePointer;
+            };
+            std::set<std::string_view> operationReads;
             bool valid = true;
-            const auto read = [&](const FrameResourceRef& resource, std::string pointer) {
+            const auto read = [&]<typename PointerFactory>(
+                const FrameResourceRef& resource,
+                PointerFactory&& pointer
+            ) {
                 if (resource.kind != FrameResourceKind::framebuffer) {
                     return;
                 }
@@ -4120,17 +4497,28 @@ private:
                     return;
                 }
                 const bool hasDescriptor = requireDescriptor(
-                    resource, std::move(pointer), objectId
+                    resource,
+                    std::forward<PointerFactory>(pointer),
+                    objectId,
+                    FramePlanIssueSeverity::skipPass
                 );
                 if (!hasDescriptor) {
                     valid = false;
                 }
             };
-            const auto write = [&](const FrameResourceRef& resource, std::string pointer) {
+            const auto write = [&]<typename PointerFactory>(
+                const FrameResourceRef& resource,
+                PointerFactory&& pointer
+            ) {
                 if (resource.kind != FrameResourceKind::framebuffer) {
                     return;
                 }
-                if (!requireDescriptor(resource, std::move(pointer), objectId)) {
+                if (!requireDescriptor(
+                        resource,
+                        std::forward<PointerFactory>(pointer),
+                        objectId,
+                        FramePlanIssueSeverity::skipPass
+                    )) {
                     valid = false;
                 }
             };
@@ -4139,9 +4527,13 @@ private:
                 [&](const auto& value) {
                     using Operation = std::decay_t<decltype(value)>;
                     if constexpr (std::is_same_v<Operation, FrameRenderPass>) {
-                        read(value.input, basePointer + "/input");
+                        read(value.input, [&] {
+                            return operationBasePointer() + "/input";
+                        });
                         if (value.previousInput) {
-                            read(*value.previousInput, basePointer + "/previousInput");
+                            read(*value.previousInput, [&] {
+                                return operationBasePointer() + "/previousInput";
+                            });
                         }
                         for (const auto& [slot, binding] : value.textures) {
                             for (std::size_t candidateIndex = 0;
@@ -4149,9 +4541,11 @@ private:
                                  ++candidateIndex) {
                                 read(
                                     binding.candidates[candidateIndex].resource,
-                                    basePointer + "/textures/" +
-                                        std::to_string(slot) + "/candidates/" +
-                                        std::to_string(candidateIndex)
+                                    [&] {
+                                        return operationBasePointer() + "/textures/" +
+                                            std::to_string(slot) + "/candidates/" +
+                                            std::to_string(candidateIndex);
+                                    }
                                 );
                             }
                         }
@@ -4160,36 +4554,50 @@ private:
                             addIssue(
                                 FramePlanIssueCode::framebufferFeedbackLoop,
                                 objectId,
-                                basePointer + "/destination",
+                                operationBasePointer() + "/destination",
                                 "Render operation samples framebuffer '" +
                                     value.destination.id +
                                     "' while writing to the same resource"
                             );
                             valid = false;
                         }
-                        write(value.destination, basePointer + "/destination");
+                        write(value.destination, [&] {
+                            return operationBasePointer() + "/destination";
+                        });
                     } else if constexpr (std::is_same_v<Operation, FrameCopyCommand>) {
-                        read(value.source, basePointer + "/source");
+                        read(value.source, [&] {
+                            return operationBasePointer() + "/source";
+                        });
                         if (value.source.kind == FrameResourceKind::framebuffer &&
                             value.destination.kind == FrameResourceKind::framebuffer &&
                             value.source.id == value.destination.id) {
                             addIssue(
                                 FramePlanIssueCode::framebufferFeedbackLoop,
                                 objectId,
-                                basePointer + "/destination",
+                                operationBasePointer() + "/destination",
                                 "Copy operation reads and writes framebuffer '" +
                                     value.destination.id + "'"
                             );
                             valid = false;
                         }
-                        write(value.destination, basePointer + "/destination");
+                        write(value.destination, [&] {
+                            return operationBasePointer() + "/destination";
+                        });
                     } else if constexpr (std::is_same_v<Operation, FrameSwapCommand>) {
-                        read(value.source, basePointer + "/source");
-                        read(value.destination, basePointer + "/destination");
+                        read(value.source, [&] {
+                            return operationBasePointer() + "/source";
+                        });
+                        read(value.destination, [&] {
+                            return operationBasePointer() + "/destination";
+                        });
                     } else if constexpr (std::is_same_v<Operation, FrameClearCommand>) {
-                        write(value.destination, basePointer + "/destination");
+                        write(value.destination, [&] {
+                            return operationBasePointer() + "/destination";
+                        });
                     } else if constexpr (std::is_same_v<Operation, FrameTextCommand>) {
-                        write(value.destination, basePointer + "/destination");
+                        write(value.destination, [&] {
+                            return operationBasePointer() + "/destination";
+                        });
                     } else if constexpr (std::is_same_v<Operation, FrameParticleCommand>) {
                         const FrameParticleDescriptor& descriptor =
                             plan_.particles.at(value.particleIndex);
@@ -4204,10 +4612,12 @@ private:
                                  ++candidateIndex) {
                                 read(
                                     binding.candidates[candidateIndex].resource,
-                                    basePointer + "/textures/" +
-                                        std::to_string(slot) +
-                                        "/candidates/" +
-                                        std::to_string(candidateIndex)
+                                    [&] {
+                                        return operationBasePointer() + "/textures/" +
+                                            std::to_string(slot) +
+                                            "/candidates/" +
+                                            std::to_string(candidateIndex);
+                                    }
                                 );
                             }
                         }
@@ -4217,14 +4627,16 @@ private:
                             addIssue(
                                 FramePlanIssueCode::framebufferFeedbackLoop,
                                 objectId,
-                                basePointer + "/destination",
+                                operationBasePointer() + "/destination",
                                 "Particle render operation samples framebuffer '" +
                                     value.destination.id +
                                     "' while writing to the same resource"
                             );
                             valid = false;
                         }
-                        write(value.destination, basePointer + "/destination");
+                        write(value.destination, [&] {
+                            return operationBasePointer() + "/destination";
+                        });
                     }
                 },
                 operation
@@ -4232,7 +4644,7 @@ private:
             if (!valid) {
                 continue;
             }
-            validOperations.push_back(operation);
+            validOperations.push_back(std::move(operation));
         }
         plan_.operations = std::move(validOperations);
     }
@@ -4394,8 +4806,24 @@ EvaluatedFramePlan SceneFrameGraph::evaluate(
     const SceneFrameInputs& inputs,
     std::optional<FrameProjectionSize> drawableFallback
 ) const {
+    const auto traceStarted = FrameGraphTraceClock::now();
+    auto traceStageStarted = traceStarted;
+    const auto traceStage = [&](const char* stage) {
+        const auto now = FrameGraphTraceClock::now();
+        frameGraphTraceLog(
+            "frameGraph.stage runtime=%.6f stage=%s ms=%.3f",
+            inputs.runtimeSeconds,
+            stage,
+            frameGraphTraceMilliseconds(traceStageStarted, now)
+        );
+        traceStageStarted = now;
+    };
     const FrameProjectionSize projection = projectionSize(drawableFallback);
     SceneFrameInputs resolvedInputs = inputs;
+    resolvedInputs.canvasSize = std::array<double, 2>{
+        static_cast<double>(projection.width),
+        static_cast<double>(projection.height),
+    };
     resolvedInputs.cursorWorldPosition = std::array<double, 3>{
         std::clamp(inputs.pointerX, 0.0, 1.0) *
             static_cast<double>(projection.width),
@@ -4404,17 +4832,40 @@ EvaluatedFramePlan SceneFrameGraph::evaluate(
         0.0,
     };
     auto evaluation = graph_->evaluationFrame(resolvedInputs);
+    traceStage("evaluationFrame");
+    SceneGraphSnapshot initializationSnapshot;
+    initializationSnapshot.modelRevision = evaluation->modelRevision();
+    initializationSnapshot.propertyValues = evaluation->propertyValues();
+    PlanBuilder(
+        graph_->model(),
+        initializationSnapshot,
+        projection,
+        resolvedInputs,
+        evaluation.get()
+    ).initializeMaterialScripts();
+    traceStage("materialScripts");
     FrameEvaluationState state(
         graph_, graph_->snapshot(*evaluation), resolvedInputs
     );
+    traceStage("graphSnapshot");
     FramePlan plan = PlanBuilder(
         graph_->model(), state.graphSnapshot_, projection,
         state.inputs_, evaluation.get()
     ).build();
+    traceStage("planBuild");
     state.scriptedValues_ = evaluation->evaluatedScriptValues();
     state.cursorInteractiveLayerIds_ = evaluation->cursorInteractiveLayerIds();
     state.scriptEvaluations_ = evaluation->scriptEvaluationStats();
     plan.scriptEvaluations = state.scriptEvaluations_;
+    frameGraphTraceLog(
+        "frameGraph.end runtime=%.6f totalMs=%.3f objects=%zu operations=%zu "
+        "scriptEvaluations=%zu",
+        inputs.runtimeSeconds,
+        frameGraphTraceMilliseconds(traceStarted),
+        state.graphSnapshot_.nodes.size(),
+        plan.operations.size(),
+        state.scriptEvaluations_.size()
+    );
     return EvaluatedFramePlan{
         .plan = std::move(plan),
         .evaluation = std::move(state),

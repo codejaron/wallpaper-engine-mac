@@ -16,10 +16,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdarg>
+#include <cstdlib>
 #include <ctime>
 #include <cmath>
 #include <cstdio>
 #include <exception>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <new>
@@ -34,8 +38,60 @@
 #include <variant>
 #include <vector>
 
+#include <os/log.h>
+
 namespace we::scene::gl {
 namespace {
+
+using FrameTraceClock = std::chrono::steady_clock;
+
+[[nodiscard]] bool frameTraceEnabled() noexcept {
+    static const bool enabled = [] {
+        const char* value = std::getenv("WE_SCENE_FRAME_TRACE");
+        return value != nullptr && std::string_view(value) == "1";
+    }();
+    return enabled;
+}
+
+[[nodiscard]] bool frameStatsEnabled() noexcept {
+    static const bool enabled = [] {
+        const char* value = std::getenv("WE_SCENE_FRAME_STATS");
+        return value != nullptr && std::string_view(value) == "1";
+    }();
+    return enabled;
+}
+
+void frameStatsLog(const char* format, ...) noexcept {
+    if (!frameStatsEnabled()) return;
+    char message[1024];
+    va_list arguments;
+    va_start(arguments, format);
+    std::vsnprintf(message, sizeof(message), format, arguments);
+    va_end(arguments);
+    std::fprintf(stderr, "[SceneFrameStats] %s\n", message);
+}
+
+void frameTraceLog(const char* format, ...) noexcept {
+    if (!frameTraceEnabled()) return;
+    char message[2048];
+    va_list arguments;
+    va_start(arguments, format);
+    std::vsnprintf(message, sizeof(message), format, arguments);
+    va_end(arguments);
+    os_log_with_type(
+        OS_LOG_DEFAULT,
+        OS_LOG_TYPE_INFO,
+        "[SceneFrameTrace] %{public}s",
+        message
+    );
+}
+
+[[nodiscard]] double frameTraceMilliseconds(
+    FrameTraceClock::time_point start,
+    FrameTraceClock::time_point end = FrameTraceClock::now()
+) noexcept {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
 
 constexpr double wallpaperEnginePointSizeToPixels = 4.0;
 constexpr double maximumWallpaperEngineTextPixelSize = 1024.0;
@@ -185,6 +241,9 @@ struct ParticleDrawBatch final {
     std::vector<std::uint32_t> indices;
     ParticleAtlasMetadata atlas;
     bool rope = false;
+    float ropeSegmentMaxCountUnscaled = 0.0F;
+    float ropeSegmentTimeOffset = 0.0F;
+    float ropeSegmentMaxCount = 0.0F;
 };
 
 struct ResolvedFrameInputs final {
@@ -819,11 +878,27 @@ PhysicalRenderSize physicalRenderSize(
         scaling == PresentationScaling::aspectFit
             ? std::min(scaleX, scaleY)
             : std::max(scaleX, scaleY);
-    // Balanced never creates more pixels than the authored output. Automatic
-    // follows the existing Cover presentation semantics, aspect-fill is Cover,
-    // and stretch deliberately uses the larger ratio so neither destination
-    // axis is undersampled before the existing stretch presentation step.
-    const double balancedScale = std::min(1.0, targetScale);
+    const long double logicalPixelCount =
+        static_cast<long double>(logicalPlan.width) * logicalPlan.height;
+    constexpr long double balancedPixelCeiling =
+        static_cast<long double>(1920) * 1080;
+    const long double backingPixelCount = std::min(
+        static_cast<long double>(target.backingWidth) * target.backingHeight,
+        balancedPixelCeiling
+    );
+    const double pixelBudgetScale = static_cast<double>(std::sqrt(
+        backingPixelCount / logicalPixelCount
+    ));
+    // Balanced is a backing-pixel budget, not an axis budget. Cover rendering
+    // used to choose the larger axis ratio and could therefore allocate and
+    // shade a source larger than the drawable only to crop those pixels during
+    // presentation. Preserve the authored aspect ratio while bounding total
+    // scene pixels by both the author output and the actual backing surface.
+    const double balancedScale = std::min({
+        1.0,
+        targetScale,
+        pixelBudgetScale,
+    });
     PhysicalRenderSize balanced{
         .width = roundedPhysicalOutputDimension(
             logicalPlan.width, balancedScale, "Balanced physical render width"
@@ -1775,9 +1850,29 @@ struct FramePlanExecutor::Impl final {
         FramebufferResource resource;
     };
 
+    struct RopePathPoint final {
+        particle::Vector3 position;
+        double size = 0.0;
+        particle::Vector3 color{1.0, 1.0, 1.0};
+        double alpha = 1.0;
+    };
+
+    struct RopeTrailSample final {
+        double timeSeconds = 0.0;
+        RopePathPoint point;
+    };
+
+    struct RopeTrailHistory final {
+        std::vector<RopeTrailSample> samples;
+    };
+
     struct ParticleState final {
         std::string assetIdentity;
         particle::ParticleSimulation simulation;
+        // Rope trails belong to individual stable particle identities. Keep
+        // their history beside the simulation so frame preparation remains
+        // transactional and replay copies one authoritative particle state.
+        std::map<std::uint64_t, RopeTrailHistory> ropeTrails;
     };
 
     struct HostTextureSlot final {
@@ -2015,6 +2110,7 @@ struct FramePlanExecutor::Impl final {
 
     struct CachedTextRaster final {
         text::RasterizedText rasterized;
+        TextCoverageKey coverageKey;
         std::size_t bytes = 0;
         std::uint64_t lastUsed = 0;
     };
@@ -2049,6 +2145,7 @@ struct FramePlanExecutor::Impl final {
         try {
             auto session = device->activate();
             textRenderer.release(session);
+            presentationRenderer.release(session);
             releaseParticleGeometry(session);
             releasePuppetGeometry(session);
             session.destroyFramebuffer(particleRefractSnapshot);
@@ -2120,7 +2217,7 @@ struct FramePlanExecutor::Impl final {
         return textRasterUseSequence;
     }
 
-    [[nodiscard]] const text::RasterizedText& cachedTextRaster(
+    [[nodiscard]] const CachedTextRaster& cachedTextRaster(
         const FrameTextDescriptor& descriptor
     ) {
         const double pointSize = textPixelSize(descriptor.pointSize);
@@ -2155,7 +2252,7 @@ struct FramePlanExecutor::Impl final {
         };
         if (auto found = textRasters.find(key); found != textRasters.end()) {
             found->second.lastUsed = nextTextRasterUse();
-            return found->second.rasterized;
+            return found->second;
         }
 
         text::FontSource font;
@@ -2177,6 +2274,9 @@ struct FramePlanExecutor::Impl final {
             .lineSpacing = descriptor.spacing.y,
             .horizontalAlignment = horizontalAlignment,
         });
+        const TextCoverageKey coverageKey = TextCoverageRenderer::keyFor(
+            rasterized
+        );
         const std::size_t bytes = rasterized.coverage.size();
         if (bytes > std::numeric_limits<std::size_t>::max() -
                 textRasterBytes) {
@@ -2189,6 +2289,7 @@ struct FramePlanExecutor::Impl final {
             std::move(key),
             CachedTextRaster{
                 .rasterized = std::move(rasterized),
+                .coverageKey = coverageKey,
                 .bytes = bytes,
                 .lastUsed = nextTextRasterUse(),
             }
@@ -2200,7 +2301,7 @@ struct FramePlanExecutor::Impl final {
             );
         }
         textRasterBytes += bytes;
-        return inserted->second.rasterized;
+        return inserted->second;
     }
 
     [[nodiscard]] static std::uint32_t paddedTextEffectDimension(
@@ -2263,9 +2364,8 @@ struct FramePlanExecutor::Impl final {
                 );
             }
 
-            const text::RasterizedText& rasterized = cachedTextRaster(
-                textDescriptor
-            );
+            const text::RasterizedText& rasterized =
+                cachedTextRaster(textDescriptor).rasterized;
             const TextLayout layout = textLayout(
                 textDescriptor, rasterized
             );
@@ -4314,19 +4414,42 @@ struct FramePlanExecutor::Impl final {
                     "Puppet mesh has no drawable geometry or too many indices"
                 );
             }
+            std::vector<PuppetAnimationLayerInput> animationLayers;
+            animationLayers.reserve(image.puppetAnimationLayers.size());
+            for (const FramePuppetAnimationLayer& layer :
+                 image.puppetAnimationLayers) {
+                animationLayers.push_back({
+                    .animationId = layer.animationId,
+                    .timeSeconds = inputs.timeSeconds * layer.rate,
+                    .blend = checkedFloat(layer.blend, "Puppet animation blend"),
+                    .additive = layer.additive,
+                });
+            }
+            const std::vector<std::array<float, 3>> puppetPositions =
+                evaluatePuppetPositions(mesh, animationLayers);
+            if (puppetPositions.size() != mesh.vertices.size()) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Puppet animation produced a vertex-count mismatch"
+                );
+            }
             result.puppetVertices.reserve(mesh.vertices.size());
-            for (const PuppetVertex& vertex : mesh.vertices) {
-                const float localX = imageWidth * 0.5F + vertex.position[0];
-                const float localY = imageHeight * 0.5F - vertex.position[1];
+            for (std::size_t vertexIndex = 0;
+                 vertexIndex < mesh.vertices.size();
+                 ++vertexIndex) {
+                const PuppetVertex& vertex = mesh.vertices[vertexIndex];
+                const auto& position = puppetPositions[vertexIndex];
+                const float localX = imageWidth * 0.5F + position[0];
+                const float localY = imageHeight * 0.5F - position[1];
                 if (!std::isfinite(localX) || !std::isfinite(localY) ||
-                    !std::isfinite(vertex.position[2])) {
+                    !std::isfinite(position[2])) {
                     throw Error(
                         ErrorCode::resourceValidation,
                         "Puppet mesh position is non-finite after image-size conversion"
                     );
                 }
                 result.puppetVertices.push_back({
-                    .position = {localX, localY, vertex.position[2]},
+                    .position = {localX, localY, position[2]},
                     .texCoord = {vertex.texCoord[0], vertex.texCoord[1]},
                 });
             }
@@ -4615,7 +4738,8 @@ struct FramePlanExecutor::Impl final {
             command.destination, aliases
         );
         const auto& transform = descriptor.worldTransform;
-        const text::RasterizedText& rasterized = cachedTextRaster(descriptor);
+        const CachedTextRaster& cachedRaster = cachedTextRaster(descriptor);
+        const text::RasterizedText& rasterized = cachedRaster.rasterized;
         const TextLayout layout = textLayout(descriptor, rasterized);
 
         const double effectiveAlpha = descriptor.color.alpha * descriptor.alpha;
@@ -4628,10 +4752,10 @@ struct FramePlanExecutor::Impl final {
         std::array<float, 4> color{};
         for (std::size_t index = 0; index < color.size(); ++index) {
             const double component = colorComponents[index];
-            if (!std::isfinite(component) || component < 0.0 || component > 1.0) {
+            if (!std::isfinite(component)) {
                 throw Error(
                     ErrorCode::resourceValidation,
-                    "Text color and opacity components must be finite values in [0, 1]"
+                    "Text color and opacity components must be finite"
                 );
             }
             color[index] = static_cast<float>(component);
@@ -4722,7 +4846,9 @@ struct FramePlanExecutor::Impl final {
         validateMatrix(modelViewProjection, "Text model-view-projection matrix");
         return {
             .destination = command.destination,
-            .coverage = textRenderer.prepare(session, rasterized),
+            .coverage = textRenderer.prepare(
+                session, rasterized, cachedRaster.coverageKey
+            ),
             .request = {
                 .modelViewProjection = modelViewProjection,
                 .color = color,
@@ -4795,9 +4921,12 @@ struct FramePlanExecutor::Impl final {
         }
         const float frameWidth = 1.0F / float(texture.spritesheetColumns);
         const float frameHeight = 1.0F / float(texture.spritesheetRows);
-        const float frameAspect =
-            (texture.resolution[1] * frameHeight) /
-            (texture.resolution[0] * frameWidth);
+        const float frameAspect = texture.isAnimated() &&
+                texture.resolution[2] > 0.0F &&
+                texture.resolution[3] > 0.0F
+            ? texture.resolution[3] / texture.resolution[2]
+            : (texture.resolution[1] * frameHeight) /
+                (texture.resolution[0] * frameWidth);
         if (!std::isfinite(frameAspect) || frameAspect <= 0.0F) {
             throw Error(
                 ErrorCode::resourceValidation,
@@ -4816,9 +4945,12 @@ struct FramePlanExecutor::Impl final {
     [[nodiscard]] static double particleLifetimeAttribute(
         const particle::ParticleInstance& particle,
         const FrameParticleDescriptor& descriptor,
-        const ParticleAtlasMetadata& atlas
+        const ParticleAtlasMetadata& atlas,
+        double presentationOffsetSeconds
     ) {
-        const double life = particle.lifetimePosition();
+        const double life = particle.lifetime > 0.0
+            ? (particle.age + presentationOffsetSeconds) / particle.lifetime
+            : 1.0;
         if (!std::isfinite(life) || life < 0.0) {
             throw Error(
                 ErrorCode::resourceValidation,
@@ -4863,18 +4995,15 @@ struct FramePlanExecutor::Impl final {
                     descriptor.animationMode + "'"
             );
         }
-        if (atlas.duration > 0.0F) {
-            const double timeInCycle = std::fmod(
-                particle.age * descriptor.sequenceMultiplier,
-                static_cast<double>(atlas.duration)
-            );
-            return timeInCycle / static_cast<double>(atlas.duration);
-        }
-        const double frame = std::fmod(
-            life * frameCount * descriptor.sequenceMultiplier,
-            frameCount
+        // Wallpaper Engine stretches particle sprite-sheet sequences across
+        // each particle's lifetime. The duration stored in TEX metadata is an
+        // image-animation setting and is explicitly ignored for particles.
+        // sequenceMultiplier controls how many sequence cycles fit into that
+        // normalized lifetime.
+        return std::fmod(
+            life * descriptor.sequenceMultiplier,
+            1.0
         );
-        return frame / frameCount;
     }
 
     [[nodiscard]] static ParticleDrawBatch particleBatch(
@@ -4883,6 +5012,7 @@ struct FramePlanExecutor::Impl final {
         ParticleAtlasMetadata atlas
     ) {
         const auto& particles = simulation.particles();
+        const double presentationOffset = simulation.accumulatorSeconds();
         if (particles.size() >
             std::numeric_limits<std::uint32_t>::max() / 4U) {
             throw Error(
@@ -4912,9 +5042,18 @@ struct FramePlanExecutor::Impl final {
                 {{0.0F, 0.0F}},
             }};
             const auto position = std::array{
-                particleFloat(particle.position.x, "position"),
-                particleRenderY(particle.position.y, "position"),
-                particleFloat(particle.position.z, "position"),
+                particleFloat(
+                    particle.position.x + particle.velocity.x * presentationOffset,
+                    "position"
+                ),
+                particleRenderY(
+                    particle.position.y + particle.velocity.y * presentationOffset,
+                    "position"
+                ),
+                particleFloat(
+                    particle.position.z + particle.velocity.z * presentationOffset,
+                    "position"
+                ),
             };
             const auto velocity = std::array{
                 particleFloat(particle.velocity.x, "velocity"),
@@ -4922,9 +5061,21 @@ struct FramePlanExecutor::Impl final {
                 particleFloat(particle.velocity.z, "velocity"),
             };
             const auto rotation = std::array{
-                particleFloat(particle.rotation.x, "rotation"),
-                particleFloat(particle.rotation.y, "rotation"),
-                particleFloat(particle.rotation.z, "rotation"),
+                particleFloat(
+                    particle.rotation.x +
+                        particle.angularVelocity.x * presentationOffset,
+                    "rotation"
+                ),
+                particleFloat(
+                    particle.rotation.y +
+                        particle.angularVelocity.y * presentationOffset,
+                    "rotation"
+                ),
+                particleFloat(
+                    particle.rotation.z +
+                        particle.angularVelocity.z * presentationOffset,
+                    "rotation"
+                ),
             };
             const auto color = std::array{
                 particleFloat(particle.color.x, "color"),
@@ -4934,7 +5085,9 @@ struct FramePlanExecutor::Impl final {
             };
             const float size = particleFloat(particle.size, "size");
             const float lifetime = particleFloat(
-                particleLifetimeAttribute(particle, descriptor, atlas),
+                particleLifetimeAttribute(
+                    particle, descriptor, atlas, presentationOffset
+                ),
                 "encoded lifetime"
             );
             const std::uint32_t base = static_cast<std::uint32_t>(
@@ -4961,30 +5114,36 @@ struct FramePlanExecutor::Impl final {
         return batch;
     }
 
-    [[nodiscard]] static ParticleDrawBatch particleRopeBatch(
-        const particle::ParticleSimulation& simulation,
-        const FrameParticleDescriptor& descriptor,
-        ParticleAtlasMetadata atlas
+    [[nodiscard]] static int positiveRendererInteger(
+        double value,
+        int fallback
     ) {
-        const auto& particles = simulation.particles();
+        if (!std::isfinite(value) || value <= 0.0) return fallback;
+        const double rounded = std::floor(value);
+        if (rounded > static_cast<double>(std::numeric_limits<int>::max())) {
+            return std::numeric_limits<int>::max();
+        }
+        return std::max(1, static_cast<int>(rounded));
+    }
+
+    template <typename ParticleRange>
+    [[nodiscard]] static ParticleDrawBatch particleRopePathBatch(
+        const ParticleRange& particles,
+        const FrameParticleDescriptor& descriptor,
+        ParticleAtlasMetadata atlas,
+        double presentationTimeSeconds,
+        double presentationOffsetSeconds = 0.0
+    ) {
         ParticleDrawBatch batch;
         batch.atlas = atlas;
         batch.rope = true;
         if (particles.size() < 2) return batch;
 
-        const auto positiveInteger = [](double value, int fallback) {
-            if (!std::isfinite(value) || value <= 0.0) return fallback;
-            const double rounded = std::floor(value);
-            if (rounded > static_cast<double>(std::numeric_limits<int>::max())) {
-                return std::numeric_limits<int>::max();
-            }
-            return std::max(1, static_cast<int>(rounded));
-        };
         // Linux clamps an authored zero/negative subdivision to one at render
         // time.  The parser's rope default is four, but that default is
         // already present in the descriptor; it must not be reused for an
         // explicitly invalid value here.
-        const int subdivision = positiveInteger(
+        const int subdivision = positiveRendererInteger(
             descriptor.renderer.subdivision, 1
         );
         const std::size_t segmentCount = particles.size() - 1;
@@ -5036,40 +5195,50 @@ struct FramePlanExecutor::Impl final {
                        (-p0.z + 3.0 * p1.z - 3.0 * p2.z + p3.z) * t3),
             };
         };
-        const auto particleColor = [](const particle::ParticleInstance& p) {
-            return std::array<double, 4>{p.color.x, p.color.y, p.color.z, p.alpha};
+        const auto presentedPoint = [presentationOffsetSeconds](const auto& p) {
+            if constexpr (requires { p.velocity; }) {
+                return Point{
+                    .position = {
+                        p.position.x + p.velocity.x * presentationOffsetSeconds,
+                        p.position.y + p.velocity.y * presentationOffsetSeconds,
+                        p.position.z + p.velocity.z * presentationOffsetSeconds,
+                    },
+                    .size = p.size,
+                    .color = {p.color.x, p.color.y, p.color.z, p.alpha},
+                };
+            } else {
+                return Point{
+                    .position = p.position,
+                    .size = p.size,
+                    .color = {p.color.x, p.color.y, p.color.z, p.alpha},
+                };
+            }
         };
         for (std::size_t segment = 0; segment < segmentCount; ++segment) {
-            const auto& p1 = particles[segment];
-            const auto& p2 = particles[segment + 1U];
-            const auto& p0 = segment > 0 ? particles[segment - 1U] : p1;
-            const auto& p3 = segment + 2U < particles.size()
-                ? particles[segment + 2U] : p2;
+            const Point p1 = presentedPoint(particles[segment]);
+            const Point p2 = presentedPoint(particles[segment + 1U]);
+            const Point p0 = segment > 0
+                ? presentedPoint(particles[segment - 1U]) : p1;
+            const Point p3 = segment + 2U < particles.size()
+                ? presentedPoint(particles[segment + 2U]) : p2;
             for (int step = 0; step < subdivision; ++step) {
                 const double t = static_cast<double>(step) /
                     static_cast<double>(subdivision);
                 const std::size_t index = segment * static_cast<std::size_t>(subdivision) +
                     static_cast<std::size_t>(step);
-                const auto c1 = particleColor(p1);
-                const auto c2 = particleColor(p2);
                 points[index] = {
                     .position = catmullRom(p0.position, p1.position, p2.position, p3.position, t),
                     .size = p1.size + (p2.size - p1.size) * t,
                     .color = {
-                        c1[0] + (c2[0] - c1[0]) * t,
-                        c1[1] + (c2[1] - c1[1]) * t,
-                        c1[2] + (c2[2] - c1[2]) * t,
-                        c1[3] + (c2[3] - c1[3]) * t,
+                        p1.color[0] + (p2.color[0] - p1.color[0]) * t,
+                        p1.color[1] + (p2.color[1] - p1.color[1]) * t,
+                        p1.color[2] + (p2.color[2] - p1.color[2]) * t,
+                        p1.color[3] + (p2.color[3] - p1.color[3]) * t,
                     },
                 };
             }
         }
-        const auto& last = particles.back();
-        points.back() = {
-            .position = last.position,
-            .size = last.size,
-            .color = particleColor(last),
-        };
+        points.back() = presentedPoint(particles.back());
 
         const double uvScale = descriptor.renderer.uvScale > 0.0 &&
                 std::isfinite(descriptor.renderer.uvScale)
@@ -5106,7 +5275,7 @@ struct FramePlanExecutor::Impl final {
         }
         const double scrollOffset = descriptor.renderer.uvScrolling &&
                 usableLength > 0.0
-            ? std::fmod(simulation.simulationTimeSeconds(), 10000.0) * usableLength
+            ? std::fmod(presentationTimeSeconds, 10000.0) * usableLength
             : 0.0;
 
         batch.ropeVertices.reserve((totalPoints - 1U) * 4U);
@@ -5170,6 +5339,397 @@ struct FramePlanExecutor::Impl final {
         return batch;
     }
 
+    [[nodiscard]] static RopePathPoint ropePathPoint(
+        const particle::ParticleInstance& particle
+    ) {
+        return {
+            .position = particle.position,
+            .size = particle.size,
+            .color = particle.color,
+            .alpha = particle.alpha,
+        };
+    }
+
+    [[nodiscard]] static RopePathPoint interpolateRopePathPoint(
+        const RopePathPoint& start,
+        const RopePathPoint& end,
+        double amount
+    ) {
+        const auto interpolate = [amount](double a, double b) {
+            return a + (b - a) * amount;
+        };
+        return {
+            .position = {
+                interpolate(start.position.x, end.position.x),
+                interpolate(start.position.y, end.position.y),
+                interpolate(start.position.z, end.position.z),
+            },
+            .size = interpolate(start.size, end.size),
+            .color = {
+                interpolate(start.color.x, end.color.x),
+                interpolate(start.color.y, end.color.y),
+                interpolate(start.color.z, end.color.z),
+            },
+            .alpha = interpolate(start.alpha, end.alpha),
+        };
+    }
+
+    static void appendRopePathBatch(
+        ParticleDrawBatch& destination,
+        ParticleDrawBatch source
+    ) {
+        if (!source.rope || !source.vertices.empty()) {
+            throw Error(
+                ErrorCode::internalFailure,
+                "Rope path builder returned an incompatible particle batch"
+            );
+        }
+        if (source.ropeVertices.empty()) return;
+        if (destination.ropeVertices.size() >
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) -
+                source.ropeVertices.size()) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Particle rope paths exceed the uint32 vertex-index range"
+            );
+        }
+        const std::uint32_t vertexOffset = static_cast<std::uint32_t>(
+            destination.ropeVertices.size()
+        );
+        if (destination.ropeVertices.size() >
+                std::numeric_limits<std::size_t>::max() -
+                    source.ropeVertices.size() ||
+            destination.indices.size() >
+                std::numeric_limits<std::size_t>::max() -
+                    source.indices.size()) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Particle rope path geometry overflows size_t"
+            );
+        }
+        for (const std::uint32_t index : source.indices) {
+            if (index > std::numeric_limits<std::uint32_t>::max() -
+                    vertexOffset) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Particle rope path index exceeds the uint32 range"
+                );
+            }
+        }
+        destination.ropeVertices.insert(
+            destination.ropeVertices.end(),
+            std::make_move_iterator(source.ropeVertices.begin()),
+            std::make_move_iterator(source.ropeVertices.end())
+        );
+        destination.indices.reserve(
+            destination.indices.size() + source.indices.size()
+        );
+        for (const std::uint32_t index : source.indices) {
+            destination.indices.push_back(index + vertexOffset);
+        }
+    }
+
+    [[nodiscard]] static ParticleDrawBatch particleRopeBatch(
+        const particle::ParticleSimulation& simulation,
+        const FrameParticleDescriptor& descriptor,
+        ParticleAtlasMetadata atlas
+    ) {
+        return particleRopePathBatch(
+            simulation.particles(), descriptor, atlas,
+            simulation.simulationTimeSeconds() +
+                simulation.accumulatorSeconds(),
+            simulation.accumulatorSeconds()
+        );
+    }
+
+    static void updateParticleRopeTrails(
+        ParticleState& state,
+        const FrameParticleDescriptor& descriptor
+    ) {
+        const double duration = descriptor.renderer.length;
+        if (!std::isfinite(duration) || duration <= 0.0) {
+            state.ropeTrails.clear();
+            return;
+        }
+        const double currentTime = state.simulation.simulationTimeSeconds();
+        const double tolerance = std::numeric_limits<double>::epsilon() *
+            std::max(1.0, std::abs(currentTime)) * 64.0;
+        const double cutoff = std::max(0.0, currentTime - duration);
+        std::set<std::uint64_t> alive;
+
+        for (const particle::ParticleInstance& particle :
+             state.simulation.particles()) {
+            alive.insert(particle.spawnId);
+            RopeTrailHistory& history = state.ropeTrails[particle.spawnId];
+            RopeTrailSample current{
+                .timeSeconds = currentTime,
+                .point = ropePathPoint(particle),
+            };
+            if (history.samples.empty()) {
+                history.samples.push_back(std::move(current));
+                continue;
+            }
+
+            if (currentTime + tolerance < history.samples.back().timeSeconds) {
+                throw Error(
+                    ErrorCode::internalFailure,
+                    "Particle rope trail time moved backwards"
+                );
+            }
+            if (std::abs(
+                    currentTime - history.samples.back().timeSeconds
+                ) <= tolerance) {
+                history.samples.back() = std::move(current);
+            } else {
+                // History acquisition follows the actual simulation/render
+                // cadence. The authored segment count controls only the
+                // resampled draw geometry below; using length / segments as
+                // the acquisition period turns an otherwise 60 Hz trail into
+                // visibly stepped geometry (for example 0.4 / 4 = 10 Hz).
+                history.samples.push_back(std::move(current));
+            }
+
+            // Keep one point before the duration boundary so geometry can
+            // interpolate an exact cutoff instead of shortening the trail.
+            while (history.samples.size() > 2 &&
+                   history.samples[1].timeSeconds <= cutoff + tolerance) {
+                history.samples.erase(history.samples.begin());
+            }
+        }
+
+        for (auto iterator = state.ropeTrails.begin();
+             iterator != state.ropeTrails.end();) {
+            if (!alive.contains(iterator->first)) {
+                iterator = state.ropeTrails.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
+    }
+
+    [[nodiscard]] static std::vector<RopePathPoint> ropeTrailPath(
+        const RopeTrailHistory& history,
+        double currentTime,
+        double duration,
+        std::size_t maximumPointCount
+    ) {
+        if (history.samples.size() < 2 || maximumPointCount < 2) return {};
+        const double cutoff = std::max(0.0, currentTime - duration);
+        std::vector<RopeTrailSample> clipped;
+        clipped.reserve(history.samples.size() + 1U);
+
+        std::size_t first = 0;
+        while (first + 1U < history.samples.size() &&
+               history.samples[first + 1U].timeSeconds <= cutoff) {
+            ++first;
+        }
+        if (first + 1U < history.samples.size() &&
+            history.samples[first].timeSeconds < cutoff) {
+            const RopeTrailSample& before = history.samples[first];
+            const RopeTrailSample& after = history.samples[first + 1U];
+            const double span = after.timeSeconds - before.timeSeconds;
+            if (span > 0.0) {
+                clipped.push_back({
+                    .timeSeconds = cutoff,
+                    .point = interpolateRopePathPoint(
+                        before.point,
+                        after.point,
+                        (cutoff - before.timeSeconds) / span
+                    ),
+                });
+                ++first;
+            }
+        }
+        clipped.insert(
+            clipped.end(),
+            history.samples.begin() + static_cast<std::ptrdiff_t>(first),
+            history.samples.end()
+        );
+        if (clipped.size() < 2) return {};
+
+        if (clipped.size() > maximumPointCount) {
+            std::vector<RopeTrailSample> resampled;
+            resampled.reserve(maximumPointCount);
+            const double startTime = clipped.front().timeSeconds;
+            const double endTime = clipped.back().timeSeconds;
+            std::size_t upper = 1;
+            for (std::size_t index = 0; index < maximumPointCount; ++index) {
+                const double amount = static_cast<double>(index) /
+                    static_cast<double>(maximumPointCount - 1U);
+                const double target = startTime +
+                    (endTime - startTime) * amount;
+                while (upper + 1U < clipped.size() &&
+                       clipped[upper].timeSeconds < target) {
+                    ++upper;
+                }
+                const RopeTrailSample& before = clipped[upper - 1U];
+                const RopeTrailSample& after = clipped[upper];
+                const double span = after.timeSeconds - before.timeSeconds;
+                const double local = span > 0.0
+                    ? std::clamp(
+                          (target - before.timeSeconds) / span,
+                          0.0,
+                          1.0
+                      )
+                    : 0.0;
+                resampled.push_back({
+                    .timeSeconds = target,
+                    .point = interpolateRopePathPoint(
+                        before.point, after.point, local
+                    ),
+                });
+            }
+            clipped = std::move(resampled);
+        }
+
+        std::vector<RopePathPoint> result;
+        result.reserve(clipped.size());
+        for (const RopeTrailSample& sample : clipped) {
+            result.push_back(sample.point);
+        }
+        return result;
+    }
+
+    [[nodiscard]] static ParticleDrawBatch particleRopeTrailBatch(
+        const ParticleState& state,
+        const FrameParticleDescriptor& descriptor,
+        ParticleAtlasMetadata atlas
+    ) {
+        ParticleDrawBatch batch;
+        batch.atlas = atlas;
+        batch.rope = true;
+        const double duration = descriptor.renderer.length;
+        if (!std::isfinite(duration) || duration <= 0.0) return batch;
+
+        const int segmentCount = std::max(
+            2,
+            positiveRendererInteger(descriptor.renderer.segments, 2)
+        );
+        const int subdivision = positiveRendererInteger(
+            descriptor.renderer.subdivision, 1
+        );
+        const long double maximumSubsegments =
+            static_cast<long double>(segmentCount) * subdivision;
+        if (!std::isfinite(maximumSubsegments) ||
+            maximumSubsegments >
+                static_cast<long double>(std::numeric_limits<float>::max())) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Particle rope trail segment count is too large"
+            );
+        }
+        const double uvScale = descriptor.renderer.uvScale > 0.0 &&
+                std::isfinite(descriptor.renderer.uvScale)
+            ? descriptor.renderer.uvScale
+            : 1.0;
+        const long double maximumScaledSegments =
+            maximumSubsegments / uvScale + 1.0L;
+        if (!std::isfinite(maximumScaledSegments) ||
+            maximumScaledSegments >
+                static_cast<long double>(std::numeric_limits<float>::max())) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Particle rope trail UV-scaled segment count is too large"
+            );
+        }
+        batch.ropeSegmentMaxCountUnscaled = static_cast<float>(
+            maximumSubsegments
+        );
+        batch.ropeSegmentMaxCount = static_cast<float>(
+            maximumScaledSegments
+        );
+        const double sampleInterval = duration /
+            static_cast<double>(segmentCount);
+        const double presentationOffset =
+            state.simulation.accumulatorSeconds();
+        const double presentationTime =
+            state.simulation.simulationTimeSeconds() + presentationOffset;
+        batch.ropeSegmentTimeOffset = sampleInterval > 0.0
+            ? static_cast<float>(
+                  std::fmod(
+                      presentationTime,
+                      sampleInterval
+                  ) / sampleInterval
+              )
+            : 0.0F;
+
+        const std::size_t maximumPointCount =
+            static_cast<std::size_t>(segmentCount) + 1U;
+        bool tracedPath = false;
+        for (const particle::ParticleInstance& particle :
+             state.simulation.particles()) {
+            const auto found = state.ropeTrails.find(particle.spawnId);
+            if (found == state.ropeTrails.end()) continue;
+            RopeTrailHistory presentedHistory = found->second;
+            if (presentationOffset > 0.0) {
+                presentedHistory.samples.push_back({
+                    .timeSeconds = presentationTime,
+                    .point = {
+                        .position = {
+                            particle.position.x +
+                                particle.velocity.x * presentationOffset,
+                            particle.position.y +
+                                particle.velocity.y * presentationOffset,
+                            particle.position.z +
+                                particle.velocity.z * presentationOffset,
+                        },
+                        .size = particle.size,
+                        .color = particle.color,
+                        .alpha = particle.alpha,
+                    },
+                });
+            }
+            const std::vector<RopePathPoint> path = ropeTrailPath(
+                presentedHistory,
+                presentationTime,
+                duration,
+                maximumPointCount
+            );
+            if (path.size() < 2) continue;
+            if (!tracedPath) {
+                const RopePathPoint& tail = path.front();
+                const RopePathPoint& head = path.back();
+                frameTraceLog(
+                    "rope.path object=%d spawn=%llu simulation=%.6f "
+                    "presentation=%.6f accumulator=%.6f historySamples=%zu "
+                    "pathPoints=%zu particle=(%.6f,%.6f,%.6f) "
+                    "velocity=(%.6f,%.6f,%.6f) tail=(%.6f,%.6f,%.6f) "
+                    "head=(%.6f,%.6f,%.6f)",
+                    descriptor.objectId,
+                    static_cast<unsigned long long>(particle.spawnId),
+                    state.simulation.simulationTimeSeconds(),
+                    presentationTime,
+                    presentationOffset,
+                    found->second.samples.size(),
+                    path.size(),
+                    particle.position.x,
+                    particle.position.y,
+                    particle.position.z,
+                    particle.velocity.x,
+                    particle.velocity.y,
+                    particle.velocity.z,
+                    tail.position.x,
+                    tail.position.y,
+                    tail.position.z,
+                    head.position.x,
+                    head.position.y,
+                    head.position.z
+                );
+                tracedPath = true;
+            }
+            appendRopePathBatch(
+                batch,
+                particleRopePathBatch(
+                    path,
+                    descriptor,
+                    atlas,
+                    presentationTime
+                )
+            );
+        }
+        return batch;
+    }
+
     [[nodiscard]] std::string particleAssetIdentity(
         const FrameParticleDescriptor& descriptor
     ) const {
@@ -5207,6 +5767,15 @@ struct FramePlanExecutor::Impl final {
         const ParticleState* previous
     ) {
         const std::string identity = particleAssetIdentity(descriptor);
+        const auto traceStarted = FrameTraceClock::now();
+        const double simulationBefore = previous != nullptr &&
+                previous->assetIdentity == identity
+            ? previous->simulation.simulationTimeSeconds()
+            : 0.0;
+        const double accumulatorBefore = previous != nullptr &&
+                previous->assetIdentity == identity
+            ? previous->simulation.accumulatorSeconds()
+            : 0.0;
         try {
             ParticleState state = previous != nullptr &&
                     previous->assetIdentity == identity
@@ -5223,11 +5792,59 @@ struct FramePlanExecutor::Impl final {
                 inputs.frameTimeSeconds,
                 descriptor.configuration
             );
-            ParticleDrawBatch batch =
-                descriptor.renderer.kind == FrameParticleRendererKind::rope ||
-                    descriptor.renderer.kind == FrameParticleRendererKind::ropeTrail
-                ? particleRopeBatch(state.simulation, descriptor, atlas)
-                : particleBatch(state.simulation, descriptor, atlas);
+            ParticleDrawBatch batch;
+            if (descriptor.renderer.kind ==
+                FrameParticleRendererKind::ropeTrail) {
+                updateParticleRopeTrails(state, descriptor);
+                batch = particleRopeTrailBatch(state, descriptor, atlas);
+            } else if (descriptor.renderer.kind ==
+                       FrameParticleRendererKind::rope) {
+                state.ropeTrails.clear();
+                batch = particleRopeBatch(
+                    state.simulation, descriptor, atlas
+                );
+            } else {
+                state.ropeTrails.clear();
+                batch = particleBatch(
+                    state.simulation, descriptor, atlas
+                );
+            }
+            std::size_t ropeSampleCount = 0;
+            std::size_t maximumRopeSamples = 0;
+            for (const auto& [spawnId, history] : state.ropeTrails) {
+                static_cast<void>(spawnId);
+                ropeSampleCount += history.samples.size();
+                maximumRopeSamples = std::max(
+                    maximumRopeSamples,
+                    history.samples.size()
+                );
+            }
+            frameTraceLog(
+                "particle frame=%llu object=%d renderer=%d delta=%.6f "
+                "simBefore=%.6f accBefore=%.6f simAfter=%.6f accAfter=%.6f "
+                "alive=%zu histories=%zu samples=%zu maxSamples=%zu "
+                "segments=%.3f subdivision=%.3f trailLength=%.6f "
+                "vertices=%zu ropeVertices=%zu indices=%zu ms=%.3f",
+                static_cast<unsigned long long>(traceFrameSequence),
+                descriptor.objectId,
+                static_cast<int>(descriptor.renderer.kind),
+                inputs.frameTimeSeconds,
+                simulationBefore,
+                accumulatorBefore,
+                state.simulation.simulationTimeSeconds(),
+                state.simulation.accumulatorSeconds(),
+                state.simulation.particles().size(),
+                state.ropeTrails.size(),
+                ropeSampleCount,
+                maximumRopeSamples,
+                descriptor.renderer.segments,
+                descriptor.renderer.subdivision,
+                descriptor.renderer.length,
+                batch.vertices.size(),
+                batch.ropeVertices.size(),
+                batch.indices.size(),
+                frameTraceMilliseconds(traceStarted)
+            );
             return {std::move(state), std::move(batch)};
         } catch (const std::bad_alloc&) {
             throw;
@@ -5337,6 +5954,18 @@ struct FramePlanExecutor::Impl final {
             "TRAILRENDERER",
             descriptor.renderer.kind == FrameParticleRendererKind::spriteTrail ||
                 descriptor.renderer.kind == FrameParticleRendererKind::ropeTrail
+                ? 1 : 0
+        );
+        requireCombo(
+            "TRAILFADEALPHA",
+            descriptor.renderer.kind == FrameParticleRendererKind::ropeTrail &&
+                    descriptor.renderer.fadeAlpha
+                ? 1 : 0
+        );
+        requireCombo(
+            "TRAILFADESIZE",
+            descriptor.renderer.kind == FrameParticleRendererKind::ropeTrail &&
+                    descriptor.renderer.fadeSize
                 ? 1 : 0
         );
         effectiveCombos["SPRITESHEET"] = batch->atlas.enabled() ? 1 : 0;
@@ -5681,12 +6310,34 @@ struct FramePlanExecutor::Impl final {
                 0.0F, 0.0F, 0.0F, textureHeight / textureWidth,
             };
         }
-        prepared.renderVar0 = {
-            particleFloat(descriptor.renderer.length, "renderer length"),
-            particleFloat(descriptor.renderer.maxLength, "renderer maximum length"),
-            particleFloat(descriptor.renderer.minLength, "renderer minimum length"),
-            0.0F,
-        };
+        if (descriptor.renderer.kind ==
+            FrameParticleRendererKind::ropeTrail) {
+            // genericropeparticle assigns a different contract to g_RenderVar0
+            // than genericparticle: x/w are history segment capacities and z
+            // is progress toward the next history sample.
+            prepared.renderVar0 = {
+                batch->ropeSegmentMaxCountUnscaled,
+                0.0F,
+                batch->ropeSegmentTimeOffset,
+                batch->ropeSegmentMaxCount,
+            };
+        } else if (descriptor.renderer.kind ==
+                   FrameParticleRendererKind::spriteTrail) {
+            prepared.renderVar0 = {
+                particleFloat(descriptor.renderer.length, "renderer length"),
+                particleFloat(
+                    descriptor.renderer.maxLength,
+                    "renderer maximum length"
+                ),
+                particleFloat(
+                    descriptor.renderer.minLength,
+                    "renderer minimum length"
+                ),
+                0.0F,
+            };
+        } else {
+            prepared.renderVar0 = {};
+        }
         static_cast<void>(particleFloat(inputs.timeSeconds, "frame time"));
         const auto& overrides = descriptor.configuration.overrides;
         prepared.commonUniforms = prepareCommonUniforms(
@@ -7266,12 +7917,146 @@ struct FramePlanExecutor::Impl final {
         std::rethrow_exception(original);
     }
 
+    static constexpr std::size_t frameStageCount = 9;
+
+    void recordFrameStats(
+        double deltaSeconds,
+        double renderMilliseconds,
+        const std::array<double, frameStageCount>& stageMilliseconds,
+        std::size_t operationCount
+    ) {
+        if (!frameStatsEnabled()) return;
+        ++frameStats.frames;
+        frameStats.deltaSum += deltaSeconds;
+        frameStats.renderSum += renderMilliseconds;
+        frameStats.deltaMinimum = std::min(
+            frameStats.deltaMinimum, deltaSeconds
+        );
+        frameStats.deltaMaximum = std::max(
+            frameStats.deltaMaximum, deltaSeconds
+        );
+        frameStats.renderMaximum = std::max(
+            frameStats.renderMaximum, renderMilliseconds
+        );
+        if (deltaSeconds > 0.020) ++frameStats.deltaOver20Milliseconds;
+        if (deltaSeconds > 0.025) ++frameStats.deltaOver25Milliseconds;
+        if (deltaSeconds > 1.0 / 30.0) {
+            ++frameStats.deltaOverOneThirtySecond;
+        }
+        if (renderMilliseconds > 16.6667) {
+            ++frameStats.renderOverOneSixtySecond;
+        }
+        for (std::size_t index = 0; index < frameStageCount; ++index) {
+            frameStats.stageSums[index] += stageMilliseconds[index];
+        }
+        std::size_t aliveParticleCount = 0;
+        std::size_t ropeHistoryCount = 0;
+        std::size_t ropeSampleCount = 0;
+        for (const auto& [objectId, state] : particles) {
+            static_cast<void>(objectId);
+            aliveParticleCount += state.simulation.particles().size();
+            ropeHistoryCount += state.ropeTrails.size();
+            for (const auto& [spawnId, history] : state.ropeTrails) {
+                static_cast<void>(spawnId);
+                ropeSampleCount += history.samples.size();
+            }
+        }
+        std::size_t vertexCount = 0;
+        std::size_t ropeVertexCount = 0;
+        std::size_t indexCount = 0;
+        if (lastFrame) {
+            for (const auto& [objectIndex, batch] :
+                 lastFrame->particleBatches) {
+                static_cast<void>(objectIndex);
+                vertexCount += batch.vertices.size();
+                ropeVertexCount += batch.ropeVertices.size();
+                indexCount += batch.indices.size();
+            }
+        }
+        frameStats.operationSum += operationCount;
+        frameStats.aliveParticleSum += aliveParticleCount;
+        frameStats.ropeHistorySum += ropeHistoryCount;
+        frameStats.ropeSampleSum += ropeSampleCount;
+        frameStats.vertexSum += vertexCount;
+        frameStats.ropeVertexSum += ropeVertexCount;
+        frameStats.indexSum += indexCount;
+        if (frameStats.deltaSum < 2.0 || frameStats.frames == 0) return;
+
+        const double frameCount = static_cast<double>(frameStats.frames);
+        frameStatsLog(
+            "frames=%llu deltaAvgMs=%.3f deltaMinMs=%.3f "
+            "deltaMaxMs=%.3f deltaOver20=%llu deltaOver25=%llu "
+            "deltaOver33=%llu renderAvgMs=%.3f renderMaxMs=%.3f "
+            "renderOver16=%llu stagesMs={graph:%.3f arena:%.3f "
+            "preflight:%.3f execute:%.3f} workAvg={ops:%.1f alive:%.1f "
+            "histories:%.1f samples:%.1f vertices:%.1f ropeVertices:%.1f "
+            "indices:%.1f}",
+            static_cast<unsigned long long>(frameStats.frames),
+            frameStats.deltaSum * 1000.0 /
+                static_cast<double>(frameStats.frames),
+            frameStats.deltaMinimum * 1000.0,
+            frameStats.deltaMaximum * 1000.0,
+            static_cast<unsigned long long>(
+                frameStats.deltaOver20Milliseconds
+            ),
+            static_cast<unsigned long long>(
+                frameStats.deltaOver25Milliseconds
+            ),
+            static_cast<unsigned long long>(
+                frameStats.deltaOverOneThirtySecond
+            ),
+            frameStats.renderSum /
+                static_cast<double>(frameStats.frames),
+            frameStats.renderMaximum,
+            static_cast<unsigned long long>(
+                frameStats.renderOverOneSixtySecond
+            ),
+            frameStats.stageSums[2] / frameCount,
+            frameStats.stageSums[4] / frameCount,
+            frameStats.stageSums[5] / frameCount,
+            frameStats.stageSums[7] / frameCount,
+            static_cast<double>(frameStats.operationSum) / frameCount,
+            static_cast<double>(frameStats.aliveParticleSum) / frameCount,
+            static_cast<double>(frameStats.ropeHistorySum) / frameCount,
+            static_cast<double>(frameStats.ropeSampleSum) / frameCount,
+            static_cast<double>(frameStats.vertexSum) / frameCount,
+            static_cast<double>(frameStats.ropeVertexSum) / frameCount,
+            static_cast<double>(frameStats.indexSum) / frameCount
+        );
+        frameStats = {};
+    }
+
     void render(
         const FrameInputs& inputs,
         std::optional<PresentationViewport> presentation = std::nullopt,
         std::optional<PresentationScaling> scaling = std::nullopt,
         std::optional<PhysicalRenderTarget> physicalTarget = std::nullopt
     ) {
+        const auto traceStarted = FrameTraceClock::now();
+        auto traceStageStarted = traceStarted;
+        std::array<double, frameStageCount> stageMilliseconds{};
+        std::size_t stageIndex = 0;
+        const std::uint64_t currentTraceFrame = ++traceFrameSequence;
+        const auto traceStage = [&](const char* stage) {
+            const auto now = FrameTraceClock::now();
+            frameTraceLog(
+                "executor.stage frame=%llu stage=%s ms=%.3f",
+                static_cast<unsigned long long>(currentTraceFrame),
+                stage,
+                frameTraceMilliseconds(traceStageStarted, now)
+            );
+            if (stageIndex < stageMilliseconds.size()) {
+                stageMilliseconds[stageIndex++] =
+                    frameTraceMilliseconds(traceStageStarted, now);
+            }
+            traceStageStarted = now;
+        };
+        frameTraceLog(
+            "executor.begin frame=%llu runtime=%.6f delta=%.6f",
+            static_cast<unsigned long long>(currentTraceFrame),
+            inputs.timeSeconds,
+            inputs.frameTimeSeconds
+        );
         try {
             FrameInputs effectiveInputs = inputs;
             effectiveInputs.pointerActive = pointerActive;
@@ -7308,11 +8093,13 @@ struct FramePlanExecutor::Impl final {
             const ResolvedFrameInputs resolvedInputs = resolveInputs(
                 effectiveInputs, presentation, scaling
             );
+            traceStage("resolveInputs");
             std::vector<script::ScriptCursorEvent> cursorEvents =
                 updateCursorEvents(
                     lastFrame ? &lastFrame->sourcePlan : nullptr,
                     resolvedInputs
                 );
+            traceStage("cursorEvents");
             EvaluatedFramePlan evaluated = frameGraph->evaluate(
                 {
                     .runtimeSeconds = resolvedInputs.timeSeconds,
@@ -7330,7 +8117,9 @@ struct FramePlanExecutor::Impl final {
                 },
                 projectionFallback
             );
+            traceStage("frameGraphEvaluate");
             resolveTextEffectGeometry(evaluated.plan);
+            traceStage("textGeometry");
             const FramePlan& logicalPlan = evaluated.plan;
             std::optional<FramePlan> physicalPlan;
             const FramePlan* executionPlan = &logicalPlan;
@@ -7356,6 +8145,7 @@ struct FramePlanExecutor::Impl final {
             );
             auto session = ensureDevice().activate();
             prepareFrameArena(session, plan, groups);
+            traceStage("frameArena");
             PreparedFrame prepared = preflightFrameObjects(
                 session,
                 logicalPlan,
@@ -7365,9 +8155,13 @@ struct FramePlanExecutor::Impl final {
                 workingParallax,
                 camera
             );
+            traceStage("preflight");
             beginFrameOutput(session, plan);
+            traceStage("beginOutput");
             executePreparedOperations(session, prepared);
+            traceStage("execute");
             textRenderer.trimCache(session);
+            traceStage("trimCache");
 
             LastFrameState published{
                 .sourcePlan = std::move(evaluated.plan),
@@ -7381,7 +8175,30 @@ struct FramePlanExecutor::Impl final {
             parallaxDisplacement = workingParallax;
             lastPublishedPointer = resolvedInputs.pointerPosition;
             hasPublishedPointer = true;
+            const double totalMilliseconds = frameTraceMilliseconds(
+                traceStarted
+            );
+            frameTraceLog(
+                "executor.end frame=%llu totalMs=%.3f operations=%zu "
+                "particleObjects=%zu particleBatches=%zu",
+                static_cast<unsigned long long>(currentTraceFrame),
+                totalMilliseconds,
+                plan.operations.size(),
+                particles.size(),
+                lastFrame->particleBatches.size()
+            );
+            recordFrameStats(
+                resolvedInputs.frameTimeSeconds,
+                totalMilliseconds,
+                stageMilliseconds,
+                plan.operations.size()
+            );
         } catch (...) {
+            frameTraceLog(
+                "executor.fail frame=%llu totalMs=%.3f",
+                static_cast<unsigned long long>(currentTraceFrame),
+                frameTraceMilliseconds(traceStarted)
+            );
             failFrame(std::current_exception());
         }
     }
@@ -7472,6 +8289,7 @@ struct FramePlanExecutor::Impl final {
         const PresentationViewport& presentation,
         PresentationScaling scaling
     ) {
+        const auto traceStarted = FrameTraceClock::now();
         if (borrowedContext == nullptr) {
             throw Error(
                 ErrorCode::invalidArgument,
@@ -7518,10 +8336,13 @@ struct FramePlanExecutor::Impl final {
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         if (slice.hasContent) {
-            blitWallpaperEngineOutput(
+            presentationRenderer.draw(
+                session,
                 output,
                 0,
                 GL_BACK,
+                presentation.drawableWidth,
+                presentation.drawableHeight,
                 slice,
                 GL_LINEAR
             );
@@ -7529,6 +8350,15 @@ struct FramePlanExecutor::Impl final {
         session.checkError(ErrorCode::draw, "presenting the scene frame to the drawable");
         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        frameTraceLog(
+            "executor.present frame=%llu drawable=%ux%u output=%ux%u ms=%.3f",
+            static_cast<unsigned long long>(traceFrameSequence),
+            presentation.drawableWidth,
+            presentation.drawableHeight,
+            output.width,
+            output.height,
+            frameTraceMilliseconds(traceStarted)
+        );
     }
 
     std::shared_ptr<SceneFrameGraph> frameGraph;
@@ -7541,6 +8371,7 @@ struct FramePlanExecutor::Impl final {
     std::map<std::string, AssetTextureResource> assets;
     std::map<std::string, ProgramResource> programs;
     TextCoverageRenderer textRenderer;
+    PresentationRenderer presentationRenderer;
     std::map<TextRasterKey, CachedTextRaster> textRasters;
     std::size_t textRasterBytes = 0;
     std::uint64_t textRasterUseSequence = 0;
@@ -7581,6 +8412,27 @@ struct FramePlanExecutor::Impl final {
     HostTextureSlot mediaThumbnailCurrent;
     HostTextureSlot mediaThumbnailPrevious;
     std::vector<script::ScriptSoundRuntimeSnapshot> soundRuntimeStates;
+    std::uint64_t traceFrameSequence = 0;
+    struct FrameStatsState final {
+        std::uint64_t frames = 0;
+        double deltaSum = 0.0;
+        double deltaMinimum = std::numeric_limits<double>::infinity();
+        double deltaMaximum = 0.0;
+        double renderSum = 0.0;
+        double renderMaximum = 0.0;
+        std::uint64_t deltaOver20Milliseconds = 0;
+        std::uint64_t deltaOver25Milliseconds = 0;
+        std::uint64_t deltaOverOneThirtySecond = 0;
+        std::uint64_t renderOverOneSixtySecond = 0;
+        std::array<double, frameStageCount> stageSums{};
+        std::uint64_t operationSum = 0;
+        std::uint64_t aliveParticleSum = 0;
+        std::uint64_t ropeHistorySum = 0;
+        std::uint64_t ropeSampleSum = 0;
+        std::uint64_t vertexSum = 0;
+        std::uint64_t ropeVertexSum = 0;
+        std::uint64_t indexSum = 0;
+    } frameStats;
 
     [[nodiscard]] FramebufferResourceStats framebufferResourceStats() const noexcept {
         FramebufferResourceStats result{

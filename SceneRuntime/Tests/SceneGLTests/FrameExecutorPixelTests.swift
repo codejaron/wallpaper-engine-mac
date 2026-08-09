@@ -515,6 +515,40 @@ final class FrameExecutorPixelTests: XCTestCase {
         }
     }
 
+    func testPuppetAnimationLayerDeformsWeightedVerticesAsTimeAdvances() throws {
+        let loaded = try loadFixture(
+            fragmentSource: constantRedFragmentShader,
+            projectionWidth: 4,
+            projectionHeight: 2,
+            imageOrigin: "2 1 0",
+            imageSize: "2 2",
+            puppetData: makeAnimatedPuppetMesh(),
+            puppetAnimationLayer: [
+                "additive": false,
+                "animation": 7,
+                "blend": 1.0,
+                "id": 11,
+                "name": "Translation",
+                "rate": 1.0,
+                "visible": true,
+            ]
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, timeSeconds: 0)
+        let initialPixels = try readPixels(loaded.executor)
+        try render(loaded.executor, timeSeconds: 0.5)
+        let deformedPixels = try readPixels(loaded.executor)
+
+        XCTAssertNotEqual(
+            deformedPixels,
+            initialPixels,
+            "An active animation layer must deform the mesh through its bone weights"
+        )
+        XCTAssertTrue(containsOpaqueRedPixel(initialPixels))
+        XCTAssertTrue(containsOpaqueRedPixel(deformedPixels))
+    }
+
     func testPuppetMeshUsesTheFirstValidBlockWhenPayloadContainsAnotherBlock() throws {
         // Linux stops at the first structurally valid MDLV block. Keep a
         // second valid block in the payload to guard against accidentally
@@ -940,6 +974,30 @@ final class FrameExecutorPixelTests: XCTestCase {
             repeatedPixel([128, 128, 0, 255]),
             "A new paused revision must run one real script evaluation"
         )
+    }
+
+    func testBoundAnimationsUseTheSameContractAcrossOwnersAndMediaEvents() throws {
+        for owner in ["layer", "material"] {
+            let loaded = try loadFixture(
+                fragmentSource: constantRedFragmentShader,
+                scriptedMediaBoundAlphaAnimation: owner == "layer",
+                scriptedMediaBoundMaterialAnimation: owner == "material"
+            )
+            defer { destroy(loaded) }
+
+            try setMediaSnapshot(
+                loaded.executor,
+                revision: 1,
+                playbackState: WE_SCENE_MEDIA_PLAYING,
+                title: "Bound animation",
+                artist: "Contract test",
+                position: 0,
+                duration: 1,
+                hasThumbnail: true
+            )
+            try render(loaded.executor, timeSeconds: 1)
+            try assertNoExecutorIssues(loaded.executor)
+        }
     }
 
     func testProvidedLinuxAudioSpectrumBindsHighestActiveElement() throws {
@@ -2088,6 +2146,22 @@ final class FrameExecutorPixelTests: XCTestCase {
         })
     }
 
+    func testTextAcceptsFiniteShaderRangeColorAndOpacity() throws {
+        let loaded = try loadTextFixture(
+            font: "systemfont_arial",
+            color: "510 0 0 255",
+            alpha: 1.5
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        let pixels = try readPixels(loaded.executor)
+        XCTAssertTrue(stride(from: 0, to: pixels.count, by: 4).contains {
+            pixels[$0] == 255
+        })
+    }
+
     func testTextOpacityEffectPreservesLayoutAndControlsCompositing() throws {
         let direct = try loadTextFixture(
             font: "systemfont_arial",
@@ -2984,9 +3058,12 @@ final class FrameExecutorPixelTests: XCTestCase {
         includeStaticSecondImageSameShader: Bool = false,
         nearPlane: Double = 0,
         puppetData: Data? = nil,
+        puppetAnimationLayer: [String: Any]? = nil,
         scriptedAudioAmount: Bool = false,
         scriptedAudioOrigin: Bool = false,
         scriptedMediaAmount: Bool = false,
+        scriptedMediaBoundAlphaAnimation: Bool = false,
+        scriptedMediaBoundMaterialAnimation: Bool = false,
         textureAnimationScript: String? = nil,
         sceneTexturePropertyKey: String? = nil,
         hostTextureNames: [String] = [],
@@ -3023,9 +3100,12 @@ final class FrameExecutorPixelTests: XCTestCase {
             includeStaticSecondImageSameShader: includeStaticSecondImageSameShader,
             nearPlane: nearPlane,
             puppetData: puppetData,
+            puppetAnimationLayer: puppetAnimationLayer,
             scriptedAudioAmount: scriptedAudioAmount,
             scriptedAudioOrigin: scriptedAudioOrigin,
             scriptedMediaAmount: scriptedMediaAmount,
+            scriptedMediaBoundAlphaAnimation: scriptedMediaBoundAlphaAnimation,
+            scriptedMediaBoundMaterialAnimation: scriptedMediaBoundMaterialAnimation,
             textureAnimationScript: textureAnimationScript,
             sceneTexturePropertyKey: sceneTexturePropertyKey,
             hostTextureNames: hostTextureNames,
@@ -3103,6 +3183,8 @@ final class FrameExecutorPixelTests: XCTestCase {
         padding: String = "0 0",
         text: String = "I",
         pointSize: Double = 20,
+        color: String = "255 0 0 255",
+        alpha: Double = 1,
         spacing: String = "0 0",
         maximumWidth: Double? = nil,
         maximumRows: Int? = nil,
@@ -3131,7 +3213,7 @@ final class FrameExecutorPixelTests: XCTestCase {
             "type": "scene", "version": 2,
         ]
         var textObject: [String: Any] = [
-            "alpha": 1, "color": "255 0 0 255", "font": font,
+            "alpha": alpha, "color": color, "font": font,
             "horizontalalign": horizontalAlignment, "id": 1, "name": "Text",
             "origin": origin, "padding": padding, "pointsize": pointSize,
             "scale": scale, "size": size, "spacing": spacing, "text": text,
@@ -3770,9 +3852,12 @@ final class FrameExecutorPixelTests: XCTestCase {
         includeStaticSecondImageSameShader: Bool = false,
         nearPlane: Double = 0,
         puppetData: Data? = nil,
+        puppetAnimationLayer: [String: Any]? = nil,
         scriptedAudioAmount: Bool = false,
         scriptedAudioOrigin: Bool = false,
         scriptedMediaAmount: Bool = false,
+        scriptedMediaBoundAlphaAnimation: Bool = false,
+        scriptedMediaBoundMaterialAnimation: Bool = false,
         textureAnimationScript: String? = nil,
         sceneTexturePropertyKey: String? = nil,
         hostTextureNames: [String] = [],
@@ -3941,6 +4026,50 @@ final class FrameExecutorPixelTests: XCTestCase {
             "type": "scene",
             "version": 2,
         ]
+        let boundTimelineAnimation: [String: Any] = [
+            "c0": [
+                ["frame": 0, "value": 0.0],
+                ["frame": 10, "value": 1.0],
+            ],
+            "options": [
+                "fps": 10,
+                "length": 10,
+                "mode": "single",
+                "startpaused": true,
+            ],
+        ]
+        let boundTimelineScript = """
+        function animationContract(stage) {
+            const animation = thisObject.getAnimation();
+            if (animation.fps !== 10 || animation.frameCount !== 10 ||
+                animation.duration !== 1) {
+                throw new Error(stage + ': bound animation metadata mismatch');
+            }
+            return animation;
+        }
+        export function init(value) {
+            animationContract('init').stop();
+            return value;
+        }
+        export function update(value) {
+            animationContract('update');
+            return value;
+        }
+        export function mediaPlaybackChanged(event) {
+            if (event.state !== MediaPlaybackEvent.PLAYBACK_PLAYING) return;
+            animationContract('mediaPlaybackChanged').setFrame(2);
+        }
+        export function mediaThumbnailChanged(event) {
+            if (!event.hasThumbnail) return;
+            const animation = animationContract('mediaThumbnailChanged');
+            animation.rate = 2;
+            animation.play();
+            if (!animation.isPlaying() || animation.getFrame() !== 2 ||
+                animation.rate !== 2) {
+                throw new Error('bound animation playback state mismatch');
+            }
+        }
+        """
         let defaultOrigin = "\(Double(projectionWidth) * 0.5) \(Double(projectionHeight) * 0.5) 0"
         var image: [String: Any] = [
             "id": 1,
@@ -3993,6 +4122,9 @@ final class FrameExecutorPixelTests: XCTestCase {
         if perspective {
             image["perspective"] = true
         }
+        if let puppetAnimationLayer {
+            image["animationlayers"] = [puppetAnimationLayer]
+        }
         if projectionAuto && imageOrigin == nil {
             image["origin"] = "1 0 0"
         }
@@ -4018,6 +4150,13 @@ final class FrameExecutorPixelTests: XCTestCase {
                         + input.cursorScreenPosition.y / 4.0;
                 }
                 """,
+            ]
+        }
+        if scriptedMediaBoundAlphaAnimation {
+            image["alpha"] = [
+                "animation": boundTimelineAnimation,
+                "script": boundTimelineScript,
+                "value": 1.0,
             ]
         }
         if let commandMode, commandMode != .proceduralClear {
@@ -4117,7 +4256,13 @@ final class FrameExecutorPixelTests: XCTestCase {
             "version": 1,
         ]
         let amountValue: Any
-        if scriptedAudioAmount {
+        if scriptedMediaBoundMaterialAnimation {
+            amountValue = [
+                "animation": boundTimelineAnimation,
+                "script": boundTimelineScript,
+                "value": 0.0,
+            ]
+        } else if scriptedAudioAmount {
             amountValue = [
                 "value": 0.0,
                 "script": """
@@ -4595,6 +4740,84 @@ final class FrameExecutorPixelTests: XCTestCase {
         return result
     }
 
+    private func makeAnimatedPuppetMesh() -> Data {
+        let vertices: [(Float, Float, Float, Float, Float)] = [
+            (-1, 1, 0, 0, 0),
+            (1, 1, 0, 1, 0),
+            (-1, -1, 0, 0, 1),
+        ]
+        var result = Data("MDLV0021".utf8)
+        result.append(0)
+        appendUInt32(0, to: &result)
+        appendUInt32(UInt32(vertices.count * 80), to: &result)
+        for (x, y, z, u, v) in vertices {
+            let start = result.count
+            appendFloat32(x, to: &result)
+            appendFloat32(y, to: &result)
+            appendFloat32(z, to: &result)
+            result.append(Data(repeating: 0, count: 28))
+            for _ in 0..<4 { appendUInt32(0, to: &result) }
+            appendFloat32(1, to: &result)
+            for _ in 0..<3 { appendFloat32(0, to: &result) }
+            appendFloat32(u, to: &result)
+            appendFloat32(v, to: &result)
+            precondition(result.count - start == 80)
+        }
+        appendUInt32(6, to: &result)
+        appendUInt16(0, to: &result)
+        appendUInt16(1, to: &result)
+        appendUInt16(2, to: &result)
+
+        appendMagic("MDLS0003", to: &result)
+        let animationOffsetField = result.count
+        appendUInt32(0, to: &result)
+        appendUInt32(1, to: &result)
+        result.append(0)
+        appendUInt32(1, to: &result)
+        appendUInt32(UInt32.max, to: &result)
+        appendUInt32(64, to: &result)
+        let identity: [Float] = [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+        ]
+        for component in identity { appendFloat32(component, to: &result) }
+        result.append(0)
+
+        let animationOffset = result.count
+        replaceUInt32(UInt32(animationOffset), at: animationOffsetField, in: &result)
+        appendMagic("MDLA0006", to: &result)
+        let animationEndField = result.count
+        appendUInt32(0, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(7, to: &result)
+        appendUInt32(0, to: &result)
+        result.append(contentsOf: Array("Translation".utf8))
+        result.append(0)
+        result.append(contentsOf: Array("loop".utf8))
+        result.append(0)
+        appendFloat32(1, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(72, to: &result)
+        appendPuppetTransform(translationX: 0, to: &result)
+        appendPuppetTransform(translationX: 1, to: &result)
+        result.append(Data(repeating: 0, count: 36))
+        replaceUInt32(UInt32(result.count - 1), at: animationEndField, in: &result)
+        return result
+    }
+
+    private func appendPuppetTransform(translationX: Float, to data: inout Data) {
+        appendFloat32(translationX, to: &data)
+        appendFloat32(0, to: &data)
+        appendFloat32(0, to: &data)
+        for _ in 0..<3 { appendFloat32(0, to: &data) }
+        for _ in 0..<3 { appendFloat32(1, to: &data) }
+    }
+
     private func makePackage(_ entries: [(String, Data)]) -> Data {
         var table = Data()
         var payload = Data()
@@ -4666,6 +4889,13 @@ final class FrameExecutorPixelTests: XCTestCase {
 
     private func repeatedPixel(_ pixel: [UInt8], count: Int = 4) -> [UInt8] {
         Array(repeating: pixel, count: count).flatMap { $0 }
+    }
+
+    private func containsOpaqueRedPixel(_ pixels: [UInt8]) -> Bool {
+        stride(from: 0, to: pixels.count, by: 4).contains { offset in
+            pixels[offset] == 255 && pixels[offset + 1] == 0 &&
+                pixels[offset + 2] == 0 && pixels[offset + 3] == 255
+        }
     }
 
     private func repeatedRows(_ row: [[UInt8]], count: Int) -> [UInt8] {

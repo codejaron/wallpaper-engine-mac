@@ -1,5 +1,6 @@
 import Accelerate
 import AudioToolbox
+import CSceneAudioRealtime
 import Foundation
 
 /// The six fixed-size spectrum arrays exposed by Wallpaper Engine shaders.
@@ -69,7 +70,7 @@ private func maximumSpectrumLevel(
 public final class WallpaperEngineAudioSpectrumAnalyzer: @unchecked Sendable {
     public static let sampleCount = 1024
 
-    private struct ChannelState {
+    private final class ChannelState {
         var spectrum16 = [Float](repeating: 0, count: 16)
         var spectrum32 = [Float](repeating: 0, count: 32)
         var spectrum64 = [Float](repeating: 0, count: 64)
@@ -78,8 +79,17 @@ public final class WallpaperEngineAudioSpectrumAnalyzer: @unchecked Sendable {
     private let transform: vDSP.DiscreteFourierTransform<Float>
     private let window: [Float]
     private let magnitudeNormalization: Float
-    private var leftState = ChannelState()
-    private var rightState = ChannelState()
+    private var windowed: [Float]
+    private let imaginaryInput: [Float]
+    private var realOutput: [Float]
+    private var imaginaryOutput: [Float]
+    private var magnitudes: [Float]
+    private var bandRanges64: [Range<Int>] = []
+    private var bandRangeSampleRate: Double?
+    private let leftState = ChannelState()
+    private let rightState = ChannelState()
+    private let leftDestination = ChannelState()
+    private let rightDestination = ChannelState()
 
     public init() {
         do {
@@ -101,11 +111,19 @@ public final class WallpaperEngineAudioSpectrumAnalyzer: @unchecked Sendable {
             return 0.5 - 0.5 * cos(phase)
         }
         magnitudeNormalization = 2 / window.reduce(0, +)
+        windowed = [Float](repeating: 0, count: Self.sampleCount)
+        imaginaryInput = [Float](repeating: 0, count: Self.sampleCount)
+        realOutput = [Float](repeating: 0, count: Self.sampleCount)
+        imaginaryOutput = [Float](repeating: 0, count: Self.sampleCount)
+        magnitudes = [Float](repeating: 0, count: Self.sampleCount / 2)
     }
 
     public func reset() {
-        leftState = ChannelState()
-        rightState = ChannelState()
+        for state in [leftState, rightState, leftDestination, rightDestination] {
+            state.spectrum16 = [Float](repeating: 0, count: 16)
+            state.spectrum32 = [Float](repeating: 0, count: 32)
+            state.spectrum64 = [Float](repeating: 0, count: 64)
+        }
     }
 
     /// Feed one complete stereo window. A genuinely mono source is duplicated
@@ -121,16 +139,17 @@ public final class WallpaperEngineAudioSpectrumAnalyzer: @unchecked Sendable {
         precondition(right.count == Self.sampleCount)
         precondition(sampleRate.isFinite && sampleRate > 0)
 
-        let leftDestination = analyze(samples: left, sampleRate: sampleRate)
-        let rightDestination = analyze(samples: right, sampleRate: sampleRate)
+        prepareBandRanges(sampleRate: sampleRate)
+        analyze(samples: left, destination: leftDestination)
+        analyze(samples: right, destination: rightDestination)
         let windowDuration = Double(Self.sampleCount) / sampleRate
         smooth(
-            state: &leftState,
+            state: leftState,
             destination: leftDestination,
             windowDuration: windowDuration
         )
         smooth(
-            state: &rightState,
+            state: rightState,
             destination: rightDestination,
             windowDuration: windowDuration
         )
@@ -147,67 +166,74 @@ public final class WallpaperEngineAudioSpectrumAnalyzer: @unchecked Sendable {
 
     private func analyze(
         samples: [Float],
-        sampleRate: Double
-    ) -> ChannelState {
-        var windowed = [Float](repeating: 0, count: Self.sampleCount)
+        destination: ChannelState
+    ) {
         vDSP.multiply(samples, window, result: &windowed)
-        let imaginary = [Float](repeating: 0, count: Self.sampleCount)
-        var realOutput = [Float](repeating: 0, count: Self.sampleCount)
-        var imaginaryOutput = [Float](repeating: 0, count: Self.sampleCount)
         transform.transform(
             inputReal: windowed,
-            inputImaginary: imaginary,
+            inputImaginary: imaginaryInput,
             outputReal: &realOutput,
             outputImaginary: &imaginaryOutput
         )
 
         let positiveBinCount = Self.sampleCount / 2
-        var magnitudes = [Float](repeating: 0, count: positiveBinCount)
+        magnitudes[0] = 0
         for index in 1..<positiveBinCount {
             magnitudes[index] = hypot(
                 realOutput[index], imaginaryOutput[index]
             ) * magnitudeNormalization
         }
-        return ChannelState(
-            spectrum16: reduceBands(
-                magnitudes: magnitudes,
-                count: 16,
-                sampleRate: sampleRate
-            ),
-            spectrum32: reduceBands(
-                magnitudes: magnitudes,
-                count: 32,
-                sampleRate: sampleRate
-            ),
-            spectrum64: reduceBands(
-                magnitudes: magnitudes,
-                count: 64,
-                sampleRate: sampleRate
+        for band in 0..<64 {
+            var peak: Float = 0
+            for index in bandRanges64[band] {
+                peak = max(peak, magnitudes[index])
+            }
+            destination.spectrum64[band] = spectrumLevel(for: peak)
+        }
+        for band in 0..<32 {
+            let first = band * 2
+            destination.spectrum32[band] = max(
+                destination.spectrum64[first],
+                destination.spectrum64[first + 1]
             )
-        )
+        }
+        for band in 0..<16 {
+            let first = band * 4
+            destination.spectrum16[band] = max(
+                max(
+                    destination.spectrum64[first],
+                    destination.spectrum64[first + 1]
+                ),
+                max(
+                    destination.spectrum64[first + 2],
+                    destination.spectrum64[first + 3]
+                )
+            )
+        }
     }
 
-    private func reduceBands(
-        magnitudes: [Float],
-        count: Int,
+    private func prepareBandRanges(
         sampleRate: Double
-    ) -> [Float] {
+    ) {
+        if bandRangeSampleRate == sampleRate { return }
         let nyquist = sampleRate * 0.5
         let highestFrequency = min(20_000, nyquist)
         let binWidth = sampleRate / Double(Self.sampleCount)
         let lowestFrequency = max(20, binWidth)
         guard highestFrequency > lowestFrequency else {
-            return [Float](repeating: 0, count: count)
+            bandRanges64 = Array(repeating: 0..<0, count: 64)
+            bandRangeSampleRate = sampleRate
+            return
         }
         let ratio = highestFrequency / lowestFrequency
-        return (0..<count).map { band in
+        bandRanges64 = (0..<64).map { band in
             let lowerFrequency = lowestFrequency * pow(
                 ratio,
-                Double(band) / Double(count)
+                Double(band) / 64
             )
             let upperFrequency = lowestFrequency * pow(
                 ratio,
-                Double(band + 1) / Double(count)
+                Double(band + 1) / 64
             )
             let lowerBin = min(
                 max(Int(floor(lowerFrequency / binWidth)), 1),
@@ -217,17 +243,20 @@ public final class WallpaperEngineAudioSpectrumAnalyzer: @unchecked Sendable {
                 max(Int(ceil(upperFrequency / binWidth)), lowerBin + 1),
                 magnitudes.count
             )
-            let peak = magnitudes[lowerBin..<upperBin].max() ?? 0
-            guard peak > 0, peak.isFinite else { return 0 }
-            // A -80 dB noise floor maps to zero and full scale maps to one.
-            // Do not upper-clamp: Wallpaper Engine explicitly permits levels
-            // greater than one for loud mixed sources.
-            return max(0, (20 * log10(peak) + 80) / 80)
+            return lowerBin..<upperBin
         }
+        bandRangeSampleRate = sampleRate
+    }
+
+    private func spectrumLevel(for peak: Float) -> Float {
+        guard peak > 0, peak.isFinite else { return 0 }
+        // A -80 dB noise floor maps to zero and full scale maps to one. Do not
+        // upper-clamp: Wallpaper Engine permits levels above one.
+        return max(0, (20 * log10(peak) + 80) / 80)
     }
 
     private func smooth(
-        state: inout ChannelState,
+        state: ChannelState,
         destination: ChannelState,
         windowDuration: Double
     ) {
@@ -277,6 +306,164 @@ struct CapturedAudioSamples: Equatable, Sendable {
         self.sampleRate = sampleRate
         self.left = left
         self.right = right
+    }
+}
+
+/// Single-producer/single-consumer PCM storage. Core Audio only calls `write`;
+/// the analysis queue is the sole reader. All storage is allocated at init.
+final class RealtimeStereoPCMBuffer: @unchecked Sendable {
+    private let storage: OpaquePointer
+
+    init?(capacityFrames: Int) {
+        guard capacityFrames > WallpaperEngineAudioSpectrumAnalyzer.sampleCount,
+              let storage = WEAudioRingBufferCreate(UInt32(capacityFrames)) else {
+            return nil
+        }
+        self.storage = storage
+    }
+
+    deinit {
+        WEAudioRingBufferDestroy(storage)
+    }
+
+    @discardableResult
+    func write(
+        _ input: UnsafePointer<AudioBufferList>,
+        frameCount: Int,
+        format: AudioStreamBasicDescription
+    ) -> Bool {
+        guard frameCount > 0, frameCount <= Int(UInt32.max) else { return false }
+        var format = format
+        return WEAudioRingBufferWrite(
+            storage,
+            input,
+            UInt32(frameCount),
+            &format
+        )
+    }
+
+    func readLatest(
+        left: inout [Float],
+        right: inout [Float]
+    ) -> Double? {
+        precondition(!left.isEmpty && left.count == right.count)
+        var sampleRate = 0.0
+        let didRead = left.withUnsafeMutableBufferPointer { leftBuffer in
+            right.withUnsafeMutableBufferPointer { rightBuffer in
+                WEAudioRingBufferReadLatest(
+                    storage,
+                    leftBuffer.baseAddress,
+                    rightBuffer.baseAddress,
+                    UInt32(leftBuffer.count),
+                    &sampleRate
+                )
+            }
+        }
+        return didRead ? sampleRate : nil
+    }
+
+    var droppedFrameCount: UInt64 {
+        WEAudioRingBufferDroppedFrames(storage)
+    }
+
+    func reset() {
+        WEAudioRingBufferReset(storage)
+    }
+}
+
+/// Bounded-rate spectrum worker. It consumes the newest complete PCM window,
+/// so a delayed worker never performs a burst of stale FFTs to catch up.
+private final class RealtimeAudioSpectrumPipeline: @unchecked Sendable {
+    typealias Publisher = @Sendable (
+        SceneAudioSpectrumFrame,
+        Float,
+        Double
+    ) -> Void
+
+    let id: UUID
+    let ringBuffer: RealtimeStereoPCMBuffer
+    private let publisher: Publisher
+    private let workerQueue = DispatchQueue(
+        label: "com.winddog.wallpaper-engine.audio-spectrum",
+        qos: .userInitiated
+    )
+    private let analyzer = WallpaperEngineAudioSpectrumAnalyzer()
+    private var left = [Float](
+        repeating: 0,
+        count: WallpaperEngineAudioSpectrumAnalyzer.sampleCount
+    )
+    private var right = [Float](
+        repeating: 0,
+        count: WallpaperEngineAudioSpectrumAnalyzer.sampleCount
+    )
+    private var timer: DispatchSourceTimer?
+    private var lastReportedDroppedFrames: UInt64 = 0
+
+    init?(id: UUID, publisher: @escaping Publisher) {
+        guard let ringBuffer = RealtimeStereoPCMBuffer(capacityFrames: 16_384) else {
+            return nil
+        }
+        self.id = id
+        self.ringBuffer = ringBuffer
+        self.publisher = publisher
+    }
+
+    func start() {
+        precondition(timer == nil)
+        let nextTimer = DispatchSource.makeTimerSource(queue: workerQueue)
+        nextTimer.schedule(
+            deadline: .now(),
+            repeating: .nanoseconds(16_666_667),
+            leeway: .milliseconds(2)
+        )
+        nextTimer.setEventHandler { [weak self] in
+            self?.processLatestWindow()
+        }
+        timer = nextTimer
+        nextTimer.resume()
+    }
+
+    func stop() {
+        timer?.setEventHandler {}
+        timer?.cancel()
+        timer = nil
+    }
+
+    /// Called only after Core Audio has stopped producing into this pipeline.
+    func finishAfterCaptureStops() {
+        workerQueue.sync {
+            ringBuffer.reset()
+            analyzer.reset()
+        }
+    }
+
+    private func processLatestWindow() {
+        guard let sampleRate = ringBuffer.readLatest(
+            left: &left,
+            right: &right
+        ) else { return }
+
+        var sumOfSquares: Float = 0
+        for index in left.indices {
+            sumOfSquares += left[index] * left[index]
+            sumOfSquares += right[index] * right[index]
+        }
+        let meanSquare = sumOfSquares / Float(left.count * 2)
+        let frame = analyzer.push(
+            left: left,
+            right: right,
+            sampleRate: sampleRate
+        )
+        publisher(frame, meanSquare.squareRoot(), sampleRate)
+
+        let droppedFrames = ringBuffer.droppedFrameCount
+        if droppedFrames != lastReportedDroppedFrames {
+            lastReportedDroppedFrames = droppedFrames
+            NSLog(
+                "[SceneAudio] Dropped %llu PCM frames because spectrum analysis fell behind",
+                droppedFrames
+            )
+        }
     }
 }
 
@@ -354,15 +541,13 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
 
     private let lock = NSLock()
     private var capture: CoreAudioSystemCapture?
+    private var spectrumPipeline: RealtimeAudioSpectrumPipeline?
+    private var activePipelineID: UUID?
     private var statusStorage: SceneAudioCaptureStatus = .idle
-    private var pendingLeftSamples: [Float] = []
-    private var pendingRightSamples: [Float] = []
-    private var pendingSampleRate: Double?
     private var latestFrameStorage = SceneAudioSpectrumFrame.zero
     private var lastSignalUptime: TimeInterval?
     private var didReportPCMInput = false
     private var didReportActiveSpectrum = false
-    private let analyzer = WallpaperEngineAudioSpectrumAnalyzer()
     @MainActor private var activeLeaseIDs: Set<UUID> = []
     @MainActor private var captureAllowed = false
     @MainActor private var captureSuspended = false
@@ -493,11 +678,27 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
 
     @MainActor
     private func startCapture(generation: UUID) async throws {
+        let nextPipelineID = UUID()
+        guard let nextPipeline = RealtimeAudioSpectrumPipeline(
+            id: nextPipelineID,
+            publisher: { [weak self] frame, rms, sampleRate in
+                self?.publish(
+                    frame,
+                    rms: rms,
+                    sampleRate: sampleRate,
+                    pipelineID: nextPipelineID
+                )
+            }
+        ) else {
+            let message = "Allocating the real-time PCM ring buffer failed"
+            withLock { statusStorage = .unavailable(message) }
+            throw SceneAudioCaptureError.startFailed(message)
+        }
         do {
-            let nextCapture = try await performSystemAudioCaptureStartup { [weak self] in
-                let capture = CoreAudioSystemCapture { [weak self] samples in
-                    self?.append(samples)
-                }
+            let nextCapture = try await performSystemAudioCaptureStartup {
+                let capture = CoreAudioSystemCapture(
+                    ringBuffer: nextPipeline.ringBuffer
+                )
                 try capture.start()
                 return capture
             }
@@ -507,14 +708,18 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
                   capturePolicy.shouldRun else {
                 await Task.detached(priority: .utility) {
                     nextCapture.stop()
+                    nextPipeline.finishAfterCaptureStops()
                 }.value
                 throw CancellationError()
             }
 
             withLock {
                 capture = nextCapture
+                spectrumPipeline = nextPipeline
+                activePipelineID = nextPipeline.id
                 statusStorage = .running
             }
+            nextPipeline.start()
         } catch is CancellationError {
             withLock {
                 if capture == nil { statusStorage = .idle }
@@ -566,78 +771,63 @@ public final class SceneSystemAudioSpectrumProvider: @unchecked Sendable {
         // the sole startup operation; it will observe the latest policy before
         // publishing its capture and clean up off the main thread otherwise.
         if startTask == nil { startGeneration = nil }
-        let currentCapture = withLock { () -> CoreAudioSystemCapture? in
+        let current = withLock {
+            () -> (CoreAudioSystemCapture?, RealtimeAudioSpectrumPipeline?) in
             let currentCapture = capture
+            let currentPipeline = spectrumPipeline
             capture = nil
+            spectrumPipeline = nil
+            activePipelineID = nil
             statusStorage = .idle
-            pendingLeftSamples.removeAll(keepingCapacity: true)
-            pendingRightSamples.removeAll(keepingCapacity: true)
-            pendingSampleRate = nil
-            analyzer.reset()
             latestFrameStorage = .zero
             lastSignalUptime = nil
             didReportPCMInput = false
             didReportActiveSpectrum = false
-            return currentCapture
+            return (currentCapture, currentPipeline)
         }
-        if let currentCapture {
+        current.1?.stop()
+        if let currentCapture = current.0 {
+            let currentPipeline = current.1
             Task.detached(priority: .utility) {
                 currentCapture.stop()
+                currentPipeline?.finishAfterCaptureStops()
             }
+        } else {
+            current.1?.finishAfterCaptureStops()
         }
     }
 
-    private func append(_ samples: CapturedAudioSamples) {
-        var firstPCMInput: (sampleRate: Double, frameCount: Int)?
+    private func publish(
+        _ frame: SceneAudioSpectrumFrame,
+        rms: Float,
+        sampleRate: Double,
+        pipelineID: UUID
+    ) {
+        var firstPCMInput = false
         var firstActiveSpectrumPeak: Float?
         withLock {
+            guard activePipelineID == pipelineID else { return }
             if !didReportPCMInput {
                 didReportPCMInput = true
-                firstPCMInput = (samples.sampleRate, samples.left.count)
+                firstPCMInput = true
             }
-            if let pendingSampleRate, pendingSampleRate != samples.sampleRate {
-                pendingLeftSamples.removeAll(keepingCapacity: true)
-                pendingRightSamples.removeAll(keepingCapacity: true)
-                analyzer.reset()
-            }
-            pendingSampleRate = samples.sampleRate
-            let sumOfSquares = zip(samples.left, samples.right).reduce(
-                Float.zero
-            ) { partial, pair in
-                partial + pair.0 * pair.0 + pair.1 * pair.1
-            }
-            let meanSquare = sumOfSquares / Float(samples.left.count * 2)
-            if meanSquare.squareRoot() >= 0.0025 {
+            if rms >= 0.0025 {
                 lastSignalUptime = ProcessInfo.processInfo.systemUptime
             }
-            pendingLeftSamples.append(contentsOf: samples.left)
-            pendingRightSamples.append(contentsOf: samples.right)
-            while pendingLeftSamples.count >=
-                    WallpaperEngineAudioSpectrumAnalyzer.sampleCount {
-                let count = WallpaperEngineAudioSpectrumAnalyzer.sampleCount
-                let left = Array(pendingLeftSamples.prefix(count))
-                let right = Array(pendingRightSamples.prefix(count))
-                pendingLeftSamples.removeFirst(count)
-                pendingRightSamples.removeFirst(count)
-                latestFrameStorage = analyzer.push(
-                    left: left,
-                    right: right,
-                    sampleRate: samples.sampleRate
-                )
-                if !didReportActiveSpectrum {
-                    let peak = maximumSpectrumLevel(latestFrameStorage)
-                    if peak > 0.001 {
-                        didReportActiveSpectrum = true
-                        firstActiveSpectrumPeak = peak
-                    }
+            latestFrameStorage = frame
+            if !didReportActiveSpectrum {
+                let peak = maximumSpectrumLevel(frame)
+                if peak > 0.001 {
+                    didReportActiveSpectrum = true
+                    firstActiveSpectrumPeak = peak
                 }
             }
         }
-        if let firstPCMInput {
+        if firstPCMInput {
             NSLog(
-                "[SceneAudio] PCM input active: %.0f Hz, %d frames in first batch",
-                firstPCMInput.sampleRate,
-                Int32(firstPCMInput.frameCount)
+                "[SceneAudio] PCM input active: %.0f Hz, %d-frame analysis window",
+                sampleRate,
+                Int32(WallpaperEngineAudioSpectrumAnalyzer.sampleCount)
             )
         }
         if let firstActiveSpectrumPeak {
@@ -675,131 +865,27 @@ func decodePCMBufferList(
     frameCount: Int,
     format asbd: AudioStreamBasicDescription
 ) -> CapturedAudioSamples? {
-    let expectedChannels = Int(asbd.mChannelsPerFrame)
     guard frameCount > 0,
-          asbd.mSampleRate.isFinite,
-          asbd.mSampleRate > 0,
-          expectedChannels == 1 || expectedChannels == 2 else { return nil }
-    let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-    let isSignedInteger = (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0
-    let bytesPerSample = max(Int((asbd.mBitsPerChannel + 7) / 8), 1)
-    let nonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0 ||
-        list.count > 1
-    var decodedChannels: [[Float]] = []
-    decodedChannels.reserveCapacity(expectedChannels)
-
-    for buffer in list {
-        guard let data = buffer.mData else { continue }
-        let bufferChannels = max(Int(buffer.mNumberChannels), 1)
-        guard !nonInterleaved || bufferChannels == 1 else { return nil }
-        let channelsInBuffer = nonInterleaved ? 1 : bufferChannels
-        let bytesPerFrame = nonInterleaved
-            ? max(Int(asbd.mBytesPerFrame), bytesPerSample)
-            : max(Int(asbd.mBytesPerFrame), bytesPerSample * bufferChannels)
-        let byteCount = Int(buffer.mDataByteSize)
-        guard bytesPerFrame > 0, byteCount > 0 else { continue }
-        let availableFrames = min(frameCount, byteCount / bytesPerFrame)
-        guard availableFrames == frameCount else { return nil }
-
-        for channel in 0..<channelsInBuffer {
-            var decoded = [Float](repeating: 0, count: frameCount)
-            for frame in 0..<availableFrames {
-                let frameBase = data.advanced(by: frame * bytesPerFrame)
-                let offset = nonInterleaved ? 0 : channel * bytesPerSample
-                guard offset + bytesPerSample <= bytesPerFrame else { return nil }
-                guard let sample = decodeAudioSample(
-                    frameBase.advanced(by: offset),
-                    bytesPerSample: bytesPerSample,
-                    bitsPerChannel: Int(asbd.mBitsPerChannel),
-                    isFloat: isFloat,
-                    isSignedInteger: isSignedInteger,
-                    isBigEndian: (asbd.mFormatFlags & kAudioFormatFlagIsBigEndian) != 0
-                ) else { return nil }
-                decoded[frame] = sample
-            }
-            decodedChannels.append(decoded)
+          frameCount <= Int(UInt32.max) else { return nil }
+    let audioBufferList = list.unsafeMutablePointer
+    var left = [Float](repeating: 0, count: frameCount)
+    var right = [Float](repeating: 0, count: frameCount)
+    var format = asbd
+    let decoded = left.withUnsafeMutableBufferPointer { leftBuffer in
+        right.withUnsafeMutableBufferPointer { rightBuffer in
+            WEAudioDecodeStereoPCM(
+                audioBufferList,
+                UInt32(frameCount),
+                &format,
+                leftBuffer.baseAddress,
+                rightBuffer.baseAddress
+            )
         }
     }
-
-    guard decodedChannels.count == expectedChannels else { return nil }
-    let left = decodedChannels[0]
-    let right = expectedChannels == 2 ? decodedChannels[1] : left
+    guard decoded else { return nil }
     return CapturedAudioSamples(
         sampleRate: asbd.mSampleRate,
         left: left,
         right: right
     )
-}
-
-private func decodeAudioSample(
-    _ pointer: UnsafeMutableRawPointer,
-    bytesPerSample: Int,
-    bitsPerChannel: Int,
-    isFloat: Bool,
-    isSignedInteger: Bool,
-    isBigEndian: Bool
-) -> Float? {
-    guard bytesPerSample > 0 else { return nil }
-
-    if isFloat {
-        switch bytesPerSample {
-        case 4:
-            let bits = pointer.loadUnaligned(as: UInt32.self)
-            let ordered = isBigEndian ? bits.byteSwapped : bits
-            let value = Float(bitPattern: ordered)
-            return value.isFinite ? value : nil
-        case 8:
-            let bits = pointer.loadUnaligned(as: UInt64.self)
-            let ordered = isBigEndian ? bits.byteSwapped : bits
-            let value = Float(Double(bitPattern: ordered))
-            return value.isFinite ? value : nil
-        default:
-            return nil
-        }
-    }
-
-    guard isSignedInteger || (asbdUnsignedIntegerFormat(bytesPerSample: bytesPerSample)) else {
-        return nil
-    }
-
-    if isSignedInteger {
-        switch bytesPerSample {
-        case 1:
-            let raw = pointer.loadUnaligned(as: UInt8.self)
-            return Float(Int8(bitPattern: raw)) / 127
-        case 2:
-            let raw = pointer.loadUnaligned(as: UInt16.self)
-            let ordered = isBigEndian ? raw.byteSwapped : raw
-            return Float(Int16(bitPattern: ordered)) / Float(Int16.max)
-        case 3:
-            let bytes = pointer.assumingMemoryBound(to: UInt8.self)
-            var value = isBigEndian
-                ? (UInt32(bytes[0]) << 16) | (UInt32(bytes[1]) << 8) | UInt32(bytes[2])
-                : UInt32(bytes[0]) | (UInt32(bytes[1]) << 8) | (UInt32(bytes[2]) << 16)
-            if value & 0x80_0000 != 0 { value |= 0xFF_00_0000 }
-            return Float(Int32(bitPattern: value)) / 8_388_607
-        case 4:
-            let raw = pointer.loadUnaligned(as: UInt32.self)
-            let ordered = isBigEndian ? raw.byteSwapped : raw
-            return Float(Int32(bitPattern: ordered)) / Float(Int32.max)
-        case 8:
-            let raw = pointer.loadUnaligned(as: UInt64.self)
-            let ordered = isBigEndian ? raw.byteSwapped : raw
-            return Float(Double(Int64(bitPattern: ordered)) / Double(Int64.max))
-        default:
-            return nil
-        }
-    }
-
-    // The only unsigned PCM format accepted by the supported capture path is
-    // 8-bit unsigned PCM. Keep other formats explicit rather than treating
-    // arbitrary bytes as valid audio.
-    guard bytesPerSample == 1 else { return nil }
-    return (Float(pointer.loadUnaligned(as: UInt8.self)) - 128) / 128
-}
-
-private func asbdUnsignedIntegerFormat(bytesPerSample: Int) -> Bool {
-    // Kept as a named predicate to make the supported unsigned branch above
-    // explicit and easy to extend when Core Audio adds another tap format.
-    bytesPerSample == 1
 }

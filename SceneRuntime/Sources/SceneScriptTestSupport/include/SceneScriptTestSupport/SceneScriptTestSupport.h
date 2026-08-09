@@ -55,6 +55,8 @@ typedef struct WESceneScriptTestLayer {
     // "frames":[0.1,0.2,...]}. A null pointer means the layer has no
     // supplied animation descriptor.
     const char* texture_animation_json;
+    int32_t parent_id;
+    int has_parent;
 } WESceneScriptTestLayer;
 
 // This test-only bridge deliberately exchanges RuntimeValue as JSON. It

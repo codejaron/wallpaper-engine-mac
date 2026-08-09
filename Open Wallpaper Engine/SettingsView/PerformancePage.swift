@@ -183,7 +183,7 @@ struct PerformancePage: SettingsPage {
                     .fixedSize(horizontal: false, vertical: true)
             } header: {
                 Label("Quality", systemImage: "memorychip.fill")
-                Text("High Quality uses authored pixels; Balanced caps rendering at the display's backing-pixel density; Power Saving halves that linear resolution. FPS, scaling, and spanning also apply only to Scene wallpapers; disabled options are not yet supported.")
+                Text("High Quality uses authored pixels; Balanced preserves aspect ratio and caps rendering at 1080p; Power Saving halves that linear resolution. FPS, scaling, and spanning also apply only to Scene wallpapers; disabled options are not yet supported.")
             }
         }
         .formStyle(.grouped)

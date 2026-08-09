@@ -535,6 +535,40 @@ final class PlaybackPolicyTests: XCTestCase {
         XCTAssertEqual(GlobalSettings().scenePresentationScaling, .automatic)
     }
 
+    func testFrameSchedulingDefaultsToDisplayRate() {
+        XCTAssertEqual(GlobalSettings().fps, 60)
+    }
+
+    func testUnversionedFrameSchedulingDefaultMigratesToDisplayRate() throws {
+        let settings = try JSONDecoder().decode(
+            GlobalSettings.self,
+            from: Data(#"{"fps":30}"#.utf8)
+        )
+
+        XCTAssertEqual(settings.fps, 60)
+    }
+
+    func testUnversionedExplicitFrameSchedulingChoiceIsPreserved() throws {
+        let settings = try JSONDecoder().decode(
+            GlobalSettings.self,
+            from: Data(#"{"fps":45}"#.utf8)
+        )
+
+        XCTAssertEqual(settings.fps, 45)
+    }
+
+    func testVersionedFrameSchedulingChoiceIsPreserved() throws {
+        var settings = GlobalSettings()
+        settings.fps = 30
+
+        let restored = try JSONDecoder().decode(
+            GlobalSettings.self,
+            from: JSONEncoder().encode(settings)
+        )
+
+        XCTAssertEqual(restored.fps, 30)
+    }
+
     func testSceneRenderQualityDefaultsToAuthoredPixelsForExistingSettings() throws {
         let settings = try JSONDecoder().decode(
             GlobalSettings.self,

@@ -65,6 +65,7 @@ enum GSLogLevel: String, CaseIterable, Identifiable, Codable {
 }
 
 struct GlobalSettings: Codable, Equatable {
+    private static let currentFrameSchedulingSettingsVersion = 1
     private static let currentScenePresentationSettingsVersion = 3
     
     // MARK: Playback
@@ -83,7 +84,9 @@ struct GlobalSettings: Codable, Equatable {
     // from texture decoding quality and never adapts to measured frame time.
     var sceneRenderQuality = GSSceneRenderQuality.high
     var reflections = false
-    var fps: Double = 30
+    var fps: Double = 60
+    private var frameSchedulingSettingsVersion =
+        Self.currentFrameSchedulingSettingsVersion
 
     // MARK: Scene presentation
     // Per-screen rendering remains the default. Span mode opts into a shared
@@ -133,7 +136,8 @@ struct GlobalSettings: Codable, Equatable {
         case otherApplicationFocused, otherApplicationFullscreen,
              otherApplicationPlayingAudio, laptopOnBattery
         case antiAliasing, postProcessing, textureResolution,
-             sceneRenderQuality, reflections, fps
+             sceneRenderQuality, reflections, fps,
+             frameSchedulingSettingsVersion
         case scenePresentationScaling, sceneSpanAcrossScreens,
              scenePresentationSettingsVersion
         case autoStart, safeMode, language
@@ -157,7 +161,9 @@ struct GlobalSettings: Codable, Equatable {
         textureResolution = .automatic
         sceneRenderQuality = .high
         reflections = false
-        fps = 30
+        fps = 60
+        frameSchedulingSettingsVersion =
+            Self.currentFrameSchedulingSettingsVersion
         scenePresentationScaling = .automatic
         sceneSpanAcrossScreens = false
         scenePresentationSettingsVersion =
@@ -214,7 +220,23 @@ struct GlobalSettings: Codable, Equatable {
         reflections = try container.decodeIfPresent(
             Bool.self, forKey: .reflections
         ) ?? false
-        fps = try container.decodeIfPresent(Double.self, forKey: .fps) ?? 30
+        let storedFPS = try container.decodeIfPresent(
+            Double.self, forKey: .fps
+        )
+        let storedFrameSchedulingVersion = try container.decodeIfPresent(
+            Int.self, forKey: .frameSchedulingSettingsVersion
+        ) ?? 0
+        // Version zero used 30 FPS as the implicit default. Move that default
+        // to display-rate animation while preserving every non-default choice
+        // and all choices saved by the versioned settings UI.
+        if storedFrameSchedulingVersion == 0,
+           storedFPS == nil || storedFPS == 30 {
+            fps = 60
+        } else {
+            fps = storedFPS ?? 60
+        }
+        frameSchedulingSettingsVersion =
+            Self.currentFrameSchedulingSettingsVersion
         let storedScenePresentationVersion = try container.decodeIfPresent(
             Int.self, forKey: .scenePresentationSettingsVersion
         ) ?? 0

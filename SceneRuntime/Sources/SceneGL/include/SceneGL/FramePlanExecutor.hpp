@@ -53,8 +53,9 @@ struct MediaThumbnailRGBA8 final {
 enum class PresentationScaling { stretch, aspectFit, aspectFill, automatic };
 
 // The requested backing-pixel ceiling for an explicitly downscaled Scene
-// render. High quality is represented by no target at all so the legacy
-// author-resolution path remains byte-for-byte unchanged.
+// render. Balanced additionally applies the runtime's 1080p performance
+// ceiling; High is represented by no target so the author-resolution path
+// remains byte-for-byte unchanged.
 enum class PhysicalRenderQuality { balanced, powerSaving };
 
 struct PhysicalRenderTarget final {

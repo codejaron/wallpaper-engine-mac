@@ -188,6 +188,13 @@ typedef struct WESceneRuntimeConfiguration {
     const char* scene_package_path;
 } WESceneRuntimeConfiguration;
 
+typedef struct WESceneLocalStorageConfiguration {
+    // Stable identity of the wallpaper across all display instances.
+    const char* wallpaper_identity;
+    // Stable identity of the display used by LOCATION_SCREEN.
+    const char* screen_identity;
+} WESceneLocalStorageConfiguration;
+
 typedef struct WEScenePackageEntryInfo {
     const char* path;
     uint32_t offset;
@@ -886,6 +893,14 @@ int we_scene_model_revision(
 // of one model revision and remains valid after either owner handle is destroyed.
 WESceneGraphRef we_scene_model_graph_create(
     WESceneModelRef model,
+    WESceneRuntimeErrorRef* out_error
+);
+// Creates a graph with Wallpaper Engine-compatible persistent SceneScript
+// localStorage. The ordinary graph constructor remains available to tooling
+// that never evaluates scripts requiring host persistence.
+WESceneGraphRef we_scene_model_graph_create_with_local_storage(
+    WESceneModelRef model,
+    const WESceneLocalStorageConfiguration* configuration,
     WESceneRuntimeErrorRef* out_error
 );
 void we_scene_graph_destroy(WESceneGraphRef graph);

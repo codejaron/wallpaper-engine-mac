@@ -2827,7 +2827,7 @@ private:
         std::string_view pointer
     ) const {
         requireObject(document, source, pointer, "Particle instance override");
-        return ParticleInstanceOverride{
+        ParticleInstanceOverride result{
             .id = optionalParticleId(document, source, pointer),
             .enabled = optionalParticleDynamic(
                 document, source, "enabled", pointer, literal(true),
@@ -2866,6 +2866,52 @@ private:
                 literal(std::string("1 1 1")), DynamicValueParseMode::standard
             ),
         };
+        constexpr std::string_view prefix = "controlpoint";
+        for (const auto& [key, value] : source.items()) {
+            if (!key.starts_with(prefix) || key.size() == prefix.size()) {
+                continue;
+            }
+            const std::string_view suffix(key.data() + prefix.size(),
+                                          key.size() - prefix.size());
+            if (!std::ranges::all_of(suffix, [](unsigned char character) {
+                    return std::isdigit(character) != 0;
+                })) {
+                continue;
+            }
+            int controlPoint = 0;
+            for (const char character : suffix) {
+                const int digit = character - '0';
+                if (controlPoint >= particleControlPointSlotCount ||
+                    controlPoint >
+                        (std::numeric_limits<int>::max() - digit) / 10) {
+                    controlPoint = particleControlPointSlotCount;
+                    break;
+                }
+                controlPoint = controlPoint * 10 + digit;
+            }
+            const std::string valuePointer = childPointer(pointer, key);
+            if (controlPoint < 0 ||
+                controlPoint >= particleControlPointSlotCount) {
+                fail(
+                    document,
+                    valuePointer,
+                    SceneModelErrorCode::invalidValue,
+                    "Particle instance control point index must be in [0, 7]"
+                );
+            }
+            if (!value.is_null()) {
+                result.controlPoints.insert_or_assign(
+                    controlPoint,
+                    parseDynamic(
+                        document,
+                        value,
+                        valuePointer,
+                        DynamicValueParseMode::standard
+                    )
+                );
+            }
+        }
+        return result;
     }
 
     ParticleObject parseParticle(
@@ -2895,6 +2941,7 @@ private:
             .count = literal(1.0),
             .color = literal(1.0),
             .colorMultiplier = literal(1.0),
+            .controlPoints = {},
         };
         if (const Json* instanceOverride = optionalField(source, "instanceoverride");
             instanceOverride != nullptr && !instanceOverride->is_null()) {
@@ -3204,6 +3251,84 @@ private:
             false
         );
 
+        if (const Json* animationLayers = optionalField(source, "animationlayers")) {
+            const std::string layersPointer = childPointer(
+                pointer, "animationlayers"
+            );
+            requireArray(
+                document,
+                *animationLayers,
+                layersPointer,
+                "Puppet animation layers"
+            );
+            if (!result.model || !result.model->puppetMesh) {
+                fail(
+                    document,
+                    layersPointer,
+                    SceneModelErrorCode::invalidValue,
+                    "Puppet animation layers require a puppet model"
+                );
+            }
+            result.animationLayers.reserve(animationLayers->size());
+            for (std::size_t index = 0; index < animationLayers->size(); ++index) {
+                const Json& layerSource = (*animationLayers)[index];
+                const std::string layerPointer = childPointer(layersPointer, index);
+                requireObject(
+                    document,
+                    layerSource,
+                    layerPointer,
+                    "Puppet animation layer"
+                );
+                PuppetAnimationLayer layer;
+                layer.id = requiredInt(
+                    document, layerSource, "id", layerPointer
+                );
+                layer.name = optionalString(
+                    document, layerSource, "name", layerPointer
+                ).value_or("");
+                layer.rate = optionalDynamic(
+                    document,
+                    layerSource,
+                    "rate",
+                    layerPointer,
+                    literal(1.0),
+                    DynamicValueParseMode::standard
+                );
+                layer.visible = optionalDynamic(
+                    document,
+                    layerSource,
+                    "visible",
+                    layerPointer,
+                    literal(false),
+                    DynamicValueParseMode::standard
+                );
+                layer.blend = optionalDynamic(
+                    document,
+                    layerSource,
+                    "blend",
+                    layerPointer,
+                    literal(1.0),
+                    DynamicValueParseMode::standard
+                );
+                layer.animation = optionalDynamic(
+                    document,
+                    layerSource,
+                    "animation",
+                    layerPointer,
+                    literal(std::int64_t(0)),
+                    DynamicValueParseMode::standard
+                );
+                layer.additive = optionalBool(
+                    document,
+                    layerSource,
+                    "additive",
+                    layerPointer,
+                    false
+                );
+                result.animationLayers.push_back(std::move(layer));
+            }
+        }
+
         parseLayerEffects(
             document,
             source,
@@ -3347,8 +3472,14 @@ private:
         );
         result.maxRows = optionalInt(document, source, "maxrows", pointer)
                              .value_or(0);
-        result.maxWidth = optionalNumber(document, source, "maxwidth", pointer)
-                              .value_or(0.0);
+        result.maxWidth = optionalDynamic(
+            document,
+            source,
+            "maxwidth",
+            pointer,
+            literal(0.0),
+            DynamicValueParseMode::standard
+        );
         parseLayerEffects(
             document,
             source,

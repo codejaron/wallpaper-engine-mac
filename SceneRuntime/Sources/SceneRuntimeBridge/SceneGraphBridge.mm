@@ -1,11 +1,19 @@
 #include <SceneRuntimeBridge/SceneRuntimeBridge.h>
 
+#import <Foundation/Foundation.h>
+
 #include "SceneRuntimeBridgeInternal.hpp"
 
 #include <SceneGraph/SceneGraph.hpp>
 
 #include <exception>
+#include <limits>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -15,6 +23,225 @@ using we::scene::bridge::assignExceptionError;
 using we::scene::bridge::assignModelError;
 using we::scene::bridge::clearError;
 using we::scene::bridge::requireOutput;
+using we::scene::script::ScriptLocalStorage;
+using we::scene::script::ScriptLocalStorageLocation;
+
+constexpr std::size_t localStorageQuotaBytes = 100 * 1024;
+constexpr std::string_view localStoragePrefix =
+    "OpenWallpaperEngine.SceneScriptLocalStorage.v1/";
+
+std::mutex& localStorageMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::string hexEncoded(std::string_view value) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(value.size() * 2);
+    for (const unsigned char byte : value) {
+        result.push_back(digits[byte >> 4]);
+        result.push_back(digits[byte & 0x0f]);
+    }
+    return result;
+}
+
+NSString* foundationString(std::string_view value) {
+    NSString* result = [[NSString alloc]
+        initWithBytes:value.data()
+        length:value.size()
+        encoding:NSUTF8StringEncoding
+    ];
+    if (result == nil) {
+        throw std::invalid_argument(
+            "SceneScript localStorage identity is not valid UTF-8"
+        );
+    }
+    return result;
+}
+
+std::string standardString(NSString* value) {
+    if (value == nil) return {};
+    const char* utf8 = value.UTF8String;
+    if (utf8 == nullptr) {
+        throw std::runtime_error(
+            "SceneScript localStorage contains invalid UTF-8"
+        );
+    }
+    return std::string(utf8);
+}
+
+class UserDefaultsScriptLocalStorage final : public ScriptLocalStorage {
+public:
+    UserDefaultsScriptLocalStorage(
+        std::string wallpaperIdentity,
+        std::string screenIdentity
+    ) : wallpaperPrefix_(
+            std::string(localStoragePrefix) +
+            hexEncoded(wallpaperIdentity) + "/"
+        ),
+        screenIdentity_(hexEncoded(screenIdentity)) {
+        if (wallpaperIdentity.empty() || screenIdentity.empty()) {
+            throw std::invalid_argument(
+                "SceneScript localStorage identities must not be empty"
+            );
+        }
+    }
+
+    std::optional<std::string> get(
+        std::string_view key,
+        ScriptLocalStorageLocation location
+    ) override {
+        std::lock_guard lock(localStorageMutex());
+        @autoreleasepool {
+            NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
+            NSString* storageKey = foundationString(entryKey(key, location));
+            id stored = [defaults objectForKey:storageKey];
+            if (stored == nil) return std::nullopt;
+            if (![stored isKindOfClass:NSString.class]) {
+                throw std::runtime_error(
+                    "SceneScript localStorage contains a non-string payload"
+                );
+            }
+            return standardString(static_cast<NSString*>(stored));
+        }
+    }
+
+    void set(
+        std::string_view key,
+        std::string_view jsonValue,
+        ScriptLocalStorageLocation location
+    ) override {
+        std::lock_guard lock(localStorageMutex());
+        @autoreleasepool {
+            NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
+            const std::string encodedKey = entryKey(key, location);
+            NSString* storageKey = foundationString(encodedKey);
+            std::size_t size = wallpaperStorageSize(
+                defaults,
+                encodedKey
+            );
+            if (key.size() > std::numeric_limits<std::size_t>::max() - size ||
+                jsonValue.size() >
+                    std::numeric_limits<std::size_t>::max() - size - key.size()) {
+                throw std::length_error(
+                    "SceneScript localStorage exceeds its 100 KiB wallpaper quota"
+                );
+            }
+            size += key.size() + jsonValue.size();
+            if (size > localStorageQuotaBytes) {
+                throw std::length_error(
+                    "SceneScript localStorage exceeds its 100 KiB wallpaper quota"
+                );
+            }
+            [defaults setObject:foundationString(jsonValue) forKey:storageKey];
+            persist(defaults);
+        }
+    }
+
+    bool erase(
+        std::string_view key,
+        ScriptLocalStorageLocation location
+    ) override {
+        std::lock_guard lock(localStorageMutex());
+        @autoreleasepool {
+            NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
+            NSString* storageKey = foundationString(entryKey(key, location));
+            if ([defaults objectForKey:storageKey] == nil) return false;
+            [defaults removeObjectForKey:storageKey];
+            persist(defaults);
+            return true;
+        }
+    }
+
+    void clear(ScriptLocalStorageLocation location) override {
+        std::lock_guard lock(localStorageMutex());
+        @autoreleasepool {
+            NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
+            const std::string prefix = scopePrefix(location);
+            NSString* foundationPrefix = foundationString(prefix);
+            NSDictionary<NSString*, id>* values = defaults.dictionaryRepresentation;
+            bool changed = false;
+            for (NSString* key in values) {
+                if (![key hasPrefix:foundationPrefix]) continue;
+                [defaults removeObjectForKey:key];
+                changed = true;
+            }
+            if (changed) persist(defaults);
+        }
+    }
+
+private:
+    std::string scopePrefix(ScriptLocalStorageLocation location) const {
+        if (location == ScriptLocalStorageLocation::global) {
+            return wallpaperPrefix_ + "global/";
+        }
+        return wallpaperPrefix_ + "screen/" + screenIdentity_ + "/";
+    }
+
+    std::string entryKey(
+        std::string_view key,
+        ScriptLocalStorageLocation location
+    ) const {
+        return scopePrefix(location) + hexEncoded(key);
+    }
+
+    std::size_t wallpaperStorageSize(
+        NSUserDefaults* defaults,
+        const std::string& replacedKey
+    ) const {
+        NSDictionary<NSString*, id>* values = defaults.dictionaryRepresentation;
+        NSString* foundationPrefix = foundationString(wallpaperPrefix_);
+        NSString* foundationReplacedKey = foundationString(replacedKey);
+        std::size_t result = 0;
+        for (NSString* key in values) {
+            if (![key hasPrefix:foundationPrefix] ||
+                [key isEqualToString:foundationReplacedKey]) {
+                continue;
+            }
+            id stored = values[key];
+            if (![stored isKindOfClass:NSString.class]) {
+                throw std::runtime_error(
+                    "SceneScript localStorage contains a non-string payload"
+                );
+            }
+            const std::string encodedEntry = standardString(key);
+            const std::size_t separator = encodedEntry.rfind('/');
+            if (separator == std::string::npos ||
+                (encodedEntry.size() - separator - 1) % 2 != 0) {
+                throw std::runtime_error(
+                    "SceneScript localStorage contains an invalid key"
+                );
+            }
+            const std::size_t decodedKeySize =
+                (encodedEntry.size() - separator - 1) / 2;
+            const std::size_t valueSize = standardString(
+                static_cast<NSString*>(stored)
+            ).size();
+            if (decodedKeySize >
+                    std::numeric_limits<std::size_t>::max() - result ||
+                valueSize > std::numeric_limits<std::size_t>::max() -
+                    result - decodedKeySize) {
+                throw std::length_error(
+                    "SceneScript localStorage size overflow"
+                );
+            }
+            result += decodedKeySize + valueSize;
+        }
+        return result;
+    }
+
+    static void persist(NSUserDefaults* defaults) {
+        if (![defaults synchronize]) {
+            throw std::runtime_error(
+                "SceneScript localStorage could not be persisted"
+            );
+        }
+    }
+
+    std::string wallpaperPrefix_;
+    std::string screenIdentity_;
+};
 
 bool requireModel(
     WESceneModelRef model,
@@ -44,6 +271,28 @@ bool requireGraph(
         "Scene graph is required"
     );
     return false;
+}
+
+WESceneGraphRef createGraph(
+    WESceneModelRef model,
+    std::shared_ptr<ScriptLocalStorage> localStorage,
+    WESceneRuntimeErrorRef* outError
+) noexcept {
+    try {
+        auto handle = std::make_unique<WESceneGraph>();
+        handle->graph = we::scene::SceneGraph::create(
+            model->model,
+            std::move(localStorage)
+        );
+        return handle.release();
+    } catch (const we::scene::SceneModelError& error) {
+        assignModelError(outError, error);
+    } catch (const std::exception& error) {
+        assignExceptionError(outError, "creating the scene graph", error.what());
+    } catch (...) {
+        assignExceptionError(outError, "creating the scene graph", nullptr);
+    }
+    return nullptr;
 }
 
 bool requireGraphSnapshot(
@@ -136,20 +385,48 @@ extern "C" WESceneGraphRef we_scene_model_graph_create(
     if (!requireModel(model, out_error)) {
         return nullptr;
     }
-    try {
-        auto handle = std::make_unique<WESceneGraph>();
-        handle->graph = we::scene::SceneGraph::create(model->model);
-        return handle.release();
-    } catch (const we::scene::SceneModelError& error) {
-        assignModelError(out_error, error);
-        return nullptr;
-    } catch (const std::exception& error) {
-        assignExceptionError(out_error, "creating the scene graph", error.what());
-        return nullptr;
-    } catch (...) {
-        assignExceptionError(out_error, "creating the scene graph", nullptr);
+    return createGraph(model, nullptr, out_error);
+}
+
+extern "C" WESceneGraphRef we_scene_model_graph_create_with_local_storage(
+    WESceneModelRef model,
+    const WESceneLocalStorageConfiguration* configuration,
+    WESceneRuntimeErrorRef* out_error
+) {
+    clearError(out_error);
+    if (!requireModel(model, out_error)) return nullptr;
+    if (configuration == nullptr ||
+        configuration->wallpaper_identity == nullptr ||
+        configuration->screen_identity == nullptr ||
+        configuration->wallpaper_identity[0] == '\0' ||
+        configuration->screen_identity[0] == '\0') {
+        assignError(
+            out_error,
+            WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+            "SceneScript localStorage wallpaper and screen identities are required"
+        );
         return nullptr;
     }
+    try {
+        auto storage = std::make_shared<UserDefaultsScriptLocalStorage>(
+            configuration->wallpaper_identity,
+            configuration->screen_identity
+        );
+        return createGraph(model, std::move(storage), out_error);
+    } catch (const std::exception& error) {
+        assignExceptionError(
+            out_error,
+            "configuring SceneScript localStorage",
+            error.what()
+        );
+    } catch (...) {
+        assignExceptionError(
+            out_error,
+            "configuring SceneScript localStorage",
+            nullptr
+        );
+    }
+    return nullptr;
 }
 
 extern "C" void we_scene_graph_destroy(WESceneGraphRef graph) {

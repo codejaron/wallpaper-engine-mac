@@ -1,8 +1,90 @@
 import Cocoa
 import OpenGL.GL3
+import QuartzCore
 import SceneAudio
 import SceneRuntimeBridge
 import SwiftUI
+
+enum SceneFrameTrace {
+    static let enabled = ProcessInfo.processInfo.environment["WE_SCENE_FRAME_TRACE"] == "1"
+
+    static func log(_ message: @autoclosure () -> String) {
+        guard enabled else { return }
+        NSLog("[SceneFrameTrace] %@", message())
+    }
+}
+
+private struct SceneDrawFrameStats {
+    private static let enabled =
+        ProcessInfo.processInfo.environment["WE_SCENE_FRAME_STATS"] == "1"
+
+    private var frames: UInt64 = 0
+    private var deltaSum = 0.0
+    private var renderSum = 0.0
+    private var renderMaximum = 0.0
+    private var flushSum = 0.0
+    private var flushMaximum = 0.0
+    private var totalSum = 0.0
+    private var totalMaximum = 0.0
+    private var targetLagMaximum = -Double.infinity
+    private var totalOver16: UInt64 = 0
+    private var totalOver25: UInt64 = 0
+    private var lastDisplaySequence: UInt64?
+    private var skippedDisplayCallbacks: UInt64 = 0
+
+    mutating func record(
+        displaySequence: UInt64?,
+        deltaSeconds: Double,
+        renderMilliseconds: Double,
+        flushMilliseconds: Double,
+        totalMilliseconds: Double,
+        targetLagMilliseconds: Double
+    ) {
+        guard Self.enabled else { return }
+        frames &+= 1
+        deltaSum += deltaSeconds
+        renderSum += renderMilliseconds
+        renderMaximum = max(renderMaximum, renderMilliseconds)
+        flushSum += flushMilliseconds
+        flushMaximum = max(flushMaximum, flushMilliseconds)
+        totalSum += totalMilliseconds
+        totalMaximum = max(totalMaximum, totalMilliseconds)
+        targetLagMaximum = max(targetLagMaximum, targetLagMilliseconds)
+        if totalMilliseconds > 16.6667 { totalOver16 &+= 1 }
+        if totalMilliseconds > 25 { totalOver25 &+= 1 }
+        if let displaySequence {
+            if let lastDisplaySequence,
+               displaySequence > lastDisplaySequence + 1 {
+                skippedDisplayCallbacks &+=
+                    displaySequence - lastDisplaySequence - 1
+            }
+            lastDisplaySequence = displaySequence
+        }
+        guard deltaSum >= 2, frames > 0 else { return }
+
+        let message = String(
+            format: "[SceneFrameStats] draw frames=%llu deltaAvgMs=%.3f "
+                + "renderAvgMs=%.3f renderMaxMs=%.3f flushAvgMs=%.3f "
+                + "flushMaxMs=%.3f totalAvgMs=%.3f totalMaxMs=%.3f "
+                + "totalOver16=%llu totalOver25=%llu displaySkips=%llu "
+                + "targetLagMaxMs=%.3f",
+            CUnsignedLongLong(frames),
+            deltaSum * 1_000 / Double(frames),
+            renderSum / Double(frames),
+            renderMaximum,
+            flushSum / Double(frames),
+            flushMaximum,
+            totalSum / Double(frames),
+            totalMaximum,
+            CUnsignedLongLong(totalOver16),
+            CUnsignedLongLong(totalOver25),
+            CUnsignedLongLong(skippedDisplayCallbacks),
+            targetLagMaximum
+        )
+        NSLog("%@", message)
+        self = SceneDrawFrameStats()
+    }
+}
 
 enum ScenePresentationLayoutError: LocalizedError {
     case invalid(String)
@@ -242,6 +324,7 @@ struct ScenePresentationLayout: Equatable {
     }
 
     /// Returns the fixed backing-pixel budget for Scene framebuffer rendering.
+    /// The runtime applies the cross-display 1080p ceiling for Balanced.
     /// The caller supplies NSView.convertToBacking(bounds), never point sizes.
     /// Span participants use the same virtual-canvas dimensions so separate
     /// display windows cannot choose divergent full-scene render sizes.
@@ -281,12 +364,12 @@ struct ScenePresentationLayout: Equatable {
 /// Per-screen presentation retains its independent accumulated runtime.
 final class ScenePresentationClock {
     static let shared = ScenePresentationClock()
-    private let origin = ProcessInfo.processInfo.systemUptime
+    private let origin = CACurrentMediaTime()
 
     private init() {}
 
     func seconds(
-        at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime,
+        at uptime: TimeInterval = CACurrentMediaTime(),
         framesPerSecond: Double
     ) -> Double {
         let elapsed = max(0, uptime - origin)
@@ -322,6 +405,8 @@ struct SceneWallpaperView: View {
         ZStack {
             SceneOpenGLRepresentable(
                 wallpaper: wallpaper,
+                localStorageScreenIdentity:
+                    WallpaperViewModel.scenePropertyScreenIdentity(screenId),
                 presentation: presentation,
                 renderQuality: globalSettingsViewModel.settings.sceneRenderQuality,
                 paused: wallpaperViewModel.effectivePlayRate == 0,
@@ -383,6 +468,7 @@ struct SceneWallpaperView: View {
 
 private struct SceneOpenGLRepresentable: NSViewRepresentable {
     let wallpaper: WEWallpaper
+    let localStorageScreenIdentity: String
     let presentation: ScenePresentationLayout
     let renderQuality: GSSceneRenderQuality
     let paused: Bool
@@ -411,6 +497,7 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
         view.configure(
             wallpaper: wallpaper,
             assetsDirectory: assetsDirectory,
+            localStorageScreenIdentity: localStorageScreenIdentity,
             propertyOverrides: propertyOverrides
         )
         view.setPresentation(presentation)
@@ -438,6 +525,7 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
         view.configure(
             wallpaper: wallpaper,
             assetsDirectory: assetsDirectory,
+            localStorageScreenIdentity: localStorageScreenIdentity,
             propertyOverrides: propertyOverrides
         )
         view.setPresentation(presentation)
@@ -500,11 +588,13 @@ final class SceneOpenGLContainerView: NSView {
     func configure(
         wallpaper: WEWallpaper,
         assetsDirectory: String?,
+        localStorageScreenIdentity: String,
         propertyOverrides: [String: ScenePropertyValue]
     ) {
         openGLView?.configure(
             wallpaper: wallpaper,
             assetsDirectory: assetsDirectory,
+            localStorageScreenIdentity: localStorageScreenIdentity,
             propertyOverrides: propertyOverrides
         )
     }
@@ -557,6 +647,7 @@ private final class SceneOpenGLView: NSOpenGLView {
     private struct SessionIdentity: Equatable {
         let scene: URL
         let assetsDirectory: String?
+        let localStorageScreenIdentity: String
     }
 
     var onError: ((String?) -> Void)?
@@ -579,12 +670,12 @@ private final class SceneOpenGLView: NSOpenGLView {
         viewportHeight: 0
     )
     private var propertyConfigurationValid = false
-    private var timer: Timer?
+    private var frameDisplayLink: CADisplayLink?
     private var isOpenGLPrepared = false
     private var hasRenderedFrame = false
     private var paused = false
     private var renderQuality = GSSceneRenderQuality.high
-    private var framesPerSecond = 30.0
+    private var framesPerSecond = 60.0
     private var masterVolume: Float = 1
     private var audioOutputEnabled = true
     private var systemAudioCaptureEnabled = false
@@ -593,6 +684,9 @@ private final class SceneOpenGLView: NSOpenGLView {
         .unavailable(revisions: .zero)
     private var runtimeSeconds = 0.0
     private var previousTimestamp: TimeInterval?
+    private var pendingDisplayTargetTimestamp: TimeInterval?
+    private var displayLinkSequence: UInt64 = 0
+    private var pendingDisplayLinkSequence: UInt64?
     private var previousSpanRuntimeSeconds: Double?
     private var audioCaptureLease: SceneAudioCaptureLease?
     private var audioCaptureTask: Task<Void, Never>?
@@ -603,6 +697,7 @@ private final class SceneOpenGLView: NSOpenGLView {
     private var hasReportedFatalIssue = false
     private var lastReportedFatalIssue: String?
     private var lastReportedAudioIssue: String?
+    private var frameStats = SceneDrawFrameStats()
 
     init?(frame frameRect: NSRect, pixelFormat: NSOpenGLPixelFormat) {
         super.init(frame: frameRect, pixelFormat: pixelFormat)
@@ -613,28 +708,34 @@ private final class SceneOpenGLView: NSOpenGLView {
     override func prepareOpenGL() {
         super.prepareOpenGL()
         openGLContext?.makeCurrentContext()
-        var swapInterval: GLint = 1
+        // CADisplayLink is the single presentation clock. A second v-sync wait
+        // inside flushBuffer stalls the AppKit/Core Animation commit that was
+        // already scheduled for this refresh and turns small misses into a
+        // visible half-rate cadence on particle trails.
+        var swapInterval: GLint = 0
         openGLContext?.setValues(&swapInterval, for: .swapInterval)
         wantsBestResolutionOpenGLSurface = true
         isOpenGLPrepared = true
         reconcileSession()
-        updateTimer()
+        updateDisplayLink()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window != nil { reconcileSession() }
-        updateTimer()
+        updateDisplayLink()
     }
 
     func configure(
         wallpaper: WEWallpaper,
         assetsDirectory: String?,
+        localStorageScreenIdentity: String,
         propertyOverrides: [String: ScenePropertyValue]
     ) {
         let identity = SessionIdentity(
             scene: wallpaper.wallpaperDirectory.appending(path: wallpaper.project.file),
-            assetsDirectory: assetsDirectory
+            assetsDirectory: assetsDirectory,
+            localStorageScreenIdentity: localStorageScreenIdentity
         )
         guard identity != requestedIdentity else {
             setPropertyOverrides(propertyOverrides)
@@ -655,11 +756,12 @@ private final class SceneOpenGLView: NSOpenGLView {
         hasRenderedFrame = false
         runtimeSeconds = 0
         previousTimestamp = nil
+        pendingDisplayTargetTimestamp = nil
         previousSpanRuntimeSeconds = nil
         audioCaptureIssue = nil
         clearDrawableIfAvailable()
         reconcileSession()
-        updateTimer()
+        updateDisplayLink()
     }
 
     func setPaused(_ value: Bool) {
@@ -667,15 +769,17 @@ private final class SceneOpenGLView: NSOpenGLView {
         session?.setPaused(value)
         paused = value
         previousTimestamp = nil
+        pendingDisplayTargetTimestamp = nil
         previousSpanRuntimeSeconds = nil
         reportAudioIssue()
-        updateTimer()
+        updateDisplayLink()
     }
 
     func setPresentation(_ value: ScenePresentationLayout) {
         guard presentation != value else { return }
         if presentation.spanAcrossScreens != value.spanAcrossScreens {
             previousTimestamp = nil
+            pendingDisplayTargetTimestamp = nil
             previousSpanRuntimeSeconds = nil
         }
         presentation = value
@@ -737,7 +841,7 @@ private final class SceneOpenGLView: NSOpenGLView {
         requestedPropertyOverrides = values
         guard let session else {
             reconcileSession()
-            updateTimer()
+            updateDisplayLink()
             return
         }
         applyPropertyOverrides(values, to: session)
@@ -752,15 +856,16 @@ private final class SceneOpenGLView: NSOpenGLView {
             propertyConfigurationValid = true
             hasRenderedFrame = false
             previousTimestamp = nil
+            pendingDisplayTargetTimestamp = nil
             previousSpanRuntimeSeconds = nil
             reportFatalIssue(nil)
             reportAudioIssue()
             needsDisplay = true
-            updateTimer()
+            updateDisplayLink()
         } catch {
             propertyConfigurationValid = false
             hasRenderedFrame = false
-            updateTimer()
+            updateDisplayLink()
             clearDrawableIfAvailable()
             reportFatalIssue(error.localizedDescription)
         }
@@ -770,8 +875,10 @@ private final class SceneOpenGLView: NSOpenGLView {
         let clamped = min(max(value, 1), 240)
         guard framesPerSecond != clamped else { return }
         framesPerSecond = clamped
+        previousTimestamp = nil
+        pendingDisplayTargetTimestamp = nil
         previousSpanRuntimeSeconds = nil
-        updateTimer()
+        updateDisplayLink()
     }
 
     func setPointerState(active: Bool, leftDown: Bool) {
@@ -800,6 +907,21 @@ private final class SceneOpenGLView: NSOpenGLView {
             return
         }
         do {
+            let drawStarted = CACurrentMediaTime()
+            let displaySequence = pendingDisplayLinkSequence
+            pendingDisplayLinkSequence = nil
+            // A synchronous display-link draw can still be followed by
+            // AppKit's ordinary dirty-view pass. That pass has no display
+            // sequence and must not evaluate and submit the same scene frame
+            // a second time. Initial and paused/manual draws remain valid.
+            if frameDisplayLink != nil,
+               displaySequence == nil,
+               hasRenderedFrame {
+                return
+            }
+            var frameTimeForStats = 0.0
+            var renderMillisecondsForStats = 0.0
+            var targetLagMillisecondsForStats = 0.0
             let width = UInt32(backing.width.rounded())
             let height = UInt32(backing.height.rounded())
             if paused && hasRenderedFrame {
@@ -810,7 +932,12 @@ private final class SceneOpenGLView: NSOpenGLView {
                     renderQuality: renderQuality
                 )
             } else {
-                let now = ProcessInfo.processInfo.systemUptime
+                // Drive animation from the presentation timestamp supplied by
+                // CADisplayLink. Wall-clock sampling here introduces jitter
+                // between the display callback and AppKit's deferred draw,
+                // which is especially visible on short particle trails.
+                let now = pendingDisplayTargetTimestamp ?? CACurrentMediaTime()
+                pendingDisplayTargetTimestamp = nil
                 let frameTime: Double
                 let presentedRuntimeSeconds: Double
                 if presentation.spanAcrossScreens {
@@ -835,8 +962,20 @@ private final class SceneOpenGLView: NSOpenGLView {
                     runtimeSeconds += frameTime
                     presentedRuntimeSeconds = runtimeSeconds
                 }
+                let displayLabel = displaySequence.map(String.init) ?? "none"
+                let targetLagMilliseconds = (drawStarted - now) * 1_000
+                frameTimeForStats = frameTime
+                targetLagMillisecondsForStats = targetLagMilliseconds
+                SceneFrameTrace.log(
+                    "draw.begin display=\(displayLabel) "
+                        + "target=\(String(format: "%.6f", now)) "
+                        + "runtime=\(String(format: "%.6f", presentedRuntimeSeconds)) "
+                        + "delta=\(String(format: "%.6f", frameTime)) "
+                        + "targetLagMs=\(String(format: "%.3f", targetLagMilliseconds))"
+                )
                 let pointer = normalizedDrawablePointer()
                 let pointerState = sampledDesktopPointerState()
+                let renderStarted = CACurrentMediaTime()
                 try session.render(
                     runtimeSeconds: presentedRuntimeSeconds,
                     frameTimeSeconds: frameTime,
@@ -854,9 +993,34 @@ private final class SceneOpenGLView: NSOpenGLView {
                     systemAudioCaptureEnabled: systemAudioCaptureEnabled,
                     isAudibleOwner: isAudibleOwner
                 )
+                let renderMilliseconds =
+                    (CACurrentMediaTime() - renderStarted) * 1_000
+                renderMillisecondsForStats = renderMilliseconds
+                SceneFrameTrace.log(
+                    "draw.render display=\(displayLabel) "
+                        + "ms=\(String(format: "%.3f", renderMilliseconds))"
+                )
                 hasRenderedFrame = true
             }
+            let flushStarted = CACurrentMediaTime()
             context.flushBuffer()
+            let finished = CACurrentMediaTime()
+            let displayLabel = displaySequence.map(String.init) ?? "none"
+            let flushMilliseconds = (finished - flushStarted) * 1_000
+            let totalMilliseconds = (finished - drawStarted) * 1_000
+            frameStats.record(
+                displaySequence: displaySequence,
+                deltaSeconds: frameTimeForStats,
+                renderMilliseconds: renderMillisecondsForStats,
+                flushMilliseconds: flushMilliseconds,
+                totalMilliseconds: totalMilliseconds,
+                targetLagMilliseconds: targetLagMillisecondsForStats
+            )
+            SceneFrameTrace.log(
+                "draw.flush display=\(displayLabel) "
+                    + "ms=\(String(format: "%.3f", flushMilliseconds)) "
+                    + "totalMs=\(String(format: "%.3f", totalMilliseconds))"
+            )
             sessionRetryAttempt = 0
             reportFatalIssue(nil)
             reportAudioIssue()
@@ -871,8 +1035,8 @@ private final class SceneOpenGLView: NSOpenGLView {
     }
 
     func shutdown() {
-        timer?.invalidate()
-        timer = nil
+        frameDisplayLink?.invalidate()
+        frameDisplayLink = nil
         closeSession()
         activeIdentity = nil
         attemptedIdentity = nil
@@ -883,6 +1047,7 @@ private final class SceneOpenGLView: NSOpenGLView {
         hasRenderedFrame = false
         runtimeSeconds = 0
         previousTimestamp = nil
+        pendingDisplayTargetTimestamp = nil
         previousSpanRuntimeSeconds = nil
         audioCaptureIssue = nil
         clearDrawableIfAvailable()
@@ -890,8 +1055,8 @@ private final class SceneOpenGLView: NSOpenGLView {
     }
 
     override func clearGLContext() {
-        timer?.invalidate()
-        timer = nil
+        frameDisplayLink?.invalidate()
+        frameDisplayLink = nil
         closeSession()
         activeIdentity = nil
         attemptedIdentity = nil
@@ -899,6 +1064,7 @@ private final class SceneOpenGLView: NSOpenGLView {
         hasRenderedFrame = false
         runtimeSeconds = 0
         previousTimestamp = nil
+        pendingDisplayTargetTimestamp = nil
         previousSpanRuntimeSeconds = nil
         audioCaptureIssue = nil
         isOpenGLPrepared = false
@@ -906,23 +1072,46 @@ private final class SceneOpenGLView: NSOpenGLView {
     }
 
     deinit {
-        timer?.invalidate()
+        frameDisplayLink?.invalidate()
         closeSession()
     }
 
-    private func updateTimer() {
-        timer?.invalidate()
-        timer = nil
+    private func updateDisplayLink() {
+        frameDisplayLink?.invalidate()
+        frameDisplayLink = nil
+        pendingDisplayTargetTimestamp = nil
         guard isOpenGLPrepared,
               window != nil,
               session != nil,
               propertyConfigurationValid,
               !paused else { return }
-        let timer = Timer(timeInterval: 1.0 / framesPerSecond, repeats: true) { [weak self] _ in
-            self?.needsDisplay = true
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        let displayLink = displayLink(
+            target: self,
+            selector: #selector(displayLinkDidFire(_:))
+        )
+        let requestedRate = Float(framesPerSecond)
+        displayLink.preferredFrameRateRange = CAFrameRateRange(
+            minimum: requestedRate,
+            maximum: requestedRate,
+            preferred: requestedRate
+        )
+        displayLink.add(to: .main, forMode: .common)
+        frameDisplayLink = displayLink
+    }
+
+    @objc
+    private func displayLinkDidFire(_ displayLink: CADisplayLink) {
+        displayLinkSequence &+= 1
+        pendingDisplayLinkSequence = displayLinkSequence
+        pendingDisplayTargetTimestamp = displayLink.targetTimestamp
+        SceneFrameTrace.log(
+            "display.tick display=\(displayLinkSequence) "
+                + "timestamp=\(String(format: "%.6f", displayLink.timestamp)) "
+                + "target=\(String(format: "%.6f", displayLink.targetTimestamp)) "
+                + "duration=\(String(format: "%.6f", displayLink.duration))"
+        )
+        needsDisplay = true
+        displayIfNeeded()
     }
 
     private func normalizedDrawablePointer() -> CGPoint {
@@ -962,6 +1151,7 @@ private final class SceneOpenGLView: NSOpenGLView {
             newSession = try SceneRuntimeSession(
                 wallpaper: wallpaper,
                 assetsDirectory: identity.assetsDirectory,
+                localStorageScreenIdentity: identity.localStorageScreenIdentity,
                 cglContext: context,
                 // This view is the desktop-wallpaper host. A future native
                 // screensaver host passes true through the same session/API;
@@ -1035,7 +1225,7 @@ private final class SceneOpenGLView: NSOpenGLView {
         hasRenderedFrame = false
         audioCaptureIssue = nil
         onPropertiesLoaded?(nil)
-        updateTimer()
+        updateDisplayLink()
         clearDrawableIfAvailable()
         reportFatalIssue(message)
         scheduleSessionRetry()

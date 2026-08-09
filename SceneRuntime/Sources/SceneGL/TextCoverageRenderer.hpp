@@ -27,6 +27,15 @@ struct PreparedTextCoverage final {
     std::uint64_t generation = 0;
 };
 
+struct TextCoverageKey final {
+    std::uint64_t a = 1469598103934665603ULL;
+    std::uint64_t b = 1099511628211ULL;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+
+    bool operator==(const TextCoverageKey&) const = default;
+};
+
 class TextCoverageRenderer final {
 public:
     TextCoverageRenderer();
@@ -39,6 +48,14 @@ public:
     // must draw all prepared handles before calling draw() or trimCache().
     [[nodiscard]] PreparedTextCoverage prepare(
         Device::Session& session,
+        const text::RasterizedText& text
+    );
+    [[nodiscard]] PreparedTextCoverage prepare(
+        Device::Session& session,
+        const text::RasterizedText& text,
+        const TextCoverageKey& key
+    );
+    [[nodiscard]] static TextCoverageKey keyFor(
         const text::RasterizedText& text
     );
     void drawPrepared(

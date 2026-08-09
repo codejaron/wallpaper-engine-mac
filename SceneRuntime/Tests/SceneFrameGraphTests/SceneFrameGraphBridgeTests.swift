@@ -591,7 +591,12 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         return runtime
     }
 
-    private func load(assets: URL, package: URL, root: URL?) throws -> LoadedFrameGraph {
+    private func load(
+        assets: URL,
+        package: URL,
+        root: URL?,
+        localStorageIdentities: (wallpaper: String, screen: String)? = nil
+    ) throws -> LoadedFrameGraph {
         let runtime = try createRuntime(assets: assets, package: package)
         do {
             var error: WESceneRuntimeErrorRef?
@@ -603,7 +608,22 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
                 throw TestFailure.model(message)
             }
             do {
-                guard let graph = we_scene_model_graph_create(model, &error) else {
+                let graph = localStorageIdentities.map { identities in
+                    identities.wallpaper.withCString { wallpaperIdentity in
+                        identities.screen.withCString { screenIdentity in
+                            var configuration = WESceneLocalStorageConfiguration(
+                                wallpaper_identity: wallpaperIdentity,
+                                screen_identity: screenIdentity
+                            )
+                            return we_scene_model_graph_create_with_local_storage(
+                                model,
+                                &configuration,
+                                &error
+                            )
+                        }
+                    }
+                } ?? we_scene_model_graph_create(model, &error)
+                guard let graph else {
                     let message = errorMessage(error)
                     we_scene_runtime_error_destroy(error)
                     throw TestFailure.graph(message)
@@ -1400,6 +1420,120 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(firstScriptAmount.value.number_value, 3.75, accuracy: 0.000_001)
     }
 
+    func testEngineCanvasSizeUsesAuthoritativeLogicalProjection() throws {
+        var documents = syntheticDocuments()
+        var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
+        var objects = try XCTUnwrap(scene["objects"] as? [[String: Any]])
+        var image = objects[0]
+        image["origin"] = [
+            "value": "0 0 0",
+            "script": """
+            export function update() {
+                let rejected = false;
+                try { engine.canvasSize = new Vec2(1, 1); } catch (_) { rejected = true; }
+                if (!rejected) throw new Error('canvasSize must be read-only');
+                if (!(engine.canvasSize instanceof Vec2)) throw new Error('canvasSize must be a Vec2');
+                return { x: engine.canvasSize.x, y: engine.canvasSize.y, z: 0 };
+            }
+            """,
+        ]
+        objects[0] = image
+        scene["objects"] = objects
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        let plan = try createPlan(loaded.frameGraph, runtime: 0, frameTime: 0)
+        defer { we_scene_frame_plan_destroy(plan) }
+        var descriptor = WESceneFrameImageInfo()
+        var error: WESceneRuntimeErrorRef?
+        XCTAssertEqual(
+            we_scene_frame_plan_image_info(plan, 0, &descriptor, &error),
+            1
+        )
+        XCTAssertEqual(descriptor.world_transform.origin.x, 400, accuracy: 0.000_001)
+        XCTAssertEqual(descriptor.world_transform.origin.y, 200, accuracy: 0.000_001)
+    }
+
+    func testHiddenEffectMaterialInitCanSeedSharedStateForLaterLayer() throws {
+        var documents = syntheticDocuments()
+        var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
+        let original = try XCTUnwrap(
+            (scene["objects"] as? [[String: Any]])?.first
+        )
+        var hiddenProducer = original
+        hiddenProducer["visible"] = false
+        hiddenProducer["name"] = "Hidden producer"
+        var effects = try XCTUnwrap(
+            hiddenProducer["effects"] as? [[String: Any]]
+        )
+        var effect = effects[0]
+        var effectPasses = try XCTUnwrap(
+            effect["passes"] as? [[String: Any]]
+        )
+        var effectPass = effectPasses[0]
+        var effectConstants = try XCTUnwrap(
+            effectPass["constantshadervalues"] as? [String: Any]
+        )
+        effectConstants["amount"] = [
+            "value": 1.0,
+            "script": """
+            export function init() {
+                shared.hiddenMaterialReady = 42;
+            }
+            export function update(value) { return value; }
+            """,
+        ]
+        effectPass["constantshadervalues"] = effectConstants
+        effectPasses[0] = effectPass
+        effect["passes"] = effectPasses
+        effects[0] = effect
+        hiddenProducer["effects"] = effects
+        var consumer = original
+        consumer["id"] = 8
+        consumer["name"] = "Consumer"
+        consumer["origin"] = "100 50 0"
+        consumer["effects"] = []
+        consumer["color"] = [
+            "value": "1 1 1",
+            "script": """
+            export function update() {
+                if (shared.hiddenMaterialReady !== 42) {
+                    throw new Error('hidden material script was not initialized');
+                }
+                return new Vec3(0.2, 0.4, 0.6);
+            }
+            """,
+        ]
+        scene["objects"] = [hiddenProducer, consumer]
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        let plan = try createPlan(loaded.frameGraph, runtime: 0, frameTime: 0)
+        defer { we_scene_frame_plan_destroy(plan) }
+        _ = try XCTUnwrap(
+            try images(plan).first(where: { $0.object_id == 8 })
+        )
+        XCTAssertTrue(
+            try scriptEvaluations(plan).contains(where: {
+                string($0.json_pointer) == "/objects/1/color"
+            })
+        )
+    }
+
     func testSceneLayerRegistryWritesFlowIntoSameFrameGraphSnapshot() throws {
         var documents = syntheticDocuments()
         var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
@@ -1828,7 +1962,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         }
     }
 
-    func testEffectVisibilityScriptReceivesTypedThisObjectAndOwningLayer() throws {
+    func testEffectVisibilityScriptReceivesTypedObjectSurfaceAndOwningLayer() throws {
         var documents = syntheticDocuments()
         var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
         var objects = try XCTUnwrap(scene["objects"] as? [[String: Any]])
@@ -1846,8 +1980,11 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
                 if (thisObject === thisLayer) {
                     throw new Error('effect owner was aliased to the layer');
                 }
-                if (thisObject.name !== 'Typed effect' || thisObject.visible !== true) {
+                if (thisObject.name !== 'Typed effect' || !thisObject.visible) {
                     throw new Error('effect owner properties are unavailable');
+                }
+                if (typeof thisObject.getAnimation !== 'function') {
+                    throw new Error('effect owner is missing the IObject surface');
                 }
                 thisObject.visible = false;
             }
@@ -3796,6 +3933,115 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(string(allOperations.last?.destination.id), "scene:_rt_FullFrameBuffer")
     }
 
+    func testTextMaximumWidthUsesTheDynamicValuePipeline() throws {
+        var documents = syntheticDocuments()
+        var scene = documents["scene.json"] as! [String: Any]
+        var objects = scene["objects"] as! [[String: Any]]
+        objects.append([
+            "id": 8,
+            "limitwidth": true,
+            "maxwidth": [
+                "script": """
+                export function update(value) {
+                    return value + engine.runtime * 10;
+                }
+                """,
+                "value": 120.0,
+            ],
+            "name": "Dynamic width text",
+            "text": "Dynamic width",
+            "visible": true,
+        ])
+        scene["objects"] = objects
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+        let plan = try createPlan(
+            loaded.frameGraph,
+            runtime: 2,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        let descriptor = try XCTUnwrap(texts(plan).first)
+        XCTAssertEqual(descriptor.max_width, 140, accuracy: 1e-6)
+    }
+
+    func testSceneScriptLocalStoragePersistsAcrossProductionGraphs() throws {
+        let storageKey = "contract-\(UUID().uuidString)"
+        let identities = (
+            wallpaper: "wallpaper-\(UUID().uuidString)",
+            screen: "screen-\(UUID().uuidString)"
+        )
+        var documents = syntheticDocuments()
+        var scene = documents["scene.json"] as! [String: Any]
+        var objects = scene["objects"] as! [[String: Any]]
+        objects.append([
+            "id": 8,
+            "image": "models/main.json",
+            "name": "Persistent position",
+            "origin": [
+                "script": """
+                export function init(value) {
+                    const previous = localStorage.get(
+                        '\(storageKey)',
+                        localStorage.LOCATION_GLOBAL
+                    );
+                    if (previous === undefined) {
+                        localStorage.set(
+                            '\(storageKey)',
+                            new Vec3(17, value.y + 1, value.z + 2),
+                            localStorage.LOCATION_GLOBAL
+                        );
+                        return value;
+                    } else {
+                        localStorage.delete(
+                            '\(storageKey)',
+                            localStorage.LOCATION_GLOBAL
+                        );
+                        return previous;
+                    }
+                }
+                """,
+                "value": "0 20 0",
+            ],
+            "size": "100 100",
+            "visible": true,
+        ])
+        scene["objects"] = objects
+        documents["scene.json"] = scene
+        let fixture = try makeFixture(documents)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        func evaluatedOriginX() throws -> Double {
+            let loaded = try load(
+                assets: fixture.assets,
+                package: fixture.package,
+                root: nil,
+                localStorageIdentities: identities
+            )
+            defer { destroy(loaded) }
+            let plan = try createPlan(
+                loaded.frameGraph,
+                runtime: 0,
+                frameTime: 1.0 / 60.0
+            )
+            defer { we_scene_frame_plan_destroy(plan) }
+            return try XCTUnwrap(
+                images(plan).first { $0.object_id == 8 }
+            ).world_transform.origin.x
+        }
+
+        XCTAssertEqual(try evaluatedOriginX(), 0, accuracy: 1e-6)
+        XCTAssertEqual(try evaluatedOriginX(), 17, accuracy: 1e-6)
+    }
+
     func testTextEffectsRasterizeLocallyThenUseTheSharedImageEffectPipeline() throws {
         var documents = syntheticDocuments()
         var scene = documents["scene.json"] as! [String: Any]
@@ -4281,6 +4527,47 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(points[0].position.x, 9, accuracy: 1e-6)
         XCTAssertEqual(points[0].position.y, 8, accuracy: 1e-6)
         XCTAssertEqual(points[0].position.z, 7, accuracy: 1e-6)
+    }
+
+    func testParticleInstanceControlPointOverridesReachSimulationConfiguration() throws {
+        var documents = particleRenderOrderDocuments()
+        var scene = documents["scene.json"] as! [String: Any]
+        var objects = scene["objects"] as! [[String: Any]]
+        objects[1]["instanceoverride"] = [
+            "controlpoint3": "90 80 70",
+            "controlpoint4": [
+                "value": "60 50 40",
+                "script": "export function update(value) { return value; }",
+            ],
+        ]
+        scene["objects"] = objects
+        documents["scene.json"] = scene
+
+        var definition = documents["particles/test.json"] as! [String: Any]
+        definition["controlpoint"] = [
+            ["id": 3, "offset": "1 2 3"],
+            ["id": 4, "offset": "4 5 6"],
+        ]
+        documents["particles/test.json"] = definition
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+        let plan = try createPlan(loaded.frameGraph)
+        defer { we_scene_frame_plan_destroy(plan) }
+
+        let points = try particleControlPoints(plan, particleIndex: 0)
+        XCTAssertEqual(points.map(\.id), [3, 4])
+        XCTAssertEqual(points[0].position.x, 90, accuracy: 1e-6)
+        XCTAssertEqual(points[0].position.y, 80, accuracy: 1e-6)
+        XCTAssertEqual(points[0].position.z, 70, accuracy: 1e-6)
+        XCTAssertEqual(points[1].position.x, 60, accuracy: 1e-6)
+        XCTAssertEqual(points[1].position.y, 50, accuracy: 1e-6)
+        XCTAssertEqual(points[1].position.z, 40, accuracy: 1e-6)
     }
 
     func testParticleInstanceOverrideValuesRemainActiveWhenEditorFlagIsDisabled() throws {

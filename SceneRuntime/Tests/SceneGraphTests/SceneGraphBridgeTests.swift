@@ -475,6 +475,72 @@ final class SceneGraphBridgeTests: XCTestCase {
         we_scene_graph_snapshot_destroy(retained)
     }
 
+    func testParentVisibilityPropagatesThroughTheCompleteHierarchy() throws {
+        let loaded = try loadGraph(
+            objects: [
+                ["id": 30, "name": "Grandchild", "parent": 20, "visible": true],
+                ["id": 40, "name": "Independent", "visible": true],
+                ["id": 20, "name": "Child", "parent": 10, "visible": true],
+                ["id": 60, "name": "Hidden branch child", "parent": 50, "visible": true],
+                [
+                    "id": 10,
+                    "name": "User controlled root",
+                    "visible": ["user": "showGroup", "value": true],
+                ],
+                ["id": 50, "name": "Locally hidden child", "parent": 10, "visible": false],
+            ],
+            properties: [
+                "showGroup": ["type": "bool", "value": false],
+            ]
+        )
+        defer {
+            we_scene_graph_destroy(loaded.graph)
+            we_scene_model_destroy(loaded.model)
+            we_scene_runtime_destroy(loaded.runtime)
+            try? FileManager.default.removeItem(at: loaded.fixture.root)
+        }
+
+        func visibility(
+            _ snapshot: WESceneGraphSnapshotRef
+        ) throws -> [Int32: Int32] {
+            Dictionary(uniqueKeysWithValues: try nodeInfos(snapshot).map {
+                ($0.id, $0.visible)
+            })
+        }
+
+        let hidden = try createSnapshot(loaded.graph)
+        defer { we_scene_graph_snapshot_destroy(hidden) }
+        XCTAssertEqual(
+            try visibility(hidden),
+            [10: 0, 20: 0, 30: 0, 40: 1, 50: 0, 60: 0]
+        )
+
+        var property = WEScenePropertyValue(
+            type: WE_SCENE_VALUE_BOOLEAN,
+            boolean_value: 1,
+            integer_value: 0,
+            number_value: 0,
+            string_value: nil,
+            component_count: 0,
+            vector_value: WESceneVector4()
+        )
+        var error: WESceneRuntimeErrorRef?
+        XCTAssertEqual(
+            we_scene_model_set_property_value(
+                loaded.model, "showGroup", &property, &error
+            ),
+            1,
+            errorMessage(error)
+        )
+
+        let shown = try createSnapshot(loaded.graph)
+        defer { we_scene_graph_snapshot_destroy(shown) }
+        XCTAssertEqual(
+            try visibility(shown),
+            [10: 1, 20: 1, 30: 1, 40: 1, 50: 0, 60: 0]
+        )
+    }
+
     func testDependencyAndParentCyclesAreStructuredFailures() throws {
         let cases: [([[String: Any]], String)] = [
             (

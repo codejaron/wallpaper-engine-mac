@@ -1589,6 +1589,97 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(descriptors[1].visible, 0)
     }
 
+    func testEvaluatedFramePlanUsesEffectiveParentVisibility() throws {
+        var documents = syntheticDocuments()
+        var project = try XCTUnwrap(documents["project.json"] as? [String: Any])
+        var projectGeneral = try XCTUnwrap(project["general"] as? [String: Any])
+        var properties = try XCTUnwrap(projectGeneral["properties"] as? [String: Any])
+        properties["showGroup"] = ["type": "bool", "value": false]
+        projectGeneral["properties"] = properties
+        project["general"] = projectGeneral
+        documents["project.json"] = project
+
+        var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])
+        let source = try XCTUnwrap((scene["objects"] as? [[String: Any]])?.first)
+        var root = source
+        root["effects"] = []
+        root["name"] = "Root"
+        root["visible"] = ["user": "showGroup", "value": true]
+        var child = root
+        child["id"] = 8
+        child["name"] = "Child"
+        child["parent"] = 7
+        child["visible"] = true
+        var grandchild = root
+        grandchild["id"] = 9
+        grandchild["name"] = "Grandchild"
+        grandchild["parent"] = 8
+        grandchild["visible"] = true
+        var independent = root
+        independent["id"] = 10
+        independent["name"] = "Independent"
+        independent.removeValue(forKey: "parent")
+        independent["visible"] = true
+        scene["objects"] = [grandchild, independent, child, root]
+        documents["scene.json"] = scene
+
+        let fixture = try makeFixture(documents)
+        let loaded = try load(
+            assets: fixture.assets,
+            package: fixture.package,
+            root: fixture.root
+        )
+        defer { destroy(loaded) }
+
+        func visibility(
+            _ plan: WESceneFramePlanRef
+        ) throws -> [Int32: Int32] {
+            Dictionary(uniqueKeysWithValues: try images(plan).map {
+                ($0.object_id, $0.visible)
+            })
+        }
+
+        let hidden = try createPlan(
+            loaded.frameGraph,
+            runtime: 0,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(hidden) }
+        XCTAssertEqual(
+            try visibility(hidden),
+            [7: 0, 8: 0, 9: 0, 10: 1]
+        )
+
+        var property = WEScenePropertyValue(
+            type: WE_SCENE_VALUE_BOOLEAN,
+            boolean_value: 1,
+            integer_value: 0,
+            number_value: 0,
+            string_value: nil,
+            component_count: 0,
+            vector_value: WESceneVector4()
+        )
+        var error: WESceneRuntimeErrorRef?
+        XCTAssertEqual(
+            we_scene_model_set_property_value(
+                loaded.model, "showGroup", &property, &error
+            ),
+            1,
+            errorMessage(error)
+        )
+
+        let shown = try createPlan(
+            loaded.frameGraph,
+            runtime: 1,
+            frameTime: 1.0 / 60.0
+        )
+        defer { we_scene_frame_plan_destroy(shown) }
+        XCTAssertEqual(
+            try visibility(shown),
+            [7: 1, 8: 1, 9: 1, 10: 1]
+        )
+    }
+
     func testTemplateLayerCloneAndTimelineAnimationFlowIntoFrameGraph() throws {
         var documents = syntheticDocuments()
         var scene = try XCTUnwrap(documents["scene.json"] as? [String: Any])

@@ -15,6 +15,7 @@
 #include <sstream>
 #include <set>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -701,6 +702,25 @@ ObjectTransform combine(
     };
 }
 
+void resolveWorldState(SceneGraphSnapshot& snapshot) {
+    if (!snapshot.nodeIndices) {
+        throw std::logic_error(
+            "SceneGraph snapshot cannot resolve parent state without an id index"
+        );
+    }
+    for (const std::size_t index : snapshot.initializationOrder) {
+        SceneGraphNodeSnapshot& node = snapshot.nodes.at(index);
+        if (!node.parent) continue;
+        const std::size_t parentIndex = snapshot.nodeIndices->at(*node.parent);
+        const SceneGraphNodeSnapshot& parent = snapshot.nodes.at(parentIndex);
+        node.worldTransform = combine(parent.worldTransform, node.localTransform);
+        // Wallpaper Engine hierarchy visibility is effective visibility: a
+        // hidden parent suppresses its complete subtree while each child's
+        // own `visible` property remains intact for scripts and later frames.
+        node.isVisible = node.isVisible && parent.isVisible;
+    }
+}
+
 }  // namespace
 
 struct SceneGraph::ScriptState final {
@@ -1247,17 +1267,7 @@ SceneGraphSnapshot SceneGraph::snapshot() const {
 
     // Initialization order guarantees every parent has already been resolved,
     // even when the child appeared first in scene.json.
-    for (const std::size_t index : initializationOrder_) {
-        SceneGraphNodeSnapshot& node = result.nodes[index];
-        if (!node.parent) {
-            continue;
-        }
-        const std::size_t parentIndex = objectIndices_.at(*node.parent);
-        node.worldTransform = combine(
-            result.nodes[parentIndex].worldTransform,
-            node.localTransform
-        );
-    }
+    resolveWorldState(result);
     return result;
 }
 
@@ -1571,15 +1581,7 @@ SceneGraphSnapshot SceneGraph::snapshot(EvaluationFrame& frame) const {
         result.renderOrder = scriptState_->topologyCache->renderOrder;
     }
 
-    for (const std::size_t index : result.initializationOrder) {
-        SceneGraphNodeSnapshot& node = result.nodes[index];
-        if (!node.parent) continue;
-        const std::size_t parentIndex = result.nodeIndices->at(*node.parent);
-        node.worldTransform = combine(
-            result.nodes[parentIndex].worldTransform,
-            node.localTransform
-        );
-    }
+    resolveWorldState(result);
     // Dynamic object fields can execute SceneScript callbacks that mutate
     // texture-animation and sound state through the shared layer registry.
     // Capture those behavior snapshots only after every dynamic field has

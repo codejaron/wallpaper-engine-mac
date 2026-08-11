@@ -29,7 +29,7 @@ Open Wallpaper Engine（修補版）
 
 ### 場景 Runtime 相容性
 
-場景桌布現在透過原生 C++/OpenGL 管線執行，並更貼近 Linux Wallpaper Engine runtime 的行為契約。可處理 Wallpaper Engine 套件、模型、shader、腳本、frame graph 與紋理，無須將 framebuffer 讀回 CPU。
+場景桌布現在透過原生 C++/Metal 管線執行，並更貼近 Linux Wallpaper Engine runtime 的行為契約。可處理 Wallpaper Engine 套件、模型、GLSL 到 MSL shader 轉換、腳本、frame graph 與紋理，無須將 framebuffer 讀回 CPU。
 
 - **場景圖層與效果** — 支援群組圖層、圖片材質、多 pass 效果、framebuffer 操作、場景合成、游標互動、相機視差與自動投影。
 - **文字、媒體與影片** — 原生繪製嵌入與系統字型、作者設定的版面與文字效果；支援影片紋理、場景內建音效，以及相容腳本使用的 macOS「正在播放」中繼資料與封面。
@@ -105,7 +105,7 @@ Cmd+點擊選取多個桌布，右鍵選擇批次取消訂閱。
 
 **新實作包括：**
 - **原生 SceneRuntime** — 由單一 C++ runtime 處理 PKGV/TEXV、模型、材質、shader 與腳本
-- **OpenGL 渲染器** — 執行一致的 frame graph，無需 CPU readback 即可直接呈現在 `NSOpenGLView`
+- **Metal 渲染器** — 執行一致的 frame graph，無需 CPU readback 即可直接呈現在 `MTKView`
 - **Wallpaper Engine assets directory** — 使用一般設定中選取的官方 shader 與材質資源
 - **明確失敗** — 無效或尚未支援的場景會清除畫面並顯示錯誤，不會靜默保留舊畫面或預覽圖
 
@@ -172,6 +172,6 @@ open "Open Wallpaper Engine.xcodeproj"
 
 ## 架構
 
-- `SceneRuntime/` 包含原生套件解析、模型、腳本、shader、frame graph、音訊與 OpenGL 執行管線。
+- `SceneRuntime/` 包含原生套件解析、模型、腳本、shader、frame graph、音訊與 Metal 執行管線。
 - App 層負責按螢幕管理場景 session、屬性保存、播放策略、macOS 音訊擷取和「正在播放」輸入。
 - 創意工坊瀏覽使用 Steam Web API 探索內容，並透過 `steamcmd` 完成驗證與下載。

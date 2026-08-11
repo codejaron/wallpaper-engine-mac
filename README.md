@@ -28,7 +28,7 @@ Licensed under [GPL-3.0](LICENSE), same as the original project.
 ## What's New in 0.8.1
 
 ### Scene Runtime Compatibility
-Scene wallpapers now run through a native C++/OpenGL pipeline that follows the Linux Wallpaper Engine runtime contract much more closely. It handles Wallpaper Engine packages, models, shaders, scripts, frame graphs, and textures without a CPU framebuffer readback.
+Scene wallpapers now run through a native C++/Metal pipeline that follows the Linux Wallpaper Engine runtime contract much more closely. It handles Wallpaper Engine packages, models, GLSL-to-MSL shader translation, scripts, frame graphs, and textures without a CPU framebuffer readback.
 
 - **Scene layers and effects** — Supports group layers, image materials, multi-pass effects, framebuffer operations, scene composition, cursor interaction, camera parallax, and automatic projection.
 - **Text, media, and video** — Renders embedded and system fonts with authored layout and text effects; supports video textures, authored scene audio, and macOS Now Playing metadata/artwork for compatible scripts.
@@ -100,7 +100,7 @@ Scene wallpapers (the most common type on Steam Workshop) were completely unimpl
 
 **New implementation includes:**
 - **Native scene runtime** — Parses PKGV/TEXV assets, scene models, materials, shaders, and scripts through one C++ runtime
-- **OpenGL renderer** — Executes coherent frame graphs and presents them directly in an `NSOpenGLView` without CPU readback
+- **Metal renderer** — Executes coherent frame graphs and presents them directly in an `MTKView` without CPU readback
 - **Wallpaper Engine assets directory** — Uses the official shader and material assets selected in General settings
 - **Explicit failures** — Invalid or unsupported scenes are cleared and reported instead of silently showing a stale frame or preview
 
@@ -167,6 +167,6 @@ Do not add, commit, or redistribute these files with this project. Steam library
 
 ## Architecture
 
-- `SceneRuntime/` contains the native package, model, script, shader, frame-graph, audio, and OpenGL execution pipeline.
+- `SceneRuntime/` contains the native package, model, script, shader, frame-graph, audio, and Metal execution pipeline.
 - The app layer owns per-display Scene sessions, property persistence, playback policy, macOS audio capture, and Now Playing input.
 - Workshop browsing uses the Steam Web API for discovery and `steamcmd` for authentication and downloads.

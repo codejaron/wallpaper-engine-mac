@@ -1,5 +1,5 @@
 import Foundation
-import OpenGL
+import Metal
 import QuartzCore
 import SceneAudio
 import SceneRuntimeBridge
@@ -28,7 +28,7 @@ enum SceneRuntimeSessionError: LocalizedError {
     }
 }
 
-/// Owns one complete SceneRuntime pipeline for one screen and one CGL context.
+/// Owns one complete SceneRuntime pipeline for one screen and one Metal device.
 /// Handles are destroyed in strict reverse dependency order.
 @MainActor
 final class SceneRuntimeSession {
@@ -51,7 +51,7 @@ final class SceneRuntimeSession {
         wallpaper: WEWallpaper,
         assetsDirectory: String?,
         localStorageScreenIdentity: String,
-        cglContext: CGLContextObj,
+        metalDevice: MTLDevice,
         isScreensaver: Bool
     ) throws {
         guard let assetsPath = assetsDirectory, !assetsPath.isEmpty else {
@@ -111,11 +111,13 @@ final class SceneRuntimeSession {
             frameGraph = we_scene_graph_frame_graph_create(graph, &error)
             guard let frameGraph else { throw bridgeError("Creating Scene frame graph", error) }
 
-            executor = we_scene_frame_executor_create_with_cgl_context(
-                frameGraph, UnsafeMutableRawPointer(cglContext), &error
+            executor = we_scene_frame_executor_create_with_metal_device(
+                frameGraph,
+                Unmanaged.passUnretained(metalDevice).toOpaque(),
+                &error
             )
             guard executor != nil else {
-                throw bridgeError("Creating Scene OpenGL executor", error)
+                throw bridgeError("Creating Scene Metal executor", error)
             }
             guard we_scene_frame_executor_set_screensaver_state(
                 executor,
@@ -157,6 +159,7 @@ final class SceneRuntimeSession {
         pointerActive: Bool,
         pointerLeftDown: Bool,
         mediaSnapshot: SceneMediaProviderSnapshot,
+        drawable: CAMetalDrawable,
         drawableWidth: UInt32,
         drawableHeight: UInt32,
         presentation: ScenePresentationLayout,
@@ -291,6 +294,7 @@ final class SceneRuntimeSession {
         reportExecutorIssues(from: executor)
         let presentStarted = CACurrentMediaTime()
         try present(
+            drawable: drawable,
             drawableWidth: drawableWidth,
             drawableHeight: drawableHeight,
             presentation: presentation
@@ -506,6 +510,7 @@ final class SceneRuntimeSession {
     }
 
     func replayLastEvaluatedFrame(
+        drawable: CAMetalDrawable,
         drawableWidth: UInt32,
         drawableHeight: UInt32,
         presentation: ScenePresentationLayout,
@@ -562,6 +567,7 @@ final class SceneRuntimeSession {
         }
         reportExecutorIssues(from: executor)
         try present(
+            drawable: drawable,
             drawableWidth: drawableWidth,
             drawableHeight: drawableHeight,
             presentation: presentation
@@ -583,6 +589,7 @@ final class SceneRuntimeSession {
     }
 
     func present(
+        drawable: CAMetalDrawable,
         drawableWidth: UInt32,
         drawableHeight: UInt32,
         presentation: ScenePresentationLayout
@@ -591,17 +598,25 @@ final class SceneRuntimeSession {
             throw SceneRuntimeSessionError.runtime("Scene executor is not available")
         }
         var error: WESceneRuntimeErrorRef?
+        let drawablePointer = Unmanaged.passUnretained(
+            drawable as AnyObject
+        ).toOpaque()
         let presentResult: Int32
         if var viewport = try presentation.viewport(
             drawableWidth: drawableWidth,
             drawableHeight: drawableHeight
         ) {
             presentResult = we_scene_frame_executor_present_for_viewport(
-                executor, &viewport, presentation.bridgeScaling, &error
+                executor,
+                drawablePointer,
+                &viewport,
+                presentation.bridgeScaling,
+                &error
             )
         } else {
             presentResult = we_scene_frame_executor_present(
                 executor,
+                drawablePointer,
                 drawableWidth,
                 drawableHeight,
                 presentation.bridgeScaling,

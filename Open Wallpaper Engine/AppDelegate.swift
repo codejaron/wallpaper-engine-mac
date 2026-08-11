@@ -437,9 +437,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return nil
     }
 
-    private func findSceneView(in view: NSView?) -> SceneOpenGLContainerView? {
+    private func findSceneView(in view: NSView?) -> SceneMetalContainerView? {
         guard let view else { return nil }
-        if let sceneView = view as? SceneOpenGLContainerView { return sceneView }
+        if let sceneView = view as? SceneMetalContainerView { return sceneView }
         for child in view.subviews {
             if let sceneView = findSceneView(in: child) { return sceneView }
         }

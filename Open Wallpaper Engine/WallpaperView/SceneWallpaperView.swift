@@ -1,5 +1,5 @@
 import Cocoa
-import OpenGL.GL3
+import MetalKit
 import QuartzCore
 import SceneAudio
 import SceneRuntimeBridge
@@ -269,9 +269,9 @@ struct ScenePresentationLayout: Equatable {
         let integer = value.rounded(.towardZero)
         guard value.isFinite,
               integer >= minimum,
-              integer <= CGFloat(Int32.max) else {
+              integer <= CGFloat(UInt32.max) else {
             throw ScenePresentationLayoutError.invalid(
-                "Scene span \(field) is outside the supported OpenGL range: \(value)"
+                "Scene span \(field) is outside the supported Metal range: \(value)"
             )
         }
         return UInt32(integer)
@@ -403,13 +403,13 @@ struct SceneWallpaperView: View {
             wallpaperViewModel: wallpaperViewModel
         )
         ZStack {
-            SceneOpenGLRepresentable(
+            SceneMetalRepresentable(
                 wallpaper: wallpaper,
                 localStorageScreenIdentity:
                     WallpaperViewModel.scenePropertyScreenIdentity(screenId),
                 presentation: presentation,
                 renderQuality: globalSettingsViewModel.settings.sceneRenderQuality,
-                paused: wallpaperViewModel.effectivePlayRate == 0,
+                playbackPaused: wallpaperViewModel.effectivePlayRate == 0,
                 framesPerSecond: globalSettingsViewModel.settings.fps,
                 masterVolume: wallpaperViewModel.effectivePlayVolume,
                 audioOutputEnabled: globalSettingsViewModel.settings.audioOutput,
@@ -466,12 +466,12 @@ struct SceneWallpaperView: View {
     }
 }
 
-private struct SceneOpenGLRepresentable: NSViewRepresentable {
+private struct SceneMetalRepresentable: NSViewRepresentable {
     let wallpaper: WEWallpaper
     let localStorageScreenIdentity: String
     let presentation: ScenePresentationLayout
     let renderQuality: GSSceneRenderQuality
-    let paused: Bool
+    let playbackPaused: Bool
     let framesPerSecond: Double
     let masterVolume: Float
     let audioOutputEnabled: Bool
@@ -484,8 +484,8 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
     let onRuntimeError: (String?) -> Void
     @Binding var errorMessage: String?
 
-    func makeNSView(context: Context) -> SceneOpenGLContainerView {
-        let view = SceneOpenGLContainerView(frame: .zero)
+    func makeNSView(context: Context) -> SceneMetalContainerView {
+        let view = SceneMetalContainerView(frame: .zero)
         view.onError = { message in
             DispatchQueue.main.async {
                 errorMessage = message
@@ -502,7 +502,7 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
         )
         view.setPresentation(presentation)
         view.setRenderQuality(renderQuality)
-        view.setPaused(paused)
+        view.setPaused(playbackPaused)
         view.setAudioConfiguration(
             masterVolume: masterVolume,
             audioOutputEnabled: audioOutputEnabled,
@@ -513,7 +513,7 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ view: SceneOpenGLContainerView, context: Context) {
+    func updateNSView(_ view: SceneMetalContainerView, context: Context) {
         view.onError = { message in
             DispatchQueue.main.async {
                 errorMessage = message
@@ -530,7 +530,7 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
         )
         view.setPresentation(presentation)
         view.setRenderQuality(renderQuality)
-        view.setPaused(paused)
+        view.setPaused(playbackPaused)
         view.setAudioConfiguration(
             masterVolume: masterVolume,
             audioOutputEnabled: audioOutputEnabled,
@@ -540,45 +540,36 @@ private struct SceneOpenGLRepresentable: NSViewRepresentable {
         view.setFramesPerSecond(framesPerSecond)
     }
 
-    static func dismantleNSView(_ view: SceneOpenGLContainerView, coordinator: ()) {
+    static func dismantleNSView(_ view: SceneMetalContainerView, coordinator: ()) {
         view.shutdown()
     }
 }
 
-final class SceneOpenGLContainerView: NSView {
+final class SceneMetalContainerView: NSView {
     var onError: ((String?) -> Void)? {
-        didSet { openGLView?.onError = onError }
+        didSet { metalView?.onError = onError }
     }
     var onPropertiesLoaded: (([ScenePropertyDefinition]?) -> Void)? {
-        didSet { openGLView?.onPropertiesLoaded = onPropertiesLoaded }
+        didSet { metalView?.onPropertiesLoaded = onPropertiesLoaded }
     }
 
-    private let openGLView: SceneOpenGLView?
+    private let metalView: SceneMetalView?
 
     override init(frame frameRect: NSRect) {
-        var attributes: [NSOpenGLPixelFormatAttribute] = [
-            NSOpenGLPixelFormatAttribute(NSOpenGLPFAOpenGLProfile),
-            NSOpenGLPixelFormatAttribute(NSOpenGLProfileVersion4_1Core),
-            NSOpenGLPixelFormatAttribute(NSOpenGLPFADoubleBuffer),
-            NSOpenGLPixelFormatAttribute(NSOpenGLPFAAccelerated),
-            NSOpenGLPixelFormatAttribute(NSOpenGLPFAColorSize), 24,
-            NSOpenGLPixelFormatAttribute(NSOpenGLPFAAlphaSize), 8,
-            0,
-        ]
-        if let format = NSOpenGLPixelFormat(attributes: &attributes) {
-            openGLView = SceneOpenGLView(frame: frameRect, pixelFormat: format)
+        if let device = MTLCreateSystemDefaultDevice() {
+            metalView = SceneMetalView(frame: frameRect, device: device)
         } else {
-            openGLView = nil
+            metalView = nil
         }
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
-        if let openGLView {
-            openGLView.autoresizingMask = [.width, .height]
-            addSubview(openGLView)
+        if let metalView {
+            metalView.autoresizingMask = [.width, .height]
+            addSubview(metalView)
         } else {
             DispatchQueue.main.async { [weak self] in
-                self?.report("macOS did not provide the required OpenGL 4.1 core pixel format")
+                self?.report("macOS did not provide a Metal device")
             }
         }
     }
@@ -591,7 +582,7 @@ final class SceneOpenGLContainerView: NSView {
         localStorageScreenIdentity: String,
         propertyOverrides: [String: ScenePropertyValue]
     ) {
-        openGLView?.configure(
+        metalView?.configure(
             wallpaper: wallpaper,
             assetsDirectory: assetsDirectory,
             localStorageScreenIdentity: localStorageScreenIdentity,
@@ -599,14 +590,14 @@ final class SceneOpenGLContainerView: NSView {
         )
     }
 
-    func setPaused(_ value: Bool) { openGLView?.setPaused(value) }
+    func setPaused(_ value: Bool) { metalView?.setPaused(value) }
 
     func setPresentation(_ value: ScenePresentationLayout) {
-        openGLView?.setPresentation(value)
+        metalView?.setPresentation(value)
     }
 
     func setRenderQuality(_ value: GSSceneRenderQuality) {
-        openGLView?.setRenderQuality(value)
+        metalView?.setRenderQuality(value)
     }
 
     func setAudioConfiguration(
@@ -614,7 +605,7 @@ final class SceneOpenGLContainerView: NSView {
         audioOutputEnabled: Bool,
         isAudibleOwner: Bool
     ) {
-        openGLView?.setAudioConfiguration(
+        metalView?.setAudioConfiguration(
             masterVolume: masterVolume,
             audioOutputEnabled: audioOutputEnabled,
             isAudibleOwner: isAudibleOwner
@@ -622,20 +613,20 @@ final class SceneOpenGLContainerView: NSView {
     }
 
     func setSystemAudioCaptureEnabled(_ enabled: Bool) {
-        openGLView?.setSystemAudioCaptureEnabled(enabled)
+        metalView?.setSystemAudioCaptureEnabled(enabled)
     }
 
     func setMediaSnapshot(_ value: SceneMediaProviderSnapshot) {
-        openGLView?.setMediaSnapshot(value)
+        metalView?.setMediaSnapshot(value)
     }
 
-    func setFramesPerSecond(_ value: Double) { openGLView?.setFramesPerSecond(value) }
+    func setFramesPerSecond(_ value: Double) { metalView?.setFramesPerSecond(value) }
 
     func forwardDesktopLeftMouseButton(isDown: Bool) {
-        openGLView?.setPointerState(active: true, leftDown: isDown)
+        metalView?.setPointerState(active: true, leftDown: isDown)
     }
 
-    func shutdown() { openGLView?.shutdown() }
+    func shutdown() { metalView?.shutdown() }
 
     private func report(_ message: String) {
         NSLog("[Scene] %@", message)
@@ -643,7 +634,8 @@ final class SceneOpenGLContainerView: NSView {
     }
 }
 
-private final class SceneOpenGLView: NSOpenGLView {
+private final class SceneMetalView: MTKView, MTKViewDelegate {
+    private static let maximumMetalTextureDimension: CGFloat = 16_384
     private struct SessionIdentity: Equatable {
         let scene: URL
         let assetsDirectory: String?
@@ -671,9 +663,9 @@ private final class SceneOpenGLView: NSOpenGLView {
     )
     private var propertyConfigurationValid = false
     private var frameDisplayLink: CADisplayLink?
-    private var isOpenGLPrepared = false
+    private var isMetalPrepared = false
     private var hasRenderedFrame = false
-    private var paused = false
+    private var playbackPaused = false
     private var renderQuality = GSSceneRenderQuality.high
     private var framesPerSecond = 60.0
     private var masterVolume: Float = 1
@@ -699,26 +691,22 @@ private final class SceneOpenGLView: NSOpenGLView {
     private var lastReportedAudioIssue: String?
     private var frameStats = SceneDrawFrameStats()
 
-    init?(frame frameRect: NSRect, pixelFormat: NSOpenGLPixelFormat) {
-        super.init(frame: frameRect, pixelFormat: pixelFormat)
+    private lazy var clearCommandQueue = device?.makeCommandQueue()
+
+    override init(frame frameRect: NSRect, device: MTLDevice?) {
+        super.init(frame: frameRect, device: device)
+        colorPixelFormat = .bgra8Unorm
+        framebufferOnly = true
+        sampleCount = 1
+        isPaused = true
+        enableSetNeedsDisplay = true
+        autoResizeDrawable = true
+        clearColor = MTLClearColorMake(0, 0, 0, 0)
+        delegate = self
+        isMetalPrepared = true
     }
 
-    required init?(coder: NSCoder) { super.init(coder: coder) }
-
-    override func prepareOpenGL() {
-        super.prepareOpenGL()
-        openGLContext?.makeCurrentContext()
-        // CADisplayLink is the single presentation clock. A second v-sync wait
-        // inside flushBuffer stalls the AppKit/Core Animation commit that was
-        // already scheduled for this refresh and turns small misses into a
-        // visible half-rate cadence on particle trails.
-        var swapInterval: GLint = 0
-        openGLContext?.setValues(&swapInterval, for: .swapInterval)
-        wantsBestResolutionOpenGLSurface = true
-        isOpenGLPrepared = true
-        reconcileSession()
-        updateDisplayLink()
-    }
+    required init(coder: NSCoder) { fatalError("init(coder:) is unsupported") }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -765,9 +753,9 @@ private final class SceneOpenGLView: NSOpenGLView {
     }
 
     func setPaused(_ value: Bool) {
-        guard paused != value else { return }
+        guard playbackPaused != value else { return }
         session?.setPaused(value)
-        paused = value
+        playbackPaused = value
         previousTimestamp = nil
         pendingDisplayTargetTimestamp = nil
         previousSpanRuntimeSeconds = nil
@@ -828,7 +816,7 @@ private final class SceneOpenGLView: NSOpenGLView {
         guard mediaSnapshot != value else { return }
         mediaSnapshot = value
         // Media callbacks are part of script evaluation. Force one evaluated
-        // frame even while presentation is paused; replay alone cannot deliver
+        // frame even while playback is paused; replay alone cannot deliver
         // a new revision.
         hasRenderedFrame = false
         needsDisplay = true
@@ -891,16 +879,17 @@ private final class SceneOpenGLView: NSOpenGLView {
         }
     }
 
-    override func draw(_ dirtyRect: NSRect) {
+    func draw(in view: MTKView) {
         guard propertyConfigurationValid,
               let session,
-              let context = openGLContext else {
+              let drawable = currentDrawable else {
             clearDrawableIfAvailable()
             return
         }
-        context.makeCurrentContext()
-        let backing = convertToBacking(bounds).size
-        guard backing.width >= 1, backing.height >= 1 else { return }
+        let backing = drawableSize
+        guard backing.width >= 1, backing.height >= 1,
+              backing.width <= Self.maximumMetalTextureDimension,
+              backing.height <= Self.maximumMetalTextureDimension else { return }
         if let validationError = presentation.validationError {
             clearDrawableIfAvailable()
             reportFatalIssue(validationError)
@@ -913,7 +902,7 @@ private final class SceneOpenGLView: NSOpenGLView {
             // A synchronous display-link draw can still be followed by
             // AppKit's ordinary dirty-view pass. That pass has no display
             // sequence and must not evaluate and submit the same scene frame
-            // a second time. Initial and paused/manual draws remain valid.
+            // a second time. Initial, paused, and manual draws remain valid.
             if frameDisplayLink != nil,
                displaySequence == nil,
                hasRenderedFrame {
@@ -924,8 +913,9 @@ private final class SceneOpenGLView: NSOpenGLView {
             var targetLagMillisecondsForStats = 0.0
             let width = UInt32(backing.width.rounded())
             let height = UInt32(backing.height.rounded())
-            if paused && hasRenderedFrame {
+            if playbackPaused && hasRenderedFrame {
                 try session.replayLastEvaluatedFrame(
+                    drawable: drawable,
                     drawableWidth: width,
                     drawableHeight: height,
                     presentation: presentation,
@@ -945,20 +935,20 @@ private final class SceneOpenGLView: NSOpenGLView {
                         at: now,
                         framesPerSecond: framesPerSecond
                     )
-                    frameTime = paused ? 0 : min(max(
+                    frameTime = playbackPaused ? 0 : min(max(
                         previousSpanRuntimeSeconds.map {
                             sharedRuntimeSeconds - $0
                         } ?? 0,
                         0
                     ), 0.25)
-                    previousSpanRuntimeSeconds = paused ? nil : sharedRuntimeSeconds
+                    previousSpanRuntimeSeconds = playbackPaused ? nil : sharedRuntimeSeconds
                     presentedRuntimeSeconds = sharedRuntimeSeconds
                 } else {
-                    frameTime = paused ? 0 : min(max(
+                    frameTime = playbackPaused ? 0 : min(max(
                         previousTimestamp.map { now - $0 } ?? 0,
                         0
                     ), 0.25)
-                    previousTimestamp = paused ? nil : now
+                    previousTimestamp = playbackPaused ? nil : now
                     runtimeSeconds += frameTime
                     presentedRuntimeSeconds = runtimeSeconds
                 }
@@ -984,6 +974,7 @@ private final class SceneOpenGLView: NSOpenGLView {
                     pointerActive: pointerState.active,
                     pointerLeftDown: pointerState.leftDown,
                     mediaSnapshot: mediaSnapshot,
+                    drawable: drawable,
                     drawableWidth: width,
                     drawableHeight: height,
                     presentation: presentation,
@@ -1002,11 +993,9 @@ private final class SceneOpenGLView: NSOpenGLView {
                 )
                 hasRenderedFrame = true
             }
-            let flushStarted = CACurrentMediaTime()
-            context.flushBuffer()
             let finished = CACurrentMediaTime()
             let displayLabel = displaySequence.map(String.init) ?? "none"
-            let flushMilliseconds = (finished - flushStarted) * 1_000
+            let flushMilliseconds = 0.0
             let totalMilliseconds = (finished - drawStarted) * 1_000
             frameStats.record(
                 displaySequence: displaySequence,
@@ -1017,8 +1006,7 @@ private final class SceneOpenGLView: NSOpenGLView {
                 targetLagMilliseconds: targetLagMillisecondsForStats
             )
             SceneFrameTrace.log(
-                "draw.flush display=\(displayLabel) "
-                    + "ms=\(String(format: "%.3f", flushMilliseconds)) "
+                "draw.submit display=\(displayLabel) "
                     + "totalMs=\(String(format: "%.3f", totalMilliseconds))"
             )
             sessionRetryAttempt = 0
@@ -1029,8 +1017,7 @@ private final class SceneOpenGLView: NSOpenGLView {
         }
     }
 
-    override func reshape() {
-        super.reshape()
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         needsDisplay = true
     }
 
@@ -1054,23 +1041,6 @@ private final class SceneOpenGLView: NSOpenGLView {
         onPropertiesLoaded?(nil)
     }
 
-    override func clearGLContext() {
-        frameDisplayLink?.invalidate()
-        frameDisplayLink = nil
-        closeSession()
-        activeIdentity = nil
-        attemptedIdentity = nil
-        propertyConfigurationValid = false
-        hasRenderedFrame = false
-        runtimeSeconds = 0
-        previousTimestamp = nil
-        pendingDisplayTargetTimestamp = nil
-        previousSpanRuntimeSeconds = nil
-        audioCaptureIssue = nil
-        isOpenGLPrepared = false
-        super.clearGLContext()
-    }
-
     deinit {
         frameDisplayLink?.invalidate()
         closeSession()
@@ -1080,11 +1050,11 @@ private final class SceneOpenGLView: NSOpenGLView {
         frameDisplayLink?.invalidate()
         frameDisplayLink = nil
         pendingDisplayTargetTimestamp = nil
-        guard isOpenGLPrepared,
+        guard isMetalPrepared,
               window != nil,
               session != nil,
               propertyConfigurationValid,
-              !paused else { return }
+              !playbackPaused else { return }
         let displayLink = displayLink(
             target: self,
             selector: #selector(displayLinkDidFire(_:))
@@ -1137,14 +1107,13 @@ private final class SceneOpenGLView: NSOpenGLView {
     }
 
     private func reconcileSession() {
-        guard isOpenGLPrepared,
+        guard isMetalPrepared,
               window != nil,
               let wallpaper = requestedWallpaper,
               let identity = requestedIdentity,
               identity != activeIdentity,
               identity != attemptedIdentity,
-              let context = openGLContext?.cglContextObj else { return }
-        openGLContext?.makeCurrentContext()
+              let device else { return }
         attemptedIdentity = identity
         let newSession: SceneRuntimeSession
         do {
@@ -1152,7 +1121,7 @@ private final class SceneOpenGLView: NSOpenGLView {
                 wallpaper: wallpaper,
                 assetsDirectory: identity.assetsDirectory,
                 localStorageScreenIdentity: identity.localStorageScreenIdentity,
-                cglContext: context,
+                metalDevice: device,
                 // This view is the desktop-wallpaper host. A future native
                 // screensaver host passes true through the same session/API;
                 // the script runtime never guesses the mode.
@@ -1171,7 +1140,7 @@ private final class SceneOpenGLView: NSOpenGLView {
             return
         }
 
-        newSession.setPaused(paused)
+        newSession.setPaused(playbackPaused)
         session = newSession
         activeIdentity = identity
         hasRenderedFrame = false
@@ -1197,14 +1166,22 @@ private final class SceneOpenGLView: NSOpenGLView {
     }
 
     private func clearDrawableIfAvailable() {
-        guard isOpenGLPrepared, window != nil, let context = openGLContext else { return }
-        let backing = convertToBacking(bounds).size
-        guard backing.width >= 1, backing.height >= 1 else { return }
-        context.makeCurrentContext()
-        glBindFramebuffer(GLenum(GL_FRAMEBUFFER), 0)
-        glClearColor(0, 0, 0, 0)
-        glClear(GLbitfield(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT))
-        context.flushBuffer()
+        guard isMetalPrepared,
+              window != nil,
+              let drawable = currentDrawable,
+              let commandBuffer = clearCommandQueue?.makeCommandBuffer()
+        else { return }
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = drawable.texture
+        descriptor.colorAttachments[0].loadAction = .clear
+        descriptor.colorAttachments[0].storeAction = .store
+        descriptor.colorAttachments[0].clearColor = clearColor
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(
+            descriptor: descriptor
+        ) else { return }
+        encoder.endEncoding()
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
     }
 
     private func closeSession() {
@@ -1212,7 +1189,6 @@ private final class SceneOpenGLView: NSOpenGLView {
         sessionRetryTask = nil
         cancelAudioCapture()
         guard let session else { return }
-        openGLContext?.makeCurrentContext()
         session.close()
         self.session = nil
     }
@@ -1279,7 +1255,7 @@ private final class SceneOpenGLView: NSOpenGLView {
     }
 
     private func scheduleSessionRetry() {
-        guard isOpenGLPrepared,
+        guard isMetalPrepared,
               window != nil,
               requestedIdentity != nil,
               activeIdentity == nil else { return }

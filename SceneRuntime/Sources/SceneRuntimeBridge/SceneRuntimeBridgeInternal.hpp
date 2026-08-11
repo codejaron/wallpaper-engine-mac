@@ -3,8 +3,8 @@
 
 #include <SceneCore/Runtime.hpp>
 #include <SceneFrameGraph/SceneFrameGraph.hpp>
-#include <SceneGL/FramePlanExecutor.hpp>
-#include <SceneGL/SceneGL.hpp>
+#include <SceneMetal/FramePlanExecutor.hpp>
+#include <SceneMetal/SceneMetal.hpp>
 #include <SceneGraph/SceneGraph.hpp>
 #include <SceneModel/SceneModel.hpp>
 #include <SceneRuntimeBridge/SceneRuntimeBridge.h>
@@ -50,7 +50,7 @@ struct WESceneFramePlan {
 };
 
 struct WESceneFrameExecutor {
-    std::unique_ptr<we::scene::gl::FramePlanExecutor> executor;
+    std::unique_ptr<we::scene::metal::FramePlanExecutor> executor;
 };
 
 namespace we::scene::bridge {
@@ -168,43 +168,43 @@ inline void assignModelError(
     );
 }
 
-inline WESceneRuntimeErrorCode glErrorCode(
-    gl::ErrorCode code
+inline WESceneRuntimeErrorCode metalErrorCode(
+    metal::ErrorCode code
 ) noexcept {
     switch (code) {
-        case gl::ErrorCode::invalidArgument:
+        case metal::ErrorCode::invalidArgument:
             return WE_SCENE_RUNTIME_ERROR_FRAME_EXECUTOR_INVALID_STATE;
-        case gl::ErrorCode::contextCreation:
-            return WE_SCENE_RUNTIME_ERROR_GL_CONTEXT_CREATION;
-        case gl::ErrorCode::unsupportedContext:
-            return WE_SCENE_RUNTIME_ERROR_GL_UNSUPPORTED_CONTEXT;
-        case gl::ErrorCode::shaderCompilation:
-            return WE_SCENE_RUNTIME_ERROR_GL_SHADER_COMPILATION;
-        case gl::ErrorCode::programLink:
-            return WE_SCENE_RUNTIME_ERROR_GL_PROGRAM_LINK;
-        case gl::ErrorCode::framebufferCreation:
-            return WE_SCENE_RUNTIME_ERROR_GL_FRAMEBUFFER_CREATION;
-        case gl::ErrorCode::draw:
-            return WE_SCENE_RUNTIME_ERROR_GL_DRAW;
-        case gl::ErrorCode::readback:
-            return WE_SCENE_RUNTIME_ERROR_GL_READBACK;
-        case gl::ErrorCode::internalFailure:
-            return WE_SCENE_RUNTIME_ERROR_GL_INTERNAL_FAILURE;
-        case gl::ErrorCode::textureDecode:
-            return WE_SCENE_RUNTIME_ERROR_GL_TEXTURE_DECODE;
-        case gl::ErrorCode::textureUpload:
-            return WE_SCENE_RUNTIME_ERROR_GL_TEXTURE_UPLOAD;
-        case gl::ErrorCode::resourceValidation:
-            return WE_SCENE_RUNTIME_ERROR_GL_RESOURCE_VALIDATION;
+        case metal::ErrorCode::contextCreation:
+            return WE_SCENE_RUNTIME_ERROR_METAL_CONTEXT_CREATION;
+        case metal::ErrorCode::unsupportedContext:
+            return WE_SCENE_RUNTIME_ERROR_METAL_UNSUPPORTED_CONTEXT;
+        case metal::ErrorCode::shaderCompilation:
+            return WE_SCENE_RUNTIME_ERROR_METAL_SHADER_COMPILATION;
+        case metal::ErrorCode::programLink:
+            return WE_SCENE_RUNTIME_ERROR_METAL_PROGRAM_LINK;
+        case metal::ErrorCode::framebufferCreation:
+            return WE_SCENE_RUNTIME_ERROR_METAL_FRAMEBUFFER_CREATION;
+        case metal::ErrorCode::draw:
+            return WE_SCENE_RUNTIME_ERROR_METAL_DRAW;
+        case metal::ErrorCode::readback:
+            return WE_SCENE_RUNTIME_ERROR_METAL_READBACK;
+        case metal::ErrorCode::internalFailure:
+            return WE_SCENE_RUNTIME_ERROR_METAL_INTERNAL_FAILURE;
+        case metal::ErrorCode::textureDecode:
+            return WE_SCENE_RUNTIME_ERROR_METAL_TEXTURE_DECODE;
+        case metal::ErrorCode::textureUpload:
+            return WE_SCENE_RUNTIME_ERROR_METAL_TEXTURE_UPLOAD;
+        case metal::ErrorCode::resourceValidation:
+            return WE_SCENE_RUNTIME_ERROR_METAL_RESOURCE_VALIDATION;
     }
-    return WE_SCENE_RUNTIME_ERROR_GL_INTERNAL_FAILURE;
+    return WE_SCENE_RUNTIME_ERROR_METAL_INTERNAL_FAILURE;
 }
 
-inline void assignGLError(
+inline void assignMetalError(
     WESceneRuntimeErrorRef* outError,
-    const gl::Error& error
+    const metal::Error& error
 ) noexcept {
-    assignError(outError, glErrorCode(error.code()), error.what());
+    assignError(outError, metalErrorCode(error.code()), error.what());
 }
 
 inline bool requireOutput(

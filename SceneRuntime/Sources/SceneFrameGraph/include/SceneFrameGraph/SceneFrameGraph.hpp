@@ -478,7 +478,7 @@ struct EvaluatedFramePlan final {
 ) noexcept;
 
 // Retains the graph/model/runtime and creates a coherent immutable plan for
-// each property revision. Planning performs no OpenGL work.
+// each property revision. Planning performs no GPU work.
 class SceneFrameGraph final {
 public:
     [[nodiscard]] static std::shared_ptr<SceneFrameGraph> create(

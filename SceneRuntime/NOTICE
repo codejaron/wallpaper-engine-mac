@@ -37,7 +37,7 @@ Frame planning, material/effect pass expansion, framebuffer lookup, `bind`,
 `Render/Objects/CImage.cpp`, `Render/Objects/CRenderable.cpp`,
 `Render/Objects/Effects/CPass.cpp`, and `Render/FBOProvider.cpp`. The
 SceneFrameGraph implementation is a platform-neutral immutable CPU plan and
-does not contain the upstream OpenGL renderer or Linux integration code.
+does not contain the upstream renderer or Linux integration code.
 
 Camera parallax target calculation, delayed interpolation, and image depth
 offset semantics were adapted from upstream `Render/Wallpapers/CScene.cpp`
@@ -57,8 +57,8 @@ sprite vertex layout, and alpha/movement formulas were adapted from upstream
 intentionally differs in two places: it derives a stable deterministic random
 seed instead of using process entropy, and it rejects unsupported particle
 components with structured errors instead of logging and continuing. The
-renderer is a macOS OpenGL rewrite that supports only the explicitly modeled
-sprite path and does not copy the upstream renderer integration.
+renderer is a macOS Metal rewrite that supports only the explicitly modeled
+particle paths and does not copy the upstream renderer integration.
 
 The built-in copy-command shaders were adapted from upstream
 `WallpaperApplication.cpp`. They are registered as virtual runtime assets and
@@ -89,7 +89,7 @@ Bundled third-party libraries
   required by SceneShader are included.
 - SPIRV-Cross Wallpaper Engine fork, commit
   ad4d02220b01c1800e5a4e6671d6d8ca8ab07783, Apache-2.0 or MIT. Only the
-  core and GLSL backends required by SceneShader are included.
+  core, GLSL base, and Metal backend required by SceneShader are included.
 - QuickJS-NG, commit 72ba50f63ee31202f8c18b8d07ab1e1c3486ee6f, MIT. Only
   the four embeddable engine sources and their required headers and generated
   tables are included; the CLI and `quickjs-libc` host integration are omitted.

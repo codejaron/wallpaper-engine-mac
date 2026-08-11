@@ -60,8 +60,8 @@ final class SceneRuntimeBridgeTests: XCTestCase {
         let translatedFragment = runtimeString(
             we_scene_shader_translation_fragment_source(translation)
         )
-        XCTAssertTrue(translatedVertex.contains("#version 330"))
-        XCTAssertTrue(translatedFragment.contains("#version 330"))
+        XCTAssertTrue(translatedVertex.contains("#include <metal_stdlib>"), translatedVertex)
+        XCTAssertTrue(translatedFragment.contains("#include <metal_stdlib>"), translatedFragment)
         XCTAssertTrue(translatedFragment.contains("[int("), translatedFragment)
         XCTAssertEqual(
             runtimeString(we_scene_shader_glslang_revision()),
@@ -123,6 +123,71 @@ final class SceneRuntimeBridgeTests: XCTestCase {
         }
         defer { we_scene_shader_translation_destroy(translation) }
         XCTAssertNil(error)
+    }
+
+    func testMetalTranslationLinksVaryingsPastUnusedFragmentDeclaration() throws {
+        let translated = try translateShaderSources(
+            vertex: """
+            #version 330
+            attribute vec3 a_Position;
+            varying vec4 v_TexCoord;
+            varying vec4 v_TexCoordRipple;
+            void main() {
+                gl_Position = vec4(a_Position, 1.0);
+                v_TexCoord = vec4(0.25);
+                v_TexCoordRipple = vec4(0.75);
+            }
+            """,
+            fragment: """
+            #version 330
+            varying vec4 v_TexCoord;
+            varying vec2 v_Scroll;
+            varying vec4 v_TexCoordRipple;
+            void main() {
+                gl_FragColor = v_TexCoord + v_TexCoordRipple;
+            }
+            """
+        )
+
+        XCTAssertEqual(
+            try metalUserLocation(named: "v_TexCoord", in: translated.vertex),
+            try metalUserLocation(named: "v_TexCoord", in: translated.fragment)
+        )
+        XCTAssertEqual(
+            try metalUserLocation(named: "v_TexCoordRipple", in: translated.vertex),
+            try metalUserLocation(named: "v_TexCoordRipple", in: translated.fragment)
+        )
+    }
+
+    func testMetalTranslationLinksVaryingsIndependentOfDeclarationOrder() throws {
+        let translated = try translateShaderSources(
+            vertex: """
+            #version 330
+            attribute vec3 a_Position;
+            varying vec4 v_Color;
+            varying vec2 v_TexCoord;
+            void main() {
+                gl_Position = vec4(a_Position, 1.0);
+                v_Color = vec4(0.25, 0.5, 0.75, 1.0);
+                v_TexCoord = vec2(0.125, 0.875);
+            }
+            """,
+            fragment: """
+            #version 330
+            varying vec2 v_TexCoord;
+            varying vec4 v_Color;
+            void main() {
+                gl_FragColor = v_Color + vec4(v_TexCoord, 0.0, 0.0);
+            }
+            """
+        )
+
+        for name in ["v_Color", "v_TexCoord"] {
+            XCTAssertEqual(
+                try metalUserLocation(named: name, in: translated.vertex),
+                try metalUserLocation(named: name, in: translated.fragment)
+            )
+        }
     }
 
     func testShaderTranslationAllowsGlobalUniformAfterIncludedHelper() throws {
@@ -231,7 +296,7 @@ final class SceneRuntimeBridgeTests: XCTestCase {
             we_scene_shader_translation_vertex_source(translation)
         )
         XCTAssertTrue(
-            translatedVertex.contains("out vec2 v_TexCoord"),
+            translatedVertex.contains("float2 v_TexCoord"),
             translatedVertex
         )
     }
@@ -295,7 +360,7 @@ final class SceneRuntimeBridgeTests: XCTestCase {
             we_scene_shader_translation_vertex_source(translation)
         )
         XCTAssertTrue(
-            translatedVertex.contains("out vec4 v_EffectCoord"),
+            translatedVertex.contains("float4 v_EffectCoord"),
             translatedVertex
         )
     }
@@ -525,8 +590,10 @@ final class SceneRuntimeBridgeTests: XCTestCase {
         XCTAssertTrue(preprocessedVertex.contains("BuildTangentSpace"), preprocessedVertex)
         XCTAssertTrue(preprocessedFragment.contains("ComputeLightSpecular"), preprocessedFragment)
         XCTAssertTrue(preprocessedVertex.contains("#define GLSL 1"))
-        XCTAssertTrue(translatedVertex.contains("#version 330"), translatedVertex)
-        XCTAssertTrue(translatedFragment.contains("#version 330"), translatedFragment)
+        XCTAssertTrue(translatedVertex.contains("#include <metal_stdlib>"), translatedVertex)
+        XCTAssertTrue(translatedVertex.contains("we_scene_vertex_main"), translatedVertex)
+        XCTAssertTrue(translatedFragment.contains("#include <metal_stdlib>"), translatedFragment)
+        XCTAssertTrue(translatedFragment.contains("we_scene_fragment_main"), translatedFragment)
         XCTAssertTrue(translatedFragment.contains("out_FragColor"), translatedFragment)
 
         var foliageError: WESceneRuntimeErrorRef?
@@ -552,6 +619,45 @@ final class SceneRuntimeBridgeTests: XCTestCase {
             runtimeString(we_scene_shader_translation_fragment_source(foliage))
                 .contains("PerformLighting_V1")
         )
+
+        let linkedInterfaces = [
+            (
+                "effects/waterripple/shaders/effects/waterripple.vert",
+                "effects/waterripple/shaders/effects/waterripple.frag",
+                ["v_TexCoord", "v_TexCoordRipple"]
+            ),
+            (
+                "shaders/genericparticle.vert",
+                "shaders/genericparticle.frag",
+                ["v_Color", "v_TexCoord"]
+            ),
+            (
+                "shaders/genericropeparticle.vert",
+                "shaders/genericropeparticle.frag",
+                ["v_Color", "v_TexCoord"]
+            ),
+        ]
+        for (vertexPath, fragmentPath, varyings) in linkedInterfaces {
+            let linked = try translateShaderFiles(
+                runtime,
+                vertex: vertexPath,
+                fragment: fragmentPath
+            )
+            let vertexSource = runtimeString(
+                we_scene_shader_translation_vertex_source(linked)
+            )
+            let fragmentSource = runtimeString(
+                we_scene_shader_translation_fragment_source(linked)
+            )
+            we_scene_shader_translation_destroy(linked)
+            for varying in varyings {
+                XCTAssertEqual(
+                    try metalUserLocation(named: varying, in: vertexSource),
+                    try metalUserLocation(named: varying, in: fragmentSource),
+                    "\(vertexPath) / \(fragmentPath): \(varying)"
+                )
+            }
+        }
     }
 
     func testOfficialShaderMetadataExposesMaterialAndTypedDefaults() throws {
@@ -1646,6 +1752,56 @@ final class SceneRuntimeBridgeTests: XCTestCase {
         }
         XCTAssertNil(error)
         return runtime
+    }
+
+    private func translateShaderSources(
+        vertex: String,
+        fragment: String
+    ) throws -> (vertex: String, fragment: String) {
+        var error: WESceneRuntimeErrorRef?
+        let translation = vertex.withCString { vertexSource in
+            fragment.withCString { fragmentSource in
+                "linked-interface.vert".withCString { vertexName in
+                    "linked-interface.frag".withCString { fragmentName in
+                        var sources = WESceneShaderSources(
+                            vertex_source: vertexSource,
+                            fragment_source: fragmentSource,
+                            vertex_name: vertexName,
+                            fragment_name: fragmentName
+                        )
+                        return we_scene_shader_translate(&sources, &error)
+                    }
+                }
+            }
+        }
+        guard let translation else {
+            let message = errorMessage(error)
+            we_scene_runtime_error_destroy(error)
+            XCTFail("Shader translation failed: \(message)")
+            throw TestFailure.shaderTranslation
+        }
+        defer { we_scene_shader_translation_destroy(translation) }
+        XCTAssertNil(error)
+        return (
+            runtimeString(we_scene_shader_translation_vertex_source(translation)),
+            runtimeString(we_scene_shader_translation_fragment_source(translation))
+        )
+    }
+
+    private func metalUserLocation(named name: String, in source: String) throws -> Int {
+        guard let line = source.split(separator: "\n").first(where: {
+            $0.contains(" \(name) ") && $0.contains("[[user(locn")
+        }), let marker = line.range(of: "[[user(locn") else {
+            XCTFail("Metal interface field '\(name)' was not found in:\n\(source)")
+            throw TestFailure.shaderTranslation
+        }
+        let suffix = line[marker.upperBound...]
+        guard let end = suffix.firstIndex(of: ")"),
+              let location = Int(suffix[..<end]) else {
+            XCTFail("Metal interface location for '\(name)' is malformed: \(line)")
+            throw TestFailure.shaderTranslation
+        }
+        return location
     }
 
     private func createAsset(

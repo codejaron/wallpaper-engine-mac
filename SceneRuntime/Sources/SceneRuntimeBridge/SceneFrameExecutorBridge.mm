@@ -22,6 +22,10 @@ using namespace we::scene::bridge;
 
 namespace {
 
+constexpr std::uint32_t maximumMetalTextureDimension = 16'384;
+constexpr std::uint32_t maximumPresentationDimension =
+    static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
+
 bool requireExecutor(
     WESceneFrameExecutorRef executor,
     WESceneRuntimeErrorRef* outError
@@ -71,30 +75,30 @@ WESceneFramePlanIssueSeverity issueSeverity(
     std::terminate();
 }
 
-std::optional<gl::PresentationScaling> presentationScaling(
+std::optional<metal::PresentationScaling> presentationScaling(
     WEScenePresentationScaling scaling
 ) noexcept {
     switch (scaling) {
         case WE_SCENE_PRESENTATION_STRETCH:
-            return gl::PresentationScaling::stretch;
+            return metal::PresentationScaling::stretch;
         case WE_SCENE_PRESENTATION_ASPECT_FIT:
-            return gl::PresentationScaling::aspectFit;
+            return metal::PresentationScaling::aspectFit;
         case WE_SCENE_PRESENTATION_ASPECT_FILL:
-            return gl::PresentationScaling::aspectFill;
+            return metal::PresentationScaling::aspectFill;
         case WE_SCENE_PRESENTATION_AUTOMATIC:
-            return gl::PresentationScaling::automatic;
+            return metal::PresentationScaling::automatic;
     }
     return std::nullopt;
 }
 
-std::optional<gl::PhysicalRenderQuality> physicalRenderQuality(
+std::optional<metal::PhysicalRenderQuality> physicalRenderQuality(
     WEScenePhysicalRenderQuality quality
 ) noexcept {
     switch (quality) {
         case WE_SCENE_PHYSICAL_RENDER_BALANCED:
-            return gl::PhysicalRenderQuality::balanced;
+            return metal::PhysicalRenderQuality::balanced;
         case WE_SCENE_PHYSICAL_RENDER_POWER_SAVING:
-            return gl::PhysicalRenderQuality::powerSaving;
+            return metal::PhysicalRenderQuality::powerSaving;
     }
     return std::nullopt;
 }
@@ -103,7 +107,7 @@ bool requirePhysicalRenderTarget(
     WESceneFrameExecutorRef executor,
     const WEScenePhysicalRenderTarget* target,
     bool invalidateFrame,
-    gl::PhysicalRenderTarget& result,
+    metal::PhysicalRenderTarget& result,
     WESceneRuntimeErrorRef* outError
 ) {
     if (target == nullptr) {
@@ -116,10 +120,8 @@ bool requirePhysicalRenderTarget(
     }
     const auto quality = physicalRenderQuality(target->quality);
     if (target->backing_width == 0 || target->backing_height == 0 ||
-        target->backing_width >
-            static_cast<uint32_t>(std::numeric_limits<GLsizei>::max()) ||
-        target->backing_height >
-            static_cast<uint32_t>(std::numeric_limits<GLsizei>::max()) ||
+        target->backing_width > maximumMetalTextureDimension ||
+        target->backing_height > maximumMetalTextureDimension ||
         !quality) {
         if (invalidateFrame) executor->executor->invalidateFrame();
         assignError(
@@ -136,7 +138,7 @@ bool requirePhysicalRenderTarget(
     return true;
 }
 
-gl::PresentationViewport presentationViewport(
+metal::PresentationViewport presentationViewport(
     const WEScenePresentationViewport& viewport
 ) noexcept {
     return {
@@ -155,7 +157,7 @@ bool requirePresentationViewport(
     WESceneFrameExecutorRef executor,
     const WEScenePresentationViewport* viewport,
     bool invalidateFrame,
-    gl::PresentationViewport& result,
+    metal::PresentationViewport& result,
     WESceneRuntimeErrorRef* outError
 ) {
     if (viewport == nullptr) {
@@ -168,16 +170,16 @@ bool requirePresentationViewport(
     }
     try {
         result = presentationViewport(*viewport);
-        gl::validatePresentationViewport(result);
+        metal::validatePresentationViewport(result);
         return true;
-    } catch (const gl::Error& error) {
+    } catch (const metal::Error& error) {
         if (invalidateFrame) executor->executor->invalidateFrame();
-        if (error.code() == gl::ErrorCode::invalidArgument) {
+        if (error.code() == metal::ErrorCode::invalidArgument) {
             assignError(
                 outError, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT, error.what()
             );
         } else {
-            assignGLError(outError, error);
+            assignMetalError(outError, error);
         }
         return false;
     }
@@ -193,8 +195,8 @@ std::optional<AudioSpectrumFrame> audioSpectrumFrame(
         inputs->spectrum_32_right == nullptr ||
         inputs->spectrum_64_left == nullptr ||
         inputs->spectrum_64_right == nullptr) {
-        throw gl::Error(
-            gl::ErrorCode::invalidArgument,
+        throw metal::Error(
+            metal::ErrorCode::invalidArgument,
             "Audio spectrum input requires all six fixed-size arrays"
         );
     }
@@ -237,8 +239,8 @@ script::ScriptMediaPlaybackState mediaPlaybackState(
         case WE_SCENE_MEDIA_PAUSED:
             return script::ScriptMediaPlaybackState::paused;
     }
-    throw gl::Error(
-        gl::ErrorCode::invalidArgument,
+    throw metal::Error(
+        metal::ErrorCode::invalidArgument,
         "Scene media snapshot has an unknown playback state"
     );
 }
@@ -248,16 +250,16 @@ script::ScriptMediaSnapshot mediaSnapshot(
 ) {
     if ((input.available != 0 && input.available != 1) ||
         (input.has_thumbnail != 0 && input.has_thumbnail != 1)) {
-        throw gl::Error(
-            gl::ErrorCode::invalidArgument,
+        throw metal::Error(
+            metal::ErrorCode::invalidArgument,
             "Scene media availability and thumbnail flags must be zero or one"
         );
     }
     const bool available = input.available == 1;
     const auto requireString = [&](const char* value, const char* field) {
         if (value == nullptr && available) {
-            throw gl::Error(
-                gl::ErrorCode::invalidArgument,
+            throw metal::Error(
+                metal::ErrorCode::invalidArgument,
                 std::string("Available Scene media snapshot requires ") + field
             );
         }
@@ -269,8 +271,8 @@ script::ScriptMediaSnapshot mediaSnapshot(
             const double component = components[index];
             if (available && (!std::isfinite(component) ||
                               component < 0.0 || component > 1.0)) {
-                throw gl::Error(
-                    gl::ErrorCode::invalidArgument,
+                throw metal::Error(
+                    metal::ErrorCode::invalidArgument,
                     std::string("Scene media ") + field +
                         " must contain finite values in [0, 1]"
                 );
@@ -282,8 +284,8 @@ script::ScriptMediaSnapshot mediaSnapshot(
     if (available &&
         (!std::isfinite(input.position) || input.position < 0.0 ||
          !std::isfinite(input.duration) || input.duration < 0.0)) {
-        throw gl::Error(
-            gl::ErrorCode::invalidArgument,
+        throw metal::Error(
+            metal::ErrorCode::invalidArgument,
             "Scene media timeline values must be finite and non-negative"
         );
     }
@@ -315,60 +317,60 @@ script::ScriptMediaSnapshot mediaSnapshot(
     };
 }
 
-gl::MediaThumbnailRGBA8 mediaThumbnailRGBA8(
+metal::MediaThumbnailRGBA8 mediaThumbnailRGBA8(
     const WESceneMediaThumbnailRGBA8& input
 ) {
     if (input.width == 0 || input.height == 0) {
-        throw gl::Error(
-            gl::ErrorCode::invalidArgument,
+        throw metal::Error(
+            metal::ErrorCode::invalidArgument,
             "Scene media thumbnail dimensions must be greater than zero"
         );
     }
     if (input.pixels == nullptr) {
-        throw gl::Error(
-            gl::ErrorCode::invalidArgument,
+        throw metal::Error(
+            metal::ErrorCode::invalidArgument,
             "Scene media thumbnail pixels are required"
         );
     }
     const std::size_t minimumRowBytes =
         static_cast<std::size_t>(input.width) * 4;
     if (input.bytes_per_row < minimumRowBytes) {
-        throw gl::Error(
-            gl::ErrorCode::invalidArgument,
+        throw metal::Error(
+            metal::ErrorCode::invalidArgument,
             "Scene media thumbnail row bytes are smaller than one RGBA8 row"
         );
     }
     if (static_cast<std::size_t>(input.bytes_per_row) >
         std::numeric_limits<std::size_t>::max() / input.height) {
-        throw gl::Error(
-            gl::ErrorCode::invalidArgument,
+        throw metal::Error(
+            metal::ErrorCode::invalidArgument,
             "Scene media thumbnail storage length overflows size_t"
         );
     }
     const std::size_t borrowedLength =
         static_cast<std::size_t>(input.bytes_per_row) * input.height;
     if (input.pixel_length != borrowedLength) {
-        throw gl::Error(
-            gl::ErrorCode::invalidArgument,
+        throw metal::Error(
+            metal::ErrorCode::invalidArgument,
             "Scene media thumbnail pixel length does not match its row layout"
         );
     }
     if (minimumRowBytes >
         std::numeric_limits<std::size_t>::max() / input.height) {
-        throw gl::Error(
-            gl::ErrorCode::invalidArgument,
+        throw metal::Error(
+            metal::ErrorCode::invalidArgument,
             "Scene media thumbnail packed length overflows size_t"
         );
     }
     const std::size_t packedLength = minimumRowBytes * input.height;
     if (packedLength > 256 * 1024 * 1024) {
-        throw gl::Error(
-            gl::ErrorCode::invalidArgument,
+        throw metal::Error(
+            metal::ErrorCode::invalidArgument,
             "Scene media thumbnail exceeds the 256 MiB allocation limit"
         );
     }
 
-    gl::MediaThumbnailRGBA8 result{
+    metal::MediaThumbnailRGBA8 result{
         .revision = input.revision,
         .width = input.width,
         .height = input.height,
@@ -406,9 +408,9 @@ int renderExecutor(
     WESceneFrameExecutorRef executor,
     const WESceneFrameInputs* inputs,
     const WESceneAudioSpectrumInputs* audioSpectrum,
-    std::optional<gl::PresentationViewport> presentation,
-    std::optional<gl::PresentationScaling> scaling,
-    std::optional<gl::PhysicalRenderTarget> physicalTarget,
+    std::optional<metal::PresentationViewport> presentation,
+    std::optional<metal::PresentationScaling> scaling,
+    std::optional<metal::PhysicalRenderTarget> physicalTarget,
     WESceneRuntimeErrorRef* outError
 ) {
     clearError(outError);
@@ -423,7 +425,7 @@ int renderExecutor(
         return 0;
     }
     try {
-        const gl::FrameInputs frameInputs{
+        const metal::FrameInputs frameInputs{
             .pointerPosition = {inputs->pointer_x, inputs->pointer_y},
             .timeSeconds = inputs->time_seconds,
             .frameTimeSeconds = inputs->frame_time_seconds,
@@ -461,12 +463,12 @@ int renderExecutor(
             executor->executor->render(frameInputs);
         }
         return 1;
-    } catch (const gl::Error& error) {
+    } catch (const metal::Error& error) {
         executor->executor->invalidateFrame();
-        if (error.code() == gl::ErrorCode::invalidArgument) {
+        if (error.code() == metal::ErrorCode::invalidArgument) {
             assignError(outError, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT, error.what());
         } else {
-            assignGLError(outError, error);
+            assignMetalError(outError, error);
         }
     } catch (const ShaderCompileError& error) {
         executor->executor->invalidateFrame();
@@ -501,7 +503,7 @@ int renderExecutorForDrawable(
     uint32_t drawableWidth,
     uint32_t drawableHeight,
     WEScenePresentationScaling scaling,
-    std::optional<gl::PhysicalRenderTarget> physicalTarget,
+    std::optional<metal::PhysicalRenderTarget> physicalTarget,
     WESceneRuntimeErrorRef* outError
 ) {
     clearError(outError);
@@ -511,12 +513,12 @@ int renderExecutorForDrawable(
         return 0;
     }
     if (drawableWidth == 0 || drawableHeight == 0 ||
-        drawableWidth > static_cast<uint32_t>(std::numeric_limits<GLsizei>::max()) ||
-        drawableHeight > static_cast<uint32_t>(std::numeric_limits<GLsizei>::max())) {
+        drawableWidth > maximumPresentationDimension ||
+        drawableHeight > maximumPresentationDimension) {
         executor->executor->invalidateFrame();
         assignError(
             outError, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
-            "Drawable dimensions must be non-zero and fit OpenGL's signed range"
+            "Drawable dimensions must be non-zero and fit the runtime dimension range"
         );
         return 0;
     }
@@ -531,7 +533,7 @@ int renderExecutorForDrawable(
     }
     return renderExecutor(
         executor, inputs, audioSpectrum,
-        gl::drawablePresentationViewport(drawableWidth, drawableHeight),
+        metal::drawablePresentationViewport(drawableWidth, drawableHeight),
         mode,
         physicalTarget,
         outError
@@ -545,7 +547,7 @@ int renderExecutorForViewport(
     bool audioSpectrumRequired,
     const WEScenePresentationViewport* viewport,
     WEScenePresentationScaling scaling,
-    std::optional<gl::PhysicalRenderTarget> physicalTarget,
+    std::optional<metal::PhysicalRenderTarget> physicalTarget,
     WESceneRuntimeErrorRef* outError
 ) {
     clearError(outError);
@@ -554,7 +556,7 @@ int renderExecutorForViewport(
         !requireAudioSpectrum(executor, audioSpectrum, outError)) {
         return 0;
     }
-    gl::PresentationViewport nativeViewport;
+    metal::PresentationViewport nativeViewport;
     if (!requirePresentationViewport(
             executor, viewport, true, nativeViewport, outError)) return 0;
     const auto mode = presentationScaling(scaling);
@@ -574,9 +576,9 @@ int renderExecutorForViewport(
 
 int replayExecutor(
     WESceneFrameExecutorRef executor,
-    const gl::PresentationViewport& viewport,
-    std::optional<gl::PresentationScaling> scaling,
-    std::optional<gl::PhysicalRenderTarget> physicalTarget,
+    const metal::PresentationViewport& viewport,
+    std::optional<metal::PresentationScaling> scaling,
+    std::optional<metal::PhysicalRenderTarget> physicalTarget,
     WESceneRuntimeErrorRef* outError
 ) {
     try {
@@ -593,8 +595,8 @@ int replayExecutor(
             executor->executor->replay(viewport);
         }
         return 1;
-    } catch (const gl::Error& error) {
-        assignGLError(outError, error);
+    } catch (const metal::Error& error) {
+        assignMetalError(outError, error);
     } catch (const ShaderCompileError& error) {
         assignError(outError, shaderErrorCode(error.phase()), error.what());
     } catch (const FormatError& error) {
@@ -621,15 +623,16 @@ int replayExecutor(
 
 int presentExecutor(
     WESceneFrameExecutorRef executor,
-    const gl::PresentationViewport& viewport,
-    gl::PresentationScaling scaling,
+    void* metalDrawable,
+    const metal::PresentationViewport& viewport,
+    metal::PresentationScaling scaling,
     WESceneRuntimeErrorRef* outError
 ) {
     try {
-        executor->executor->present(viewport, scaling);
+        executor->executor->present(metalDrawable, viewport, scaling);
         return 1;
-    } catch (const gl::Error& error) {
-        assignGLError(outError, error);
+    } catch (const metal::Error& error) {
+        assignMetalError(outError, error);
     } catch (const std::exception& error) {
         assignExceptionError(outError, "presenting a scene frame", error.what());
     } catch (...) {
@@ -655,10 +658,10 @@ extern "C" WESceneFrameExecutorRef we_scene_frame_executor_create(
     }
     try {
         auto handle = std::make_unique<WESceneFrameExecutor>();
-        handle->executor = std::make_unique<gl::FramePlanExecutor>(graph->graph);
+        handle->executor = std::make_unique<metal::FramePlanExecutor>(graph->graph);
         return handle.release();
-    } catch (const gl::Error& error) {
-        assignGLError(out_error, error);
+    } catch (const metal::Error& error) {
+        assignMetalError(out_error, error);
     } catch (const std::exception& error) {
         assignExceptionError(out_error, "creating the scene frame executor", error.what());
     } catch (...) {
@@ -667,29 +670,29 @@ extern "C" WESceneFrameExecutorRef we_scene_frame_executor_create(
     return nullptr;
 }
 
-extern "C" WESceneFrameExecutorRef we_scene_frame_executor_create_with_cgl_context(
+extern "C" WESceneFrameExecutorRef we_scene_frame_executor_create_with_metal_device(
     WESceneFrameGraphRef graph,
-    void* cgl_context,
+    void* metal_device,
     WESceneRuntimeErrorRef* out_error
 ) {
     clearError(out_error);
-    if (graph == nullptr || !graph->graph || cgl_context == nullptr) {
+    if (graph == nullptr || !graph->graph || metal_device == nullptr) {
         assignError(out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
-                    "Scene frame graph and CGL context are required");
+                    "Scene frame graph and Metal device are required");
         return nullptr;
     }
     try {
         auto handle = std::make_unique<WESceneFrameExecutor>();
-        handle->executor = std::make_unique<gl::FramePlanExecutor>(
-            graph->graph, static_cast<CGLContextObj>(cgl_context)
+        handle->executor = std::make_unique<metal::FramePlanExecutor>(
+            graph->graph, metal_device
         );
         return handle.release();
-    } catch (const gl::Error& error) {
-        assignGLError(out_error, error);
+    } catch (const metal::Error& error) {
+        assignMetalError(out_error, error);
     } catch (const std::exception& error) {
-        assignExceptionError(out_error, "creating the borrowed-context scene executor", error.what());
+        assignExceptionError(out_error, "creating the Metal scene executor", error.what());
     } catch (...) {
-        assignExceptionError(out_error, "creating the borrowed-context scene executor", nullptr);
+        assignExceptionError(out_error, "creating the Metal scene executor", nullptr);
     }
     return nullptr;
 }
@@ -763,14 +766,14 @@ extern "C" int we_scene_frame_executor_set_sound_runtime_states(
         for (size_t index = 0; index < state_count; ++index) {
             const WESceneSoundRuntimeStateInput& input = states[index];
             if (!std::isfinite(input.position) || input.position < 0.0) {
-                throw gl::Error(
-                    gl::ErrorCode::invalidArgument,
+                throw metal::Error(
+                    metal::ErrorCode::invalidArgument,
                     "Scene sound runtime position must be finite and non-negative"
                 );
             }
             if (!object_ids.emplace(input.object_id).second) {
-                throw gl::Error(
-                    gl::ErrorCode::invalidArgument,
+                throw metal::Error(
+                    metal::ErrorCode::invalidArgument,
                     "Scene sound runtime states contain a duplicate object id"
                 );
             }
@@ -789,8 +792,8 @@ extern "C" int we_scene_frame_executor_set_sound_runtime_states(
                     state = script::ScriptSoundRuntimeState::ended;
                     break;
                 default:
-                    throw gl::Error(
-                        gl::ErrorCode::invalidArgument,
+                    throw metal::Error(
+                        metal::ErrorCode::invalidArgument,
                         "Scene sound runtime state is unknown"
                     );
             }
@@ -802,13 +805,13 @@ extern "C" int we_scene_frame_executor_set_sound_runtime_states(
         }
         executor->executor->setSoundRuntimeStates(std::move(snapshots));
         return 1;
-    } catch (const gl::Error& error) {
-        if (error.code() == gl::ErrorCode::invalidArgument) {
+    } catch (const metal::Error& error) {
+        if (error.code() == metal::ErrorCode::invalidArgument) {
             assignError(
                 out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT, error.what()
             );
         } else {
-            assignGLError(out_error, error);
+            assignMetalError(out_error, error);
         }
     } catch (const std::exception& error) {
         assignExceptionError(
@@ -840,13 +843,13 @@ extern "C" int we_scene_frame_executor_set_media_snapshot(
     try {
         executor->executor->setMediaSnapshot(mediaSnapshot(*snapshot));
         return 1;
-    } catch (const gl::Error& error) {
-        if (error.code() == gl::ErrorCode::invalidArgument) {
+    } catch (const metal::Error& error) {
+        if (error.code() == metal::ErrorCode::invalidArgument) {
             assignError(
                 out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT, error.what()
             );
         } else {
-            assignGLError(out_error, error);
+            assignMetalError(out_error, error);
         }
     } catch (const std::exception& error) {
         assignExceptionError(
@@ -890,14 +893,14 @@ extern "C" int we_scene_frame_executor_set_media_thumbnail_rgba8(
             mediaThumbnailRGBA8(*thumbnail)
         );
         return 1;
-    } catch (const gl::Error& error) {
-        if (error.code() == gl::ErrorCode::invalidArgument) {
+    } catch (const metal::Error& error) {
+        if (error.code() == metal::ErrorCode::invalidArgument) {
             assignError(
                 out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
                 error.what()
             );
         } else {
-            assignGLError(out_error, error);
+            assignMetalError(out_error, error);
         }
     } catch (const std::exception& error) {
         assignExceptionError(
@@ -921,14 +924,14 @@ extern "C" int we_scene_frame_executor_clear_media_thumbnail(
     try {
         executor->executor->clearMediaThumbnail(revision);
         return 1;
-    } catch (const gl::Error& error) {
-        if (error.code() == gl::ErrorCode::invalidArgument) {
+    } catch (const metal::Error& error) {
+        if (error.code() == metal::ErrorCode::invalidArgument) {
             assignError(
                 out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
                 error.what()
             );
         } else {
-            assignGLError(out_error, error);
+            assignMetalError(out_error, error);
         }
     } catch (const std::exception& error) {
         assignExceptionError(
@@ -1037,7 +1040,7 @@ we_scene_frame_executor_render_for_drawable_with_physical_render_target(
 ) {
     clearError(out_error);
     if (!requireExecutor(executor, out_error)) return 0;
-    gl::PhysicalRenderTarget nativeTarget;
+    metal::PhysicalRenderTarget nativeTarget;
     if (!requirePhysicalRenderTarget(
             executor, physical_target, true, nativeTarget, out_error
         )) return 0;
@@ -1060,7 +1063,7 @@ we_scene_frame_executor_render_for_drawable_with_audio_spectrum_and_physical_ren
 ) {
     clearError(out_error);
     if (!requireExecutor(executor, out_error)) return 0;
-    gl::PhysicalRenderTarget nativeTarget;
+    metal::PhysicalRenderTarget nativeTarget;
     if (!requirePhysicalRenderTarget(
             executor, physical_target, true, nativeTarget, out_error
         )) return 0;
@@ -1081,7 +1084,7 @@ we_scene_frame_executor_render_for_viewport_with_physical_render_target(
 ) {
     clearError(out_error);
     if (!requireExecutor(executor, out_error)) return 0;
-    gl::PhysicalRenderTarget nativeTarget;
+    metal::PhysicalRenderTarget nativeTarget;
     if (!requirePhysicalRenderTarget(
             executor, physical_target, true, nativeTarget, out_error
         )) return 0;
@@ -1103,7 +1106,7 @@ we_scene_frame_executor_render_for_viewport_with_audio_spectrum_and_physical_ren
 ) {
     clearError(out_error);
     if (!requireExecutor(executor, out_error)) return 0;
-    gl::PhysicalRenderTarget nativeTarget;
+    metal::PhysicalRenderTarget nativeTarget;
     if (!requirePhysicalRenderTarget(
             executor, physical_target, true, nativeTarget, out_error
         )) return 0;
@@ -1122,18 +1125,18 @@ extern "C" int we_scene_frame_executor_replay_for_drawable(
     clearError(out_error);
     if (!requireExecutor(executor, out_error)) return 0;
     if (drawable_width == 0 || drawable_height == 0 ||
-        drawable_width > static_cast<uint32_t>(std::numeric_limits<GLsizei>::max()) ||
-        drawable_height > static_cast<uint32_t>(std::numeric_limits<GLsizei>::max())) {
+        drawable_width > maximumPresentationDimension ||
+        drawable_height > maximumPresentationDimension) {
         executor->executor->invalidateFrame();
         assignError(
             out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
-            "Drawable dimensions must be non-zero and fit OpenGL's signed range"
+            "Drawable dimensions must be non-zero and fit the runtime dimension range"
         );
         return 0;
     }
     return replayExecutor(
         executor,
-        gl::drawablePresentationViewport(drawable_width, drawable_height),
+        metal::drawablePresentationViewport(drawable_width, drawable_height),
         std::nullopt,
         std::nullopt,
         out_error
@@ -1147,7 +1150,7 @@ extern "C" int we_scene_frame_executor_replay_for_viewport(
 ) {
     clearError(out_error);
     if (!requireExecutor(executor, out_error)) return 0;
-    gl::PresentationViewport nativeViewport;
+    metal::PresentationViewport nativeViewport;
     if (!requirePresentationViewport(
             executor, viewport, true, nativeViewport, out_error)) return 0;
     return replayExecutor(
@@ -1167,14 +1170,12 @@ we_scene_frame_executor_replay_for_drawable_with_physical_render_target(
     clearError(out_error);
     if (!requireExecutor(executor, out_error)) return 0;
     if (drawable_width == 0 || drawable_height == 0 ||
-        drawable_width >
-            static_cast<uint32_t>(std::numeric_limits<GLsizei>::max()) ||
-        drawable_height >
-            static_cast<uint32_t>(std::numeric_limits<GLsizei>::max())) {
+        drawable_width > maximumPresentationDimension ||
+        drawable_height > maximumPresentationDimension) {
         executor->executor->invalidateFrame();
         assignError(
             out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
-            "Drawable dimensions must be non-zero and fit OpenGL's signed range"
+            "Drawable dimensions must be non-zero and fit the runtime dimension range"
         );
         return 0;
     }
@@ -1187,13 +1188,13 @@ we_scene_frame_executor_replay_for_drawable_with_physical_render_target(
         );
         return 0;
     }
-    gl::PhysicalRenderTarget nativeTarget;
+    metal::PhysicalRenderTarget nativeTarget;
     if (!requirePhysicalRenderTarget(
             executor, physical_target, true, nativeTarget, out_error
         )) return 0;
     return replayExecutor(
         executor,
-        gl::drawablePresentationViewport(drawable_width, drawable_height),
+        metal::drawablePresentationViewport(drawable_width, drawable_height),
         *mode,
         nativeTarget,
         out_error
@@ -1210,7 +1211,7 @@ we_scene_frame_executor_replay_for_viewport_with_physical_render_target(
 ) {
     clearError(out_error);
     if (!requireExecutor(executor, out_error)) return 0;
-    gl::PresentationViewport nativeViewport;
+    metal::PresentationViewport nativeViewport;
     if (!requirePresentationViewport(
             executor, viewport, true, nativeViewport, out_error
         )) return 0;
@@ -1223,7 +1224,7 @@ we_scene_frame_executor_replay_for_viewport_with_physical_render_target(
         );
         return 0;
     }
-    gl::PhysicalRenderTarget nativeTarget;
+    metal::PhysicalRenderTarget nativeTarget;
     if (!requirePhysicalRenderTarget(
             executor, physical_target, true, nativeTarget, out_error
         )) return 0;
@@ -1234,6 +1235,7 @@ we_scene_frame_executor_replay_for_viewport_with_physical_render_target(
 
 extern "C" int we_scene_frame_executor_present(
     WESceneFrameExecutorRef executor,
+    void* metal_drawable,
     uint32_t drawable_width,
     uint32_t drawable_height,
     WEScenePresentationScaling scaling,
@@ -1241,11 +1243,10 @@ extern "C" int we_scene_frame_executor_present(
 ) {
     clearError(out_error);
     if (!requireExecutor(executor, out_error)) return 0;
-    if (drawable_width == 0 || drawable_height == 0 ||
-        drawable_width > static_cast<uint32_t>(std::numeric_limits<GLsizei>::max()) ||
-        drawable_height > static_cast<uint32_t>(std::numeric_limits<GLsizei>::max())) {
+    if (metal_drawable == nullptr || drawable_width == 0 ||
+        drawable_height == 0) {
         assignError(out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
-                    "Drawable dimensions must be non-zero and fit OpenGL's signed range");
+                    "Metal drawable and non-zero dimensions are required");
         return 0;
     }
     const auto mode = presentationScaling(scaling);
@@ -1256,7 +1257,8 @@ extern "C" int we_scene_frame_executor_present(
     }
     return presentExecutor(
         executor,
-        gl::drawablePresentationViewport(drawable_width, drawable_height),
+        metal_drawable,
+        metal::drawablePresentationViewport(drawable_width, drawable_height),
         *mode,
         out_error
     );
@@ -1264,13 +1266,21 @@ extern "C" int we_scene_frame_executor_present(
 
 extern "C" int we_scene_frame_executor_present_for_viewport(
     WESceneFrameExecutorRef executor,
+    void* metal_drawable,
     const WEScenePresentationViewport* viewport,
     WEScenePresentationScaling scaling,
     WESceneRuntimeErrorRef* out_error
 ) {
     clearError(out_error);
     if (!requireExecutor(executor, out_error)) return 0;
-    gl::PresentationViewport nativeViewport;
+    if (metal_drawable == nullptr) {
+        assignError(
+            out_error, WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+            "Metal drawable is required"
+        );
+        return 0;
+    }
+    metal::PresentationViewport nativeViewport;
     if (!requirePresentationViewport(
             executor, viewport, false, nativeViewport, out_error)) return 0;
     const auto mode = presentationScaling(scaling);
@@ -1282,7 +1292,7 @@ extern "C" int we_scene_frame_executor_present_for_viewport(
         return 0;
     }
     return presentExecutor(
-        executor, nativeViewport, *mode, out_error
+        executor, metal_drawable, nativeViewport, *mode, out_error
     );
 }
 
@@ -1317,7 +1327,7 @@ extern "C" int we_scene_frame_executor_framebuffer_resource_stats(
         !requireOutput(out_stats, out_error, "framebuffer resource statistics")) {
         return 0;
     }
-    const gl::FramebufferResourceStats stats =
+    const metal::FramebufferResourceStats stats =
         executor->executor->framebufferResourceStats();
     *out_stats = {
         .framebuffer_count = stats.framebufferCount,
@@ -1502,7 +1512,7 @@ extern "C" int we_scene_frame_executor_issue_info(
                     "Scene frame executor issue index is out of range");
         return 0;
     }
-    const gl::FrameExecutionIssue& value = issues->at(index);
+    const metal::FrameExecutionIssue& value = issues->at(index);
     *out_info = {};
     out_info->severity = issueSeverity(value.severity);
     out_info->object_index = value.objectIndex;
@@ -1542,8 +1552,8 @@ extern "C" int we_scene_frame_executor_read_rgba8(
     try {
         executor->executor->readRGBA8(std::span<std::uint8_t>(output, output_length));
         return 1;
-    } catch (const gl::Error& error) {
-        assignGLError(out_error, error);
+    } catch (const metal::Error& error) {
+        assignMetalError(out_error, error);
     } catch (const std::exception& error) {
         assignExceptionError(out_error, "reading a rendered scene frame", error.what());
     } catch (...) {

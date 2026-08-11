@@ -29,7 +29,7 @@ Open Wallpaper Engine（修补版）
 
 ### 场景运行时兼容性
 
-场景壁纸现在通过原生 C++/OpenGL 管线运行，更贴近 Linux Wallpaper Engine runtime 的行为约定。它可处理 Wallpaper Engine 包、模型、着色器、脚本、帧图和纹理，无需把帧缓冲读回 CPU。
+场景壁纸现在通过原生 C++/Metal 管线运行，更贴近 Linux Wallpaper Engine runtime 的行为约定。它可处理 Wallpaper Engine 包、模型、GLSL 到 MSL 的着色器转换、脚本、帧图和纹理，无需把帧缓冲读回 CPU。
 
 - **场景图层与效果** — 支持分组图层、图片材质、多 pass 效果、帧缓冲操作、场景合成、光标交互、相机视差和自动投影。
 - **文字、媒体与视频** — 原生渲染嵌入字体和系统字体，并支持作者设定的排版及文字效果；兼容视频纹理、场景内置音频，以及可用脚本读取的 macOS“正在播放”媒体信息和封面。
@@ -118,7 +118,7 @@ Open Wallpaper Engine（修补版）
 **当前实现包括：**
 
 - **原生 SceneRuntime** — 通过一个 C++ runtime 解析 PKGV/TEXV、场景模型、材质、着色器和脚本
-- **OpenGL 渲染器** — 执行连贯的帧图，并直接在 `NSOpenGLView` 呈现，无 CPU readback
+- **Metal 渲染器** — 执行连贯的帧图，并直接在 `MTKView` 呈现，无 CPU readback
 - **Wallpaper Engine assets 目录** — 使用在通用设置中选择的官方着色器与材质资源
 - **明确失败** — 无效或不支持的场景会清空画面并报告错误，不会静默保留旧帧或预览图
 
@@ -188,6 +188,6 @@ open "Open Wallpaper Engine.xcodeproj"
 
 ## 架构
 
-- `SceneRuntime/` 包含原生包解析、模型、脚本、着色器、帧图、音频和 OpenGL 执行管线。
+- `SceneRuntime/` 包含原生包解析、模型、脚本、着色器、帧图、音频和 Metal 执行管线。
 - 应用层负责按显示器管理场景会话、属性持久化、播放策略、macOS 音频采集和“正在播放”输入。
 - 创意工坊浏览使用 Steam Web API 发现内容，并用 `steamcmd` 完成认证和下载。

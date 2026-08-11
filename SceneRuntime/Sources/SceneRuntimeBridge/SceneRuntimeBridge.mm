@@ -24,7 +24,7 @@ struct WESceneTexture {
 
 struct WESceneShaderTranslation {
     std::optional<we::scene::PreprocessedShaderPair> preprocessed;
-    we::scene::TranslatedShaderPair sources;
+    we::scene::TranslatedMetalShaderPair sources;
 };
 
 namespace {
@@ -507,7 +507,7 @@ extern "C" WESceneShaderTranslationRef we_scene_shader_translate(
 
     try {
         auto translation = std::make_unique<WESceneShaderTranslation>();
-        translation->sources = we::scene::ShaderCompiler::translate(
+        translation->sources = we::scene::ShaderCompiler::translateToMetal(
             sources->vertex_source,
             sources->fragment_source,
             sources->vertex_name != nullptr ? sources->vertex_name : "vertex",
@@ -552,7 +552,7 @@ extern "C" WESceneShaderTranslationRef we_scene_runtime_shader_translate_files(
             vertex_path,
             fragment_path
         );
-        translation->sources = we::scene::ShaderCompiler::translate(
+        translation->sources = we::scene::ShaderCompiler::translateToMetal(
             translation->preprocessed->vertex.source,
             translation->preprocessed->fragment.source,
             translation->preprocessed->vertex.name,

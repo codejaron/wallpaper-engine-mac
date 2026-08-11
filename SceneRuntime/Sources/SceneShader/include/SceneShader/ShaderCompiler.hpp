@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace we::scene {
 
@@ -27,14 +28,56 @@ private:
     ShaderCompilePhase phase_;
 };
 
-struct TranslatedShaderPair {
+struct TranslatedMetalShaderPair {
+    enum class ValueType : std::uint32_t {
+        boolean,
+        int32,
+        uint32,
+        float1,
+        float2,
+        float3,
+        float4,
+        float3x3,
+        float4x4,
+        unsupported,
+    };
+
+    struct UniformBinding {
+        std::string name;
+        ValueType type = ValueType::unsupported;
+        std::uint32_t bufferIndex = 0;
+        std::uint32_t arrayLength = 1;
+        bool isArray = false;
+        bool uniformBlock = false;
+    };
+
+    struct TextureBinding {
+        std::string name;
+        std::uint32_t textureIndex = 0;
+        std::uint32_t samplerIndex = 0;
+        bool supportedFloat2D = false;
+    };
+
+    struct VertexAttribute {
+        std::string name;
+        std::uint32_t location = 0;
+        std::uint32_t componentCount = 0;
+    };
+
     std::string vertex;
     std::string fragment;
+    std::string vertexEntryPoint;
+    std::string fragmentEntryPoint;
+    std::vector<UniformBinding> vertexUniforms;
+    std::vector<UniformBinding> fragmentUniforms;
+    std::vector<TextureBinding> vertexTextures;
+    std::vector<TextureBinding> fragmentTextures;
+    std::vector<VertexAttribute> vertexAttributes;
 };
 
 class ShaderCompiler final {
 public:
-    [[nodiscard]] static TranslatedShaderPair translate(
+    [[nodiscard]] static TranslatedMetalShaderPair translateToMetal(
         std::string_view vertexSource,
         std::string_view fragmentSource,
         std::string_view vertexName = "vertex",

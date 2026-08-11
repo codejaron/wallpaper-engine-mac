@@ -47,6 +47,7 @@ let package = Package(
                 "spirv_cross.cpp",
                 "spirv_cross_parsed_ir.cpp",
                 "spirv_glsl.cpp",
+                "spirv_msl.cpp",
                 "spirv_parser.cpp",
             ],
             publicHeadersPath: ".",
@@ -149,15 +150,13 @@ let package = Package(
             publicHeadersPath: "include"
         ),
         .target(
-            name: "SceneGL",
+            name: "SceneMetal",
             dependencies: ["SceneCore", "SceneFrameGraph", "SceneShader", "SceneText"],
-            path: "Sources/SceneGL",
+            path: "Sources/SceneMetal",
             publicHeadersPath: "include",
-            cxxSettings: [
-                .define("GL_SILENCE_DEPRECATION"),
-            ],
             linkerSettings: [
-                .linkedFramework("OpenGL"),
+                .linkedFramework("Metal"),
+                .linkedFramework("QuartzCore"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("ImageIO"),
@@ -165,16 +164,15 @@ let package = Package(
             ]
         ),
         .target(
-            name: "SceneGLTestSupport",
-            dependencies: ["SceneGL", "SceneText"],
-            path: "Sources/SceneGLTestSupport",
-            publicHeadersPath: "include",
-            cxxSettings: [.define("GL_SILENCE_DEPRECATION")]
+            name: "SceneMetalTestSupport",
+            dependencies: ["SceneMetal", "SceneText"],
+            path: "Sources/SceneMetalTestSupport",
+            publicHeadersPath: "include"
         ),
         .target(
             name: "SceneRuntimeBridge",
             dependencies: [
-                "SceneCore", "SceneModel", "SceneGraph", "SceneFrameGraph", "SceneShader", "SceneGL",
+                "SceneCore", "SceneModel", "SceneGraph", "SceneFrameGraph", "SceneShader", "SceneMetal",
             ],
             path: "Sources/SceneRuntimeBridge",
             publicHeadersPath: "include"
@@ -203,12 +201,9 @@ let package = Package(
             path: "Tests/SceneCoreTests"
         ),
         .testTarget(
-            name: "SceneGLTests",
-            dependencies: ["SceneRuntimeBridge", "SceneGLTestSupport"],
-            path: "Tests/SceneGLTests",
-            swiftSettings: [
-                .unsafeFlags(["-Xcc", "-DGL_SILENCE_DEPRECATION"]),
-            ]
+            name: "SceneMetalTests",
+            dependencies: ["SceneRuntimeBridge", "SceneMetalTestSupport"],
+            path: "Tests/SceneMetalTests"
         ),
         .testTarget(
             name: "SceneModelTests",

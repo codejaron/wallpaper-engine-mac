@@ -4,6 +4,7 @@
 #include <glslang/Include/ResourceLimits.h>
 #include <glslang/Public/ShaderLang.h>
 #include <spirv_glsl.hpp>
+#include <spirv_msl.hpp>
 
 #include <algorithm>
 #include <array>
@@ -12,6 +13,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -711,43 +713,457 @@ std::string applyLinkedVaryingSemantics(
     return vertex;
 }
 
-std::string crossCompile(
+struct TranslatedMetalStage final {
+    std::string source;
+    std::vector<TranslatedMetalShaderPair::UniformBinding> uniforms;
+    std::vector<TranslatedMetalShaderPair::TextureBinding> textures;
+    std::vector<TranslatedMetalShaderPair::VertexAttribute> attributes;
+};
+
+TranslatedMetalShaderPair::ValueType metalValueType(
+    const spirv_cross::SPIRType& type
+) {
+    using ValueType = TranslatedMetalShaderPair::ValueType;
+    using BaseType = spirv_cross::SPIRType::BaseType;
+    if (type.columns == 3 && type.vecsize == 3 &&
+        type.basetype == BaseType::Float) {
+        return ValueType::float3x3;
+    }
+    if (type.columns == 4 && type.vecsize == 4 &&
+        type.basetype == BaseType::Float) {
+        return ValueType::float4x4;
+    }
+    if (type.columns != 1) return ValueType::unsupported;
+    if (type.basetype == BaseType::Boolean && type.vecsize == 1) {
+        return ValueType::boolean;
+    }
+    if (type.basetype == BaseType::Int && type.vecsize == 1) {
+        return ValueType::int32;
+    }
+    if (type.basetype == BaseType::UInt && type.vecsize == 1) {
+        return ValueType::uint32;
+    }
+    if (type.basetype != BaseType::Float) return ValueType::unsupported;
+    switch (type.vecsize) {
+        case 1: return ValueType::float1;
+        case 2: return ValueType::float2;
+        case 3: return ValueType::float3;
+        case 4: return ValueType::float4;
+        default: return ValueType::unsupported;
+    }
+}
+
+std::uint32_t literalArrayLength(const spirv_cross::SPIRType& type) {
+    std::uint64_t result = 1;
+    for (std::size_t index = 0; index < type.array.size(); ++index) {
+        if (index >= type.array_size_literal.size() ||
+            !type.array_size_literal[index] || type.array[index] == 0) {
+            return 0;
+        }
+        result *= type.array[index];
+        if (result > std::numeric_limits<std::uint32_t>::max()) return 0;
+    }
+    return static_cast<std::uint32_t>(result);
+}
+
+std::string reflectedResourceName(
+    const spirv_cross::CompilerMSL& compiler,
+    const spirv_cross::Resource& resource
+) {
+    if (!resource.name.empty()) return resource.name;
+    const std::string name = compiler.get_name(resource.id);
+    return name.empty() ? compiler.get_fallback_name(resource.id) : name;
+}
+
+std::uint32_t metalLocationCount(const spirv_cross::SPIRType& type) {
+    std::uint64_t count = std::max<std::uint32_t>(type.columns, 1);
+    for (const std::uint32_t length : type.array) {
+        count *= std::max<std::uint32_t>(length, 1);
+        if (count > std::numeric_limits<std::uint32_t>::max()) {
+            throw ShaderCompileError(
+                ShaderCompilePhase::crossCompilation,
+                "Shader interface location count overflows uint32_t"
+            );
+        }
+    }
+    return static_cast<std::uint32_t>(count);
+}
+
+template <typename Resources>
+void assignMetalInterfaceLocations(
+    spirv_cross::CompilerMSL& compiler,
+    const Resources& resources
+) {
+    std::set<std::uint32_t> usedLocations;
+    std::vector<const spirv_cross::Resource*> unassigned;
+    for (const auto& resource : resources) {
+        const auto& type = compiler.get_type(resource.type_id);
+        if (!compiler.has_decoration(resource.id, spv::DecorationLocation)) {
+            unassigned.push_back(&resource);
+            continue;
+        }
+        const std::uint32_t first = compiler.get_decoration(
+            resource.id, spv::DecorationLocation
+        );
+        const std::uint32_t count = metalLocationCount(type);
+        for (std::uint32_t offset = 0; offset < count; ++offset) {
+            usedLocations.insert(first + offset);
+        }
+    }
+    std::ranges::sort(
+        unassigned,
+        [&](const auto* left, const auto* right) {
+            return reflectedResourceName(compiler, *left) <
+                reflectedResourceName(compiler, *right);
+        }
+    );
+    for (const auto* resource : unassigned) {
+        const std::uint32_t count = metalLocationCount(
+            compiler.get_type(resource->type_id)
+        );
+        std::uint32_t first = 0;
+        for (;;) {
+            bool available = true;
+            for (std::uint32_t offset = 0; offset < count; ++offset) {
+                if (usedLocations.contains(first + offset)) {
+                    available = false;
+                    first += offset + 1;
+                    break;
+                }
+            }
+            if (available) break;
+        }
+        compiler.set_decoration(
+            resource->id, spv::DecorationLocation, first
+        );
+        for (std::uint32_t offset = 0; offset < count; ++offset) {
+            usedLocations.insert(first + offset);
+        }
+    }
+}
+
+struct MetalInterfaceResource {
+    std::string name;
+    std::uint32_t locationCount = 1;
+};
+
+using MetalInterfaceLocationMap = std::map<std::string, std::uint32_t>;
+
+template <typename Resources>
+std::vector<MetalInterfaceResource> metalInterfaceResources(
+    const spirv_cross::CompilerMSL& compiler,
+    const Resources& resources
+) {
+    std::vector<MetalInterfaceResource> result;
+    result.reserve(resources.size());
+    for (const auto& resource : resources) {
+        result.push_back({
+            .name = reflectedResourceName(compiler, resource),
+            .locationCount = metalLocationCount(
+                compiler.get_type(resource.type_id)
+            ),
+        });
+    }
+    return result;
+}
+
+struct LinkedMetalInterfaceLocations {
+    MetalInterfaceLocationMap vertexOutputs;
+    MetalInterfaceLocationMap fragmentInputs;
+};
+
+LinkedMetalInterfaceLocations buildLinkedMetalInterfaceLocations(
+    const std::vector<std::uint32_t>& vertexSpirv,
+    const std::vector<std::uint32_t>& fragmentSpirv
+) {
+    spirv_cross::CompilerMSL vertexCompiler(vertexSpirv);
+    spirv_cross::CompilerMSL fragmentCompiler(fragmentSpirv);
+    const auto vertexResources = vertexCompiler.get_shader_resources();
+    const auto fragmentResources = fragmentCompiler.get_shader_resources();
+    const auto vertexOutputs = metalInterfaceResources(
+        vertexCompiler, vertexResources.stage_outputs
+    );
+    const auto fragmentInputs = metalInterfaceResources(
+        fragmentCompiler, fragmentResources.stage_inputs
+    );
+    std::map<std::string, std::uint32_t> locationCounts;
+    const auto mergeResources = [&](const auto& resources) {
+        for (const auto& resource : resources) {
+            auto [location, inserted] = locationCounts.try_emplace(
+                resource.name, resource.locationCount
+            );
+            if (!inserted) {
+                location->second = std::max(
+                    location->second, resource.locationCount
+                );
+            }
+        }
+    };
+    mergeResources(vertexOutputs);
+    mergeResources(fragmentInputs);
+
+    // Wallpaper Engine varyings are one linked vertex/pixel interface. Assign
+    // both sides from the same symbol table instead of retaining glslang's
+    // independent per-stage auto locations.
+    LinkedMetalInterfaceLocations result;
+    std::uint32_t location = 0;
+    for (const auto& [name, locationCount] : locationCounts) {
+        if (std::ranges::any_of(vertexOutputs, [&](const auto& resource) {
+                return resource.name == name;
+            })) {
+            result.vertexOutputs.emplace(name, location);
+        }
+        if (std::ranges::any_of(fragmentInputs, [&](const auto& resource) {
+                return resource.name == name;
+            })) {
+            result.fragmentInputs.emplace(name, location);
+        }
+        if (location > std::numeric_limits<std::uint32_t>::max() -
+                locationCount) {
+            throw ShaderCompileError(
+                ShaderCompilePhase::crossCompilation,
+                "Linked shader interface location count overflows uint32_t"
+            );
+        }
+        location += locationCount;
+    }
+    return result;
+}
+
+LinkedMetalInterfaceLocations linkMetalInterfaceLocations(
+    const std::vector<std::uint32_t>& vertexSpirv,
+    const std::vector<std::uint32_t>& fragmentSpirv
+) {
+    try {
+        return buildLinkedMetalInterfaceLocations(vertexSpirv, fragmentSpirv);
+    } catch (const ShaderCompileError&) {
+        throw;
+    } catch (const std::exception& error) {
+        throw ShaderCompileError(
+            ShaderCompilePhase::crossCompilation,
+            "Linked shader Metal interface reflection failed: " +
+                std::string(error.what())
+        );
+    }
+}
+
+template <typename Resources>
+void applyMetalInterfaceLocations(
+    spirv_cross::CompilerMSL& compiler,
+    const Resources& resources,
+    const MetalInterfaceLocationMap& locations
+) {
+    for (const auto& resource : resources) {
+        const auto location = locations.find(
+            reflectedResourceName(compiler, resource)
+        );
+        if (location == locations.end()) continue;
+        compiler.set_decoration(
+            resource.id, spv::DecorationLocation, location->second
+        );
+    }
+}
+
+std::vector<std::uint32_t> generateSpirv(
     const glslang::TIntermediate& intermediate,
     std::string_view stageName
 ) {
     try {
         std::vector<std::uint32_t> spirv;
         glslang::GlslangToSpv(intermediate, spirv);
-        if (spirv.empty()) {
-            throw ShaderCompileError(
-                ShaderCompilePhase::spirvGeneration,
-                std::string(stageName) + " shader generated empty SPIR-V"
+        if (!spirv.empty()) return spirv;
+        throw ShaderCompileError(
+            ShaderCompilePhase::spirvGeneration,
+            std::string(stageName) + " shader generated empty SPIR-V"
+        );
+    } catch (const ShaderCompileError&) {
+        throw;
+    } catch (const std::exception& error) {
+        throw ShaderCompileError(
+            ShaderCompilePhase::spirvGeneration,
+            std::string(stageName) + " shader SPIR-V generation failed: " +
+                error.what()
+        );
+    }
+}
+
+void configureMetalResourceBindings(
+    spirv_cross::CompilerMSL& compiler,
+    const spirv_cross::ShaderResources& resources,
+    spv::ExecutionModel executionModel
+) {
+    std::uint32_t descriptorBinding = 0;
+    std::uint32_t bufferIndex = 0;
+    std::uint32_t textureIndex = 0;
+    std::uint32_t samplerIndex = 0;
+    const auto bindBuffer = [&](const spirv_cross::Resource& resource) {
+        compiler.set_decoration(resource.id, spv::DecorationDescriptorSet, 0);
+        compiler.set_decoration(
+            resource.id, spv::DecorationBinding, descriptorBinding
+        );
+        compiler.add_msl_resource_binding({
+            .stage = executionModel,
+            .basetype = compiler.get_type(resource.type_id).basetype,
+            .desc_set = 0,
+            .binding = descriptorBinding++,
+            .count = 1,
+            .msl_buffer = bufferIndex++,
+        });
+    };
+    for (const auto& resource : resources.gl_plain_uniforms) {
+        bindBuffer(resource);
+    }
+    for (const auto& resource : resources.uniform_buffers) {
+        bindBuffer(resource);
+    }
+    for (const auto& resource : resources.sampled_images) {
+        compiler.set_decoration(resource.id, spv::DecorationDescriptorSet, 0);
+        compiler.set_decoration(
+            resource.id, spv::DecorationBinding, descriptorBinding
+        );
+        compiler.add_msl_resource_binding({
+            .stage = executionModel,
+            .basetype = compiler.get_type(resource.type_id).basetype,
+            .desc_set = 0,
+            .binding = descriptorBinding++,
+            .count = 1,
+            .msl_texture = textureIndex++,
+            .msl_sampler = samplerIndex++,
+        });
+    }
+}
+
+TranslatedMetalStage crossCompileMetal(
+    std::vector<std::uint32_t> spirv,
+    std::string_view stageName,
+    spv::ExecutionModel executionModel,
+    std::string_view entryPoint,
+    const MetalInterfaceLocationMap& linkedInterfaceLocations
+) {
+    try {
+        spirv_cross::CompilerMSL compiler(std::move(spirv));
+        compiler.rename_entry_point("main", std::string(entryPoint), executionModel);
+        spirv_cross::CompilerGLSL::Options commonOptions;
+        // Wallpaper Engine GLSL uses [-w, w] clip-space depth. Metal uses
+        // [0, w], so perform the conversion in generated vertex code instead
+        // of changing the authored camera/projection contract.
+        commonOptions.vertex.fixup_clipspace = true;
+        // Metal's viewport origin is top-left while Wallpaper Engine's
+        // authored GLSL projection is bottom-left. Flip clip-space Y so the
+        // established top-left framebuffer contract remains unchanged.
+        commonOptions.vertex.flip_vert_y = true;
+        compiler.set_common_options(commonOptions);
+        spirv_cross::CompilerMSL::Options metalOptions;
+        metalOptions.platform = spirv_cross::CompilerMSL::Options::macOS;
+        metalOptions.set_msl_version(2, 4);
+        compiler.set_msl_options(metalOptions);
+        const spirv_cross::ShaderResources resources =
+            compiler.get_shader_resources();
+        if (executionModel == spv::ExecutionModelVertex) {
+            applyMetalInterfaceLocations(
+                compiler, resources.stage_outputs, linkedInterfaceLocations
+            );
+        } else if (executionModel == spv::ExecutionModelFragment) {
+            applyMetalInterfaceLocations(
+                compiler, resources.stage_inputs, linkedInterfaceLocations
             );
         }
-
-        spirv_cross::CompilerGLSL compiler(std::move(spirv));
-        spirv_cross::CompilerGLSL::Options options;
-        options.version = 330;
-        options.es = false;
-        // macOS exposes OpenGL 4.1 Core.  Binding layout qualifiers require
-        // GLSL 4.20/ARB_shading_language_420pack, so sampler units are bound
-        // explicitly by the renderer instead of being baked into GLSL.
-        options.enable_420pack_extension = false;
-        compiler.set_common_options(options);
+        assignMetalInterfaceLocations(compiler, resources.stage_inputs);
+        assignMetalInterfaceLocations(compiler, resources.stage_outputs);
+        configureMetalResourceBindings(compiler, resources, executionModel);
+        if (executionModel == spv::ExecutionModelVertex) {
+            for (const auto& resource : resources.stage_inputs) {
+                const auto& type = compiler.get_type(resource.type_id);
+                compiler.add_msl_shader_input({
+                    .location = compiler.get_decoration(
+                        resource.id, spv::DecorationLocation
+                    ),
+                    .vecsize = type.vecsize,
+                });
+            }
+        }
+        if (executionModel == spv::ExecutionModelFragment) {
+            for (const auto& resource : resources.stage_outputs) {
+                const auto& type = compiler.get_type(resource.type_id);
+                compiler.add_msl_shader_output({
+                    .location = compiler.get_decoration(
+                        resource.id, spv::DecorationLocation
+                    ),
+                    .vecsize = type.vecsize,
+                });
+            }
+        }
         std::string output = compiler.compile();
         if (output.empty()) {
             throw ShaderCompileError(
                 ShaderCompilePhase::crossCompilation,
-                std::string(stageName) + " shader generated empty GLSL"
+                std::string(stageName) + " shader generated empty MSL"
             );
         }
-        return output;
+        TranslatedMetalStage result{.source = std::move(output)};
+        const auto appendUniform = [&](const spirv_cross::Resource& resource,
+                                       bool uniformBlock) {
+            const auto& type = compiler.get_type(resource.type_id);
+            const std::uint32_t bufferIndex =
+                compiler.get_automatic_msl_resource_binding(resource.id);
+            if (bufferIndex == std::numeric_limits<std::uint32_t>::max()) {
+                return;
+            }
+            result.uniforms.push_back({
+                .name = reflectedResourceName(compiler, resource),
+                .type = metalValueType(type),
+                .bufferIndex = bufferIndex,
+                .arrayLength = literalArrayLength(type),
+                .isArray = !type.array.empty(),
+                .uniformBlock = uniformBlock,
+            });
+        };
+        for (const auto& resource : resources.gl_plain_uniforms) {
+            appendUniform(resource, false);
+        }
+        for (const auto& resource : resources.uniform_buffers) {
+            appendUniform(resource, true);
+        }
+        for (const auto& resource : resources.sampled_images) {
+            const std::uint32_t textureIndex =
+                compiler.get_automatic_msl_resource_binding(resource.id);
+            const std::uint32_t samplerIndex = compiler
+                .get_automatic_msl_resource_binding_secondary(resource.id);
+            if (textureIndex == std::numeric_limits<std::uint32_t>::max() ||
+                samplerIndex == std::numeric_limits<std::uint32_t>::max()) {
+                continue;
+            }
+            const auto& type = compiler.get_type(resource.type_id);
+            const auto& sampledType = compiler.get_type(type.image.type);
+            result.textures.push_back({
+                .name = reflectedResourceName(compiler, resource),
+                .textureIndex = textureIndex,
+                .samplerIndex = samplerIndex,
+                .supportedFloat2D = type.image.dim == spv::Dim2D &&
+                    !type.image.arrayed && !type.image.ms &&
+                    type.array.empty() &&
+                    sampledType.basetype == spirv_cross::SPIRType::Float,
+            });
+        }
+        for (const auto& resource : resources.stage_inputs) {
+            const auto& type = compiler.get_type(resource.type_id);
+            const std::uint32_t location = compiler.get_decoration(
+                resource.id, spv::DecorationLocation
+            );
+            if (!compiler.is_msl_shader_input_used(location)) continue;
+            result.attributes.push_back({
+                .name = reflectedResourceName(compiler, resource),
+                .location = location,
+                .componentCount = type.vecsize,
+            });
+        }
+        return result;
     } catch (const ShaderCompileError&) {
         throw;
     } catch (const std::exception& error) {
         throw ShaderCompileError(
             ShaderCompilePhase::crossCompilation,
-            std::string(stageName) + " shader cross-compilation failed: " +
+            std::string(stageName) + " shader Metal cross-compilation failed: " +
                 error.what()
         );
     }
@@ -765,7 +1181,7 @@ ShaderCompilePhase ShaderCompileError::phase() const noexcept {
     return phase_;
 }
 
-TranslatedShaderPair ShaderCompiler::translate(
+TranslatedMetalShaderPair ShaderCompiler::translateToMetal(
     std::string_view vertexSource,
     std::string_view fragmentSource,
     std::string_view vertexName,
@@ -809,16 +1225,8 @@ TranslatedShaderPair ShaderCompiler::translate(
     glslang::TShader fragmentShader(EShLangFragment);
     ShaderSourceBinding vertexBinding(activeVertex, vertexName);
     ShaderSourceBinding fragmentBinding(activeFragment, fragmentName);
-    configureShader(
-        vertexShader,
-        EShLangVertex,
-        vertexBinding
-    );
-    configureShader(
-        fragmentShader,
-        EShLangFragment,
-        fragmentBinding
-    );
+    configureShader(vertexShader, EShLangVertex, vertexBinding);
+    configureShader(fragmentShader, EShLangFragment, fragmentBinding);
 
     if (!vertexShader.parse(
             &builtInResources,
@@ -852,6 +1260,12 @@ TranslatedShaderPair ShaderCompiler::translate(
             "shader program linking failed: " + programLog(program)
         );
     }
+    if (!program.mapIO()) {
+        throw ShaderCompileError(
+            ShaderCompilePhase::link,
+            "shader interface mapping failed: " + programLog(program)
+        );
+    }
 
     const glslang::TIntermediate* vertexIntermediate =
         program.getIntermediate(EShLangVertex);
@@ -864,9 +1278,40 @@ TranslatedShaderPair ShaderCompiler::translate(
         );
     }
 
+    constexpr std::string_view vertexEntryPoint = "we_scene_vertex_main";
+    constexpr std::string_view fragmentEntryPoint = "we_scene_fragment_main";
+    std::vector<std::uint32_t> vertexSpirv = generateSpirv(
+        *vertexIntermediate, vertexName
+    );
+    std::vector<std::uint32_t> fragmentSpirv = generateSpirv(
+        *fragmentIntermediate, fragmentName
+    );
+    const LinkedMetalInterfaceLocations linkedLocations =
+        linkMetalInterfaceLocations(vertexSpirv, fragmentSpirv);
+    TranslatedMetalStage vertex = crossCompileMetal(
+            std::move(vertexSpirv),
+            vertexName,
+            spv::ExecutionModelVertex,
+            vertexEntryPoint,
+            linkedLocations.vertexOutputs
+        );
+    TranslatedMetalStage fragment = crossCompileMetal(
+            std::move(fragmentSpirv),
+            fragmentName,
+            spv::ExecutionModelFragment,
+            fragmentEntryPoint,
+            linkedLocations.fragmentInputs
+        );
     return {
-        .vertex = crossCompile(*vertexIntermediate, vertexName),
-        .fragment = crossCompile(*fragmentIntermediate, fragmentName),
+        .vertex = std::move(vertex.source),
+        .fragment = std::move(fragment.source),
+        .vertexEntryPoint = std::string(vertexEntryPoint),
+        .fragmentEntryPoint = std::string(fragmentEntryPoint),
+        .vertexUniforms = std::move(vertex.uniforms),
+        .fragmentUniforms = std::move(fragment.uniforms),
+        .vertexTextures = std::move(vertex.textures),
+        .fragmentTextures = std::move(fragment.textures),
+        .vertexAttributes = std::move(vertex.attributes),
     };
 }
 

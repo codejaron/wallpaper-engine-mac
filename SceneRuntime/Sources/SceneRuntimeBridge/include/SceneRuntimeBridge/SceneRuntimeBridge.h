@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <SceneRuntimeBridge/SceneGLBridge.h>
+#include <SceneRuntimeBridge/SceneMetalBridge.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,17 +54,17 @@ typedef enum WESceneRuntimeErrorCode {
     WE_SCENE_RUNTIME_ERROR_SCENE_REFERENCE_CYCLE = 28,
     WE_SCENE_RUNTIME_ERROR_SCENE_ASSET_FAILURE = 29,
     WE_SCENE_RUNTIME_ERROR_FRAME_EXECUTOR_INVALID_STATE = 30,
-    WE_SCENE_RUNTIME_ERROR_GL_CONTEXT_CREATION = 31,
-    WE_SCENE_RUNTIME_ERROR_GL_UNSUPPORTED_CONTEXT = 32,
-    WE_SCENE_RUNTIME_ERROR_GL_SHADER_COMPILATION = 33,
-    WE_SCENE_RUNTIME_ERROR_GL_PROGRAM_LINK = 34,
-    WE_SCENE_RUNTIME_ERROR_GL_FRAMEBUFFER_CREATION = 35,
-    WE_SCENE_RUNTIME_ERROR_GL_DRAW = 36,
-    WE_SCENE_RUNTIME_ERROR_GL_READBACK = 37,
-    WE_SCENE_RUNTIME_ERROR_GL_INTERNAL_FAILURE = 38,
-    WE_SCENE_RUNTIME_ERROR_GL_TEXTURE_DECODE = 39,
-    WE_SCENE_RUNTIME_ERROR_GL_TEXTURE_UPLOAD = 40,
-    WE_SCENE_RUNTIME_ERROR_GL_RESOURCE_VALIDATION = 41,
+    WE_SCENE_RUNTIME_ERROR_METAL_CONTEXT_CREATION = 31,
+    WE_SCENE_RUNTIME_ERROR_METAL_UNSUPPORTED_CONTEXT = 32,
+    WE_SCENE_RUNTIME_ERROR_METAL_SHADER_COMPILATION = 33,
+    WE_SCENE_RUNTIME_ERROR_METAL_PROGRAM_LINK = 34,
+    WE_SCENE_RUNTIME_ERROR_METAL_FRAMEBUFFER_CREATION = 35,
+    WE_SCENE_RUNTIME_ERROR_METAL_DRAW = 36,
+    WE_SCENE_RUNTIME_ERROR_METAL_READBACK = 37,
+    WE_SCENE_RUNTIME_ERROR_METAL_INTERNAL_FAILURE = 38,
+    WE_SCENE_RUNTIME_ERROR_METAL_TEXTURE_DECODE = 39,
+    WE_SCENE_RUNTIME_ERROR_METAL_TEXTURE_UPLOAD = 40,
+    WE_SCENE_RUNTIME_ERROR_METAL_RESOURCE_VALIDATION = 41,
 } WESceneRuntimeErrorCode;
 
 typedef struct WESceneFrameInputs {
@@ -952,13 +952,11 @@ WESceneFrameExecutorRef we_scene_frame_executor_create(
     WESceneFrameGraphRef graph,
     WESceneRuntimeErrorRef* out_error
 );
-// The borrowed CGL context must outlive the executor and remain exclusively
-// owned by it until destruction. Rendering and presentation intentionally do
-// not preserve arbitrary OpenGL state. The pointer is a CGLContextObj
-// represented as void* to keep this C header framework-neutral.
-WESceneFrameExecutorRef we_scene_frame_executor_create_with_cgl_context(
+// The borrowed MTLDevice must outlive the executor. The pointer is represented
+// as void* to keep this C header framework-neutral.
+WESceneFrameExecutorRef we_scene_frame_executor_create_with_metal_device(
     WESceneFrameGraphRef graph,
-    void* cgl_context,
+    void* metal_device,
     WESceneRuntimeErrorRef* out_error
 );
 void we_scene_frame_executor_destroy(WESceneFrameExecutorRef executor);
@@ -1123,6 +1121,7 @@ int we_scene_frame_executor_replay_for_viewport_with_physical_render_target(
 );
 int we_scene_frame_executor_present(
     WESceneFrameExecutorRef executor,
+    void* metal_drawable,
     uint32_t drawable_width,
     uint32_t drawable_height,
     WEScenePresentationScaling scaling,
@@ -1130,6 +1129,7 @@ int we_scene_frame_executor_present(
 );
 int we_scene_frame_executor_present_for_viewport(
     WESceneFrameExecutorRef executor,
+    void* metal_drawable,
     const WEScenePresentationViewport* viewport,
     WEScenePresentationScaling scaling,
     WESceneRuntimeErrorRef* out_error

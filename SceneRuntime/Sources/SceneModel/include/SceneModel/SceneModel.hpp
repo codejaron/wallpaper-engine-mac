@@ -400,7 +400,7 @@ struct ImageObject {
 };
 
 struct TextObject {
-    // Text is rasterized by SceneGL, then fed through the same authored
+    // Text is rasterized by SceneMetal, then fed through the same authored
     // effect graph as an image layer. The synthetic source model carries the
     // official passthrough material used to enter that graph without adding a
     // second shader implementation for text.

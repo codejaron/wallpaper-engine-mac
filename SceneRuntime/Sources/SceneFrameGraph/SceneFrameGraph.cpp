@@ -236,7 +236,7 @@ std::uint32_t checkedScaledFramebufferDimension(
         );
     }
     // Wallpaper Engine effects routinely downsample small layers. Integer
-    // division can reach zero, but OpenGL framebuffers cannot; retain the
+    // division can reach zero, but GPU framebuffers cannot; retain the
     // authored scale while allocating the smallest valid backing texture.
     return std::max<std::uint32_t>(
         1,

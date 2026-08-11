@@ -907,7 +907,9 @@ LinkedMetalInterfaceLocations buildLinkedMetalInterfaceLocations(
     // independent per-stage auto locations.
     LinkedMetalInterfaceLocations result;
     std::uint32_t location = 0;
-    for (const auto& [name, locationCount] : locationCounts) {
+    for (const auto& locationEntry : locationCounts) {
+        const auto& name = locationEntry.first;
+        const auto locationCount = locationEntry.second;
         if (std::ranges::any_of(vertexOutputs, [&](const auto& resource) {
                 return resource.name == name;
             })) {

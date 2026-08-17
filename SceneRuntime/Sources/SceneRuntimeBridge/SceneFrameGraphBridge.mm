@@ -48,6 +48,22 @@ bool requirePlan(
     return false;
 }
 
+std::optional<FrameRenderQuality> frameRenderQuality(
+    WESceneFrameRenderQuality quality
+) noexcept {
+    switch (quality) {
+        case WE_SCENE_FRAME_RENDER_POWER_SAVING:
+            return FrameRenderQuality::powerSaving;
+        case WE_SCENE_FRAME_RENDER_BALANCED:
+            return FrameRenderQuality::balanced;
+        case WE_SCENE_FRAME_RENDER_HIGH:
+            return FrameRenderQuality::high;
+        case WE_SCENE_FRAME_RENDER_ULTRA:
+            return FrameRenderQuality::ultra;
+    }
+    return std::nullopt;
+}
+
 WESceneFrameResourceKind resourceKind(FrameResourceKind kind) noexcept {
     switch (kind) {
         case FrameResourceKind::assetTexture:
@@ -120,6 +136,8 @@ WESceneFrameGeometryKind geometryKind(FrameGeometryKind kind) noexcept {
             return WE_SCENE_FRAME_GEOMETRY_PASSTHROUGH_CAPTURE;
         case FrameGeometryKind::puppetMesh:
             return WE_SCENE_FRAME_GEOMETRY_PUPPET_MESH;
+        case FrameGeometryKind::lightVolume:
+            return WE_SCENE_FRAME_GEOMETRY_LIGHT_VOLUME;
     }
     std::terminate();
 }
@@ -142,6 +160,8 @@ WESceneFrameBlendingMode blendingMode(BlendingMode mode) noexcept {
             return WE_SCENE_FRAME_BLENDING_TRANSLUCENT;
         case BlendingMode::additive:
             return WE_SCENE_FRAME_BLENDING_ADDITIVE;
+        case BlendingMode::alphaToCoverage:
+            return WE_SCENE_FRAME_BLENDING_ALPHA_TO_COVERAGE;
     }
     std::terminate();
 }
@@ -161,6 +181,10 @@ WESceneFrameDepthMode depthMode(DepthMode mode) noexcept {
         case DepthMode::disabled:
             return WE_SCENE_FRAME_DEPTH_DISABLED;
         case DepthMode::enabled:
+            return WE_SCENE_FRAME_DEPTH_ENABLED;
+        case DepthMode::greater:
+            // The public bridge exposes enablement only; the Metal executor
+            // retains the internal Greater comparison for shadow casters.
             return WE_SCENE_FRAME_DEPTH_ENABLED;
     }
     std::terminate();
@@ -391,6 +415,73 @@ extern "C" WESceneFramePlanRef we_scene_frame_graph_plan_create_with_inputs(
     return nullptr;
 }
 
+extern "C" WESceneFramePlanRef
+we_scene_frame_graph_plan_create_with_inputs_and_render_quality(
+    WESceneFrameGraphRef graph,
+    const WESceneFrameInputs* inputs,
+    WESceneFrameRenderQuality renderQuality,
+    WESceneRuntimeErrorRef* out_error
+) {
+    clearError(out_error);
+    if (!requireFrameGraph(graph, out_error)) return nullptr;
+    if (inputs == nullptr) {
+        assignError(
+            out_error,
+            WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+            "Scene frame inputs are required"
+        );
+        return nullptr;
+    }
+    const auto quality = frameRenderQuality(renderQuality);
+    if (!quality) {
+        assignError(
+            out_error,
+            WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+            "Unknown scene frame render quality"
+        );
+        return nullptr;
+    }
+    if (!std::isfinite(inputs->time_seconds) || inputs->time_seconds < 0 ||
+        !std::isfinite(inputs->frame_time_seconds) || inputs->frame_time_seconds < 0 ||
+        !std::isfinite(inputs->pointer_x) || !std::isfinite(inputs->pointer_y)) {
+        assignError(
+            out_error,
+            WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+            "Scene frame inputs must be finite and time values must be non-negative"
+        );
+        return nullptr;
+    }
+    try {
+        auto handle = std::make_unique<WESceneFramePlan>();
+        handle->plan = graph->graph->snapshot(
+            {
+                .runtimeSeconds = inputs->time_seconds,
+                .frameTimeSeconds = inputs->frame_time_seconds,
+                .pointerX = inputs->pointer_x,
+                .pointerY = inputs->pointer_y,
+            },
+            std::nullopt,
+            *quality
+        );
+        return handle.release();
+    } catch (const SceneModelError& error) {
+        assignModelError(out_error, error);
+    } catch (const std::exception& error) {
+        assignExceptionError(
+            out_error,
+            "creating an evaluated scene frame plan",
+            error.what()
+        );
+    } catch (...) {
+        assignExceptionError(
+            out_error,
+            "creating an evaluated scene frame plan",
+            nullptr
+        );
+    }
+    return nullptr;
+}
+
 extern "C" void we_scene_frame_plan_destroy(WESceneFramePlanRef plan) {
     delete plan;
 }
@@ -448,6 +539,9 @@ extern "C" int we_scene_frame_plan_info(
     out_info->image_count = value.images.size();
     out_info->text_count = value.texts.size();
     out_info->particle_count = value.particles.size();
+    out_info->camera_orthographic = value.camera.orthographic ? 1 : 0;
+    out_info->camera_perspective_override_field_of_view =
+        value.camera.perspectiveOverrideFieldOfView;
     out_info->operation_count = value.operations.size();
     out_info->issue_count = value.issues.size();
     out_info->script_evaluation_count = value.scriptEvaluations.size();
@@ -517,6 +611,7 @@ extern "C" int we_scene_frame_plan_image_info(
     resourceInfo(value.source, out_info->source);
     resourceInfo(value.compositeA, out_info->composite_a);
     resourceInfo(value.compositeB, out_info->composite_b);
+    out_info->perspective = value.perspective ? 1 : 0;
     return 1;
 }
 
@@ -568,6 +663,7 @@ extern "C" int we_scene_frame_plan_text_info(
     out_info->limit_width = value.limitWidth ? 1 : 0;
     out_info->max_rows = value.maxRows;
     out_info->max_width = value.maxWidth;
+    out_info->perspective = value.perspective ? 1 : 0;
     return 1;
 }
 
@@ -768,6 +864,17 @@ extern "C" int we_scene_frame_plan_operation_info(
         out_info->combo_count = render->combos.size();
         out_info->constant_count = render->constants.size();
         out_info->write_alpha = render->writeAlpha ? 1 : 0;
+        out_info->has_light_index = render->lightIndex.has_value() ? 1 : 0;
+        if (render->lightIndex) {
+            out_info->light_index = *render->lightIndex;
+        }
+        if (render->matrixOverrides.alternateViewProjection) {
+            out_info->has_alternate_view_projection = 1;
+            for (std::size_t index = 0; index < 16; ++index) {
+                out_info->alternate_view_projection.values[index] =
+                    render->matrixOverrides.alternateViewProjection->at(index);
+            }
+        }
     } else if (const auto* copy = std::get_if<FrameCopyCommand>(operation)) {
         originInfo(copy->origin, *out_info);
         resourceInfo(copy->source, out_info->source);
@@ -783,6 +890,7 @@ extern "C" int we_scene_frame_plan_operation_info(
         out_info->clear_green = clear->color.green;
         out_info->clear_blue = clear->color.blue;
         out_info->clear_alpha = clear->color.alpha;
+        out_info->clear_depth = clear->clearDepth ? 1 : 0;
     } else if (const auto* text = std::get_if<FrameTextCommand>(operation)) {
         out_info->text_index = text->textIndex;
         out_info->object_id = text->objectId;
@@ -824,6 +932,7 @@ extern "C" int we_scene_frame_plan_texture_binding_info(
     std::advance(iterator, static_cast<std::ptrdiff_t>(binding_index));
     *out_info = {};
     out_info->slot = iterator->first;
+    out_info->sample_depth = iterator->second.sampleDepth ? 1 : 0;
     if (iterator->second.candidates.empty()) {
         resourceInfo(render->input, out_info->resource);
     } else {

@@ -20,6 +20,7 @@ namespace {
 
 constexpr std::size_t maximumTextureBytes = 512 * 1024 * 1024;
 constexpr std::uint32_t maximumTextureDimension = 16'384;
+constexpr std::uint32_t maximumTexture3DDimension = 2'048;
 constexpr NSUInteger vertexBufferIndex = 30;
 
 template <typename T>
@@ -91,6 +92,44 @@ void validateResourceDimensions(
     }
 }
 
+void validateResourceDimensions3D(
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t depth,
+    std::size_t bytesPerPixel,
+    std::string_view description
+) {
+    if (width == 0 || height == 0 || depth == 0) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            std::string(description) + " dimensions must be non-zero"
+        );
+    }
+    if (width > maximumTexture3DDimension ||
+        height > maximumTexture3DDimension ||
+        depth > maximumTexture3DDimension) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            std::string(description) + " exceeds Metal's 3D texture limit"
+        );
+    }
+    const std::size_t widthValue = width;
+    const std::size_t heightValue = height;
+    const std::size_t depthValue = depth;
+    if (widthValue > std::numeric_limits<std::size_t>::max() / heightValue ||
+        widthValue * heightValue >
+            std::numeric_limits<std::size_t>::max() / depthValue ||
+        widthValue * heightValue * depthValue >
+            std::numeric_limits<std::size_t>::max() / bytesPerPixel ||
+        widthValue * heightValue * depthValue * bytesPerPixel >
+            maximumTextureBytes) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            std::string(description) + " exceeds the 512 MiB resource limit"
+        );
+    }
+}
+
 MTLPixelFormat metalPixelFormat(PixelFormat format) {
     switch (format) {
         case PixelFormat::rgba8: return MTLPixelFormatRGBA8Unorm;
@@ -98,6 +137,8 @@ MTLPixelFormat metalPixelFormat(PixelFormat format) {
         case PixelFormat::r8: return MTLPixelFormatR8Unorm;
         case PixelFormat::rg16f: return MTLPixelFormatRG16Float;
         case PixelFormat::r16f: return MTLPixelFormatR16Float;
+        case PixelFormat::rgba16snorm: return MTLPixelFormatRGBA16Snorm;
+        case PixelFormat::depth32f: return MTLPixelFormatDepth32Float;
     }
     throw Error(
         ErrorCode::resourceValidation,
@@ -112,6 +153,8 @@ std::size_t bytesPerPixel(PixelFormat format) {
         case PixelFormat::r8: return 1;
         case PixelFormat::rg16f: return 4;
         case PixelFormat::r16f: return 2;
+        case PixelFormat::rgba16snorm: return 8;
+        case PixelFormat::depth32f: return 4;
     }
     throw Error(
         ErrorCode::resourceValidation,
@@ -331,6 +374,7 @@ MTLVertexFormat metalVertexFormat(VertexFormat format) {
         case VertexFormat::float2: return MTLVertexFormatFloat2;
         case VertexFormat::float3: return MTLVertexFormatFloat3;
         case VertexFormat::float4: return MTLVertexFormatFloat4;
+        case VertexFormat::uint4: return MTLVertexFormatUInt4;
     }
     throw Error(ErrorCode::resourceValidation, "Unknown Metal vertex format");
 }
@@ -363,6 +407,13 @@ std::string pipelineKey(const DrawRequest& request) {
     output << static_cast<int>(request.destination->format) << ':'
            << request.destination->hasDepth() << ':'
            << static_cast<int>(request.state.blending) << ':'
+           << request.state.alphaToCoverage << ':'
+           << request.state.cullBackFaces << ':'
+           << request.state.depthTest << ':'
+           << request.state.depthCompareGreater << ':'
+           << request.state.depthWrite << ':'
+           << request.state.depthClamp << ':'
+           << request.state.writeColor << ':'
            << request.state.writeAlpha << ':'
            << request.state.alphaSourceOne << ':'
            << request.vertexLayout.stride;
@@ -377,7 +428,9 @@ std::string pipelineKey(const DrawRequest& request) {
 id<MTLSamplerState> samplerState(
     id<MTLDevice> device,
     const TextureResource& texture,
-    std::optional<TextureFilter> filterOverride
+    std::optional<TextureFilter> filterOverride,
+    bool comparison,
+    bool comparisonGreater
 ) {
     MTLSamplerDescriptor* descriptor = [[MTLSamplerDescriptor alloc] init];
     descriptor.sAddressMode = metalAddressMode(texture.wrap);
@@ -397,6 +450,11 @@ id<MTLSamplerState> samplerState(
                ? MTLSamplerMipFilterNearest
                : MTLSamplerMipFilterLinear)
         : MTLSamplerMipFilterNotMipmapped;
+    descriptor.compareFunction = comparison
+        ? (comparisonGreater
+               ? MTLCompareFunctionGreater
+               : MTLCompareFunctionLessEqual)
+        : MTLCompareFunctionNever;
     id<MTLSamplerState> result = [device newSamplerStateWithDescriptor:descriptor];
 #if !__has_feature(objc_arc)
     [descriptor release];
@@ -447,6 +505,53 @@ TextureResource makeTexture(
     };
 }
 
+TextureResource makeTexture3D(
+    id<MTLDevice> device,
+    MTLPixelFormat pixelFormat,
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t depth,
+    std::uint32_t mipmapCount,
+    TextureWrap wrap,
+    TextureFilter filter
+) {
+    validateResourceDimensions3D(
+        width, height, depth, 1, "3D texture"
+    );
+    MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
+    descriptor.textureType = MTLTextureType3D;
+    descriptor.pixelFormat = pixelFormat;
+    descriptor.width = width;
+    descriptor.height = height;
+    descriptor.depth = depth;
+    descriptor.mipmapLevelCount = mipmapCount;
+    descriptor.sampleCount = 1;
+    descriptor.arrayLength = 1;
+    descriptor.storageMode = MTLStorageModeShared;
+    descriptor.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+#if !__has_feature(objc_arc)
+    [descriptor release];
+#endif
+    if (texture == nil) {
+        throw Error(
+            ErrorCode::textureUpload,
+            "Metal failed to allocate a 3D texture"
+        );
+    }
+    return {
+        .texture = retainOwnedObject(texture),
+        .width = width,
+        .height = height,
+        .depth = depth,
+        .mipmapCount = mipmapCount,
+        .format = PixelFormat::rgba8,
+        .dimension = TranslatedMetalShaderPair::TextureDimension::texture3D,
+        .wrap = wrap,
+        .filter = filter,
+    };
+}
+
 void replaceTextureBytes(
     TextureResource& resource,
     std::uint32_t level,
@@ -463,6 +568,91 @@ void replaceTextureBytes(
                   withBytes:bytes
                 bytesPerRow:bytesPerRow
               bytesPerImage:bytesPerImage];
+}
+
+void replaceTexture3DBytes(
+    TextureResource& resource,
+    std::uint32_t level,
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t depth,
+    const void* bytes,
+    std::size_t bytesPerRow,
+    std::size_t bytesPerImage
+) {
+    id<MTLTexture> texture = object<id<MTLTexture>>(resource.texture);
+    [texture replaceRegion:MTLRegionMake3D(0, 0, 0, width, height, depth)
+               mipmapLevel:level
+                      slice:0
+                  withBytes:bytes
+                bytesPerRow:bytesPerRow
+              bytesPerImage:bytesPerImage];
+}
+
+std::vector<std::uint8_t> repackLUT(
+    std::span<const std::uint8_t> flat,
+    std::uint32_t flatWidth,
+    std::uint32_t flatHeight,
+    std::uint32_t sliceWidth,
+    std::uint32_t sliceHeight,
+    std::uint32_t depth,
+    std::size_t bytesPerPixel,
+    std::string_view source
+) {
+    validateResourceDimensions3D(
+        sliceWidth, sliceHeight, depth, bytesPerPixel, "LUT texture"
+    );
+    const bool horizontal =
+        flatWidth == sliceWidth * depth && flatHeight == sliceHeight;
+    const bool vertical =
+        flatWidth == sliceWidth && flatHeight == sliceHeight * depth;
+    if (!horizontal && !vertical) {
+        throw Error(
+            ErrorCode::textureUpload,
+            "LUT mipmap dimensions " + std::to_string(flatWidth) + "x" +
+                std::to_string(flatHeight) + " do not match horizontal " +
+                std::to_string(sliceWidth * depth) + "x" +
+                std::to_string(sliceHeight) + " or vertical " +
+                std::to_string(sliceWidth) + "x" +
+                std::to_string(sliceHeight * depth) +
+                " 3D slice layouts in '" +
+                std::string(source) + "'"
+        );
+    }
+    const std::size_t expected = static_cast<std::size_t>(flatWidth) *
+        flatHeight * bytesPerPixel;
+    if (flat.size() != expected) {
+        throw Error(
+            ErrorCode::textureUpload,
+            "LUT mipmap byte count does not match its dimensions in '" +
+                std::string(source) + "'"
+        );
+    }
+    std::vector<std::uint8_t> volume(expected);
+    const std::size_t flatRowBytes =
+        static_cast<std::size_t>(flatWidth) * bytesPerPixel;
+    const std::size_t sliceRowBytes =
+        static_cast<std::size_t>(sliceWidth) * bytesPerPixel;
+    const std::size_t sliceBytes =
+        static_cast<std::size_t>(sliceHeight) * sliceRowBytes;
+    for (std::uint32_t z = 0; z < depth; ++z) {
+        for (std::uint32_t y = 0; y < sliceHeight; ++y) {
+            const std::size_t sourceOffset = horizontal
+                ? static_cast<std::size_t>(y) * flatRowBytes +
+                    static_cast<std::size_t>(z) * sliceRowBytes
+                : (static_cast<std::size_t>(z) * sliceHeight + y) *
+                    flatRowBytes;
+            const std::size_t destinationOffset =
+                static_cast<std::size_t>(z) * sliceBytes +
+                static_cast<std::size_t>(y) * sliceRowBytes;
+            std::copy_n(
+                flat.data() + sourceOffset,
+                sliceRowBytes,
+                volume.data() + destinationOffset
+            );
+        }
+    }
+    return volume;
 }
 
 }  // namespace
@@ -801,7 +991,7 @@ void Device::Session::ensureDepthAttachment(
     descriptor.height = framebuffer.height;
     descriptor.mipmapLevelCount = 1;
     descriptor.storageMode = MTLStorageModePrivate;
-    descriptor.usage = MTLTextureUsageRenderTarget;
+    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     id<MTLTexture> depth = [device newTextureWithDescriptor:descriptor];
 #if !__has_feature(objc_arc)
     [descriptor release];
@@ -813,6 +1003,18 @@ void Device::Session::ensureDepthAttachment(
         );
     }
     framebuffer.depthTexture = retainOwnedObject(depth);
+    framebuffer.depthSampleTexture = {
+        .texture = MetalObject((__bridge void*)depth),
+        .width = framebuffer.width,
+        .height = framebuffer.height,
+        .mipmapCount = 1,
+        .format = PixelFormat::depth32f,
+        // Depth sampling must use the same address contract as the color
+        // target. Shadow atlases are clamp-to-border; forcing edge here lets
+        // PCF taps leak into the neighboring atlas tile.
+        .wrap = framebuffer.colorTexture.wrap,
+        .filter = TextureFilter::nearest,
+    };
 }
 
 void Device::Session::destroyFramebuffer(
@@ -820,6 +1022,7 @@ void Device::Session::destroyFramebuffer(
 ) noexcept {
     framebuffer.colorTexture = {};
     framebuffer.depthTexture.reset();
+    framebuffer.depthSampleTexture = {};
     framebuffer.width = 0;
     framebuffer.height = 0;
     framebuffer.format = PixelFormat::rgba8;
@@ -916,6 +1119,119 @@ AssetTextureResource Device::Session::uploadTexture(
     }
 
     const TextureUploadFormat format = uploadFormat(texture, source);
+    if ((texture.flags & textureFlagLUT) != 0) {
+        if (texture.isAnimated() || texture.images.size() != 1 ||
+            texture.textureWidth == 0 || texture.textureHeight == 0 ||
+            texture.width % texture.textureWidth != 0 ||
+            texture.height != texture.textureHeight) {
+            throw Error(
+                ErrorCode::textureUpload,
+                "LUT texture does not contain a valid tiled 3D layout: '" +
+                    std::string(source) + "'"
+            );
+        }
+        if (format.compressed) {
+            throw Error(
+                ErrorCode::textureUpload,
+                "Compressed LUT textures are not supported as Metal 3D textures: '" +
+                    std::string(source) + "'"
+            );
+        }
+        const std::uint32_t lutDepth = texture.width / texture.textureWidth;
+        validateResourceDimensions3D(
+            texture.textureWidth,
+            texture.textureHeight,
+            lutDepth,
+            format.bytesPerPixel,
+            "LUT texture"
+        );
+        const TextureImage& image = texture.images.front();
+        if (image.mipmaps.empty()) {
+            throw Error(
+                ErrorCode::textureUpload,
+                "LUT texture has no mipmaps: '" + std::string(source) + "'"
+            );
+        }
+        std::optional<DecodedImage> decodedBase;
+        if (texture.fileFormat != TextureFileFormat::unknown) {
+            decodedBase = decodeEmbeddedImage(
+                image.mipmaps.front().bytes, source
+            );
+        }
+        const std::uint32_t mipmapCount = decodedBase
+            ? 1
+            : static_cast<std::uint32_t>(image.mipmaps.size());
+        TextureResource uploaded = makeTexture3D(
+            device,
+            format.pixelFormat,
+            texture.textureWidth,
+            texture.textureHeight,
+            lutDepth,
+            mipmapCount,
+            textureWrap(texture),
+            textureFilter(texture)
+        );
+        for (std::size_t level = 0; level < mipmapCount; ++level) {
+            const std::uint32_t sliceWidth = std::max(
+                1U, texture.textureWidth >> level
+            );
+            const std::uint32_t sliceHeight = std::max(
+                1U, texture.textureHeight >> level
+            );
+            const std::uint32_t depth = std::max(1U, lutDepth >> level);
+            std::span<const std::uint8_t> flat;
+            std::uint32_t flatWidth = 0;
+            std::uint32_t flatHeight = 0;
+            if (decodedBase) {
+                if (level != 0) {
+                    throw Error(
+                        ErrorCode::textureUpload,
+                        "Embedded LUT unexpectedly contains multiple mipmaps: '" +
+                            std::string(source) + "'"
+                    );
+                }
+                flat = decodedBase->rgba8;
+                flatWidth = decodedBase->width;
+                flatHeight = decodedBase->height;
+            } else {
+                const TextureMipmap& mipmap = image.mipmaps[level];
+                flat = mipmap.bytes;
+                flatWidth = mipmap.width;
+                flatHeight = mipmap.height;
+            }
+            const std::vector<std::uint8_t> volume = repackLUT(
+                flat,
+                flatWidth,
+                flatHeight,
+                sliceWidth,
+                sliceHeight,
+                depth,
+                format.bytesPerPixel,
+                source
+            );
+            replaceTexture3DBytes(
+                uploaded,
+                static_cast<std::uint32_t>(level),
+                sliceWidth,
+                sliceHeight,
+                depth,
+                volume.data(),
+                static_cast<std::size_t>(sliceWidth) * format.bytesPerPixel,
+                static_cast<std::size_t>(sliceWidth) * sliceHeight *
+                    format.bytesPerPixel
+            );
+        }
+        result.images.push_back(std::move(uploaded));
+        result.imageWidths.front() = texture.textureWidth;
+        result.imageHeights.front() = texture.textureHeight;
+        result.resolution = {
+            static_cast<float>(texture.textureWidth),
+            static_cast<float>(texture.textureHeight),
+            static_cast<float>(lutDepth),
+            1.0F,
+        };
+        return result;
+    }
     result.images.reserve(texture.images.size());
     for (std::size_t imageIndex = 0;
          imageIndex < texture.images.size(); ++imageIndex) {
@@ -1210,6 +1526,45 @@ TextureResource Device::Session::uploadRGBA8Texture(
     return result;
 }
 
+TextureResource Device::Session::uploadRGBA16SnormTexture(
+    std::uint32_t width,
+    std::uint32_t height,
+    std::span<const std::uint16_t> pixels
+) {
+    validateResourceDimensions(width, height, 8, "Puppet morph texture");
+    const std::size_t expected =
+        static_cast<std::size_t>(width) * height * 4;
+    if (pixels.size() != expected) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "Puppet morph texture requires tightly packed RGBA16 storage"
+        );
+    }
+    id<MTLDevice> device = object<id<MTLDevice>>(device_.device_);
+    TextureResource result = makeTexture(
+        device,
+        MTLPixelFormatRGBA16Snorm,
+        width,
+        height,
+        1,
+        MTLTextureUsageShaderRead,
+        MTLStorageModeShared,
+        TextureWrap::clampToEdge,
+        TextureFilter::nearest,
+        PixelFormat::rgba16snorm
+    );
+    replaceTextureBytes(
+        result,
+        0,
+        width,
+        height,
+        pixels.data(),
+        static_cast<std::size_t>(width) * 8,
+        pixels.size_bytes()
+    );
+    return result;
+}
+
 void Device::Session::destroyTexture(TextureResource& texture) noexcept {
     texture = {};
 }
@@ -1217,7 +1572,8 @@ void Device::Session::destroyTexture(TextureResource& texture) noexcept {
 void Device::Session::clear(
     FramebufferResource& framebuffer,
     std::array<float, 4> color,
-    bool clearDepth
+    bool clearDepth,
+    float depthValue
 ) {
     if (!framebuffer) {
         throw Error(
@@ -1240,7 +1596,13 @@ void Device::Session::clear(
             ? MTLLoadActionClear
             : MTLLoadActionLoad;
         pass.depthAttachment.storeAction = MTLStoreActionStore;
-        pass.depthAttachment.clearDepth = 1.0;
+        if (!std::isfinite(depthValue) || depthValue < 0.0F || depthValue > 1.0F) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Metal depth clear value must be finite and in the range 0...1"
+            );
+        }
+        pass.depthAttachment.clearDepth = depthValue;
     }
     id<MTLCommandBuffer> commandBuffer =
         object<id<MTLCommandBuffer>>(commandBuffer_);
@@ -1370,6 +1732,7 @@ void Device::Session::encodeDraw(
     const bool hasVertexInput = !request.vertexLayout.attributes.empty();
     if (!request.program || request.destination == nullptr ||
         !*request.destination ||
+        request.instanceCount == 0 ||
         (hasVertexInput &&
          (request.vertexBuffer == nullptr || !request.vertexBuffer->buffer ||
           request.vertexLayout.stride == 0))) {
@@ -1409,11 +1772,16 @@ void Device::Session::encodeDraw(
                     : MTLPixelFormatInvalid;
             MTLRenderPipelineColorAttachmentDescriptor* color =
                 descriptor.colorAttachments[0];
-            color.writeMask = MTLColorWriteMaskRed |
-                MTLColorWriteMaskGreen | MTLColorWriteMaskBlue |
-                (request.state.writeAlpha
-                     ? MTLColorWriteMaskAlpha
-                     : MTLColorWriteMaskNone);
+            descriptor.alphaToCoverageEnabled = request.state.alphaToCoverage;
+            color.writeMask = request.state.writeColor
+                ? static_cast<MTLColorWriteMask>(
+                      MTLColorWriteMaskRed | MTLColorWriteMaskGreen |
+                      MTLColorWriteMaskBlue |
+                      (request.state.writeAlpha
+                           ? MTLColorWriteMaskAlpha
+                           : MTLColorWriteMaskNone)
+                  )
+                : MTLColorWriteMaskNone;
             if (request.state.blending != BlendMode::replace) {
                 color.blendingEnabled = YES;
                 color.rgbBlendOperation = MTLBlendOperationAdd;
@@ -1497,13 +1865,47 @@ void Device::Session::encodeDraw(
         throw Error(ErrorCode::draw, "Metal failed to create a draw encoder");
     }
     [encoder setRenderPipelineState:pipeline];
+    const DrawRequest::Region viewport = request.viewport.value_or(
+        DrawRequest::Region{
+            .width = request.destination->width,
+            .height = request.destination->height,
+        }
+    );
+    const DrawRequest::Region scissor = request.scissor.value_or(
+        DrawRequest::Region{
+            .x = viewport.x,
+            .y = viewport.y,
+            .width = viewport.width,
+            .height = viewport.height,
+        }
+    );
+    const auto validRegion = [&](const DrawRequest::Region& region) {
+        return region.width > 0 && region.height > 0 &&
+            static_cast<std::uint64_t>(region.x) + region.width <=
+                request.destination->width &&
+            static_cast<std::uint64_t>(region.y) + region.height <=
+                request.destination->height;
+    };
+    if (!validRegion(viewport) || !validRegion(scissor)) {
+        [encoder endEncoding];
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Metal draw viewport/scissor exceeds its destination"
+        );
+    }
     [encoder setViewport:MTLViewport{
-        0.0,
-        0.0,
-        static_cast<double>(request.destination->width),
-        static_cast<double>(request.destination->height),
+        static_cast<double>(viewport.x),
+        static_cast<double>(viewport.y),
+        static_cast<double>(viewport.width),
+        static_cast<double>(viewport.height),
         0.0,
         1.0,
+    }];
+    [encoder setScissorRect:MTLScissorRect{
+        scissor.x,
+        scissor.y,
+        scissor.width,
+        scissor.height,
     }];
     [encoder setCullMode:request.state.cullBackFaces
         ? MTLCullModeBack
@@ -1512,13 +1914,18 @@ void Device::Session::encodeDraw(
     [encoder setDepthClipMode:request.state.depthClamp
         ? MTLDepthClipModeClamp
         : MTLDepthClipModeClip];
+    [encoder setDepthBias:request.depthBias
+               slopeScale:request.depthSlopeScale
+                    clamp:request.depthBiasClamp];
 
     id<MTLDevice> device = object<id<MTLDevice>>(device_.device_);
     MTLDepthStencilDescriptor* depthDescriptor =
         [[MTLDepthStencilDescriptor alloc] init];
-    depthDescriptor.depthCompareFunction = request.state.depthTest
-        ? MTLCompareFunctionLessEqual
-        : MTLCompareFunctionAlways;
+    depthDescriptor.depthCompareFunction = !request.state.depthTest
+        ? MTLCompareFunctionAlways
+        : request.state.depthCompareGreater
+            ? MTLCompareFunctionGreater
+            : MTLCompareFunctionLessEqual;
     depthDescriptor.depthWriteEnabled = request.state.depthWrite;
     id<MTLDepthStencilState> depthState =
         [device newDepthStencilStateWithDescriptor:depthDescriptor];
@@ -1573,7 +1980,8 @@ void Device::Session::encodeDraw(
         id<MTLTexture> texture =
             object<id<MTLTexture>>(binding.texture->texture);
         id<MTLSamplerState> sampler = samplerState(
-            device, *binding.texture, binding.filterOverride
+            device, *binding.texture, binding.filterOverride,
+            binding.comparison, binding.comparisonGreater
         );
         if (sampler == nil) {
             [encoder endEncoding];
@@ -1603,7 +2011,8 @@ void Device::Session::encodeDraw(
     if (vertexStart) {
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                     vertexStart:*vertexStart
-                    vertexCount:count];
+                    vertexCount:count
+                  instanceCount:request.instanceCount];
     } else {
         [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
                             indexCount:count
@@ -1613,7 +2022,10 @@ void Device::Session::encodeDraw(
                            indexBuffer:object<id<MTLBuffer>>(
                                request.indexBuffer->buffer
                            )
-                     indexBufferOffset:request.indexBufferOffset];
+                     indexBufferOffset:request.indexBufferOffset
+                       instanceCount:request.instanceCount
+                          baseVertex:0
+                        baseInstance:0];
     }
     [encoder endEncoding];
 #if !__has_feature(objc_arc)
@@ -1644,10 +2056,12 @@ void Device::Session::readRGBA8(
     const FramebufferResource& framebuffer,
     std::span<std::uint8_t> output
 ) {
-    if (!framebuffer || framebuffer.format != PixelFormat::rgba8) {
+    if (!framebuffer ||
+        (framebuffer.format != PixelFormat::rgba8 &&
+         framebuffer.format != PixelFormat::bgra8)) {
         throw Error(
             ErrorCode::readback,
-            "RGBA8 readback requires an RGBA8 Metal framebuffer"
+            "RGBA8 readback requires an RGBA8 or BGRA8 Metal framebuffer"
         );
     }
     const std::size_t rowBytes =
@@ -1699,11 +2113,19 @@ void Device::Session::readRGBA8(
     finish(true);
     const auto* bytes = static_cast<const std::uint8_t*>(buffer.contents);
     for (std::size_t row = 0; row < framebuffer.height; ++row) {
-        std::memcpy(
-            output.data() + row * rowBytes,
-            bytes + row * alignedRowBytes,
-            rowBytes
-        );
+        const auto* source = bytes + row * alignedRowBytes;
+        auto* destination = output.data() + row * rowBytes;
+        if (framebuffer.format == PixelFormat::rgba8) {
+            std::memcpy(destination, source, rowBytes);
+            continue;
+        }
+        for (std::size_t column = 0; column < framebuffer.width; ++column) {
+            const std::size_t offset = column * 4;
+            destination[offset] = source[offset + 2];
+            destination[offset + 1] = source[offset + 1];
+            destination[offset + 2] = source[offset];
+            destination[offset + 3] = source[offset + 3];
+        }
     }
 }
 

@@ -43,7 +43,9 @@ in vec2 textureCoordinate;
 out vec4 fragmentColor;
 
 void main() {
-    fragmentColor = texture(sourceTexture, textureCoordinate);
+    // Intermediate Scene alpha is not the alpha contract of the desktop
+    // surface. The final wallpaper drawable is opaque on both platforms.
+    fragmentColor = vec4(texture(sourceTexture, textureCoordinate).rgb, 1.0);
 }
 )glsl";
 

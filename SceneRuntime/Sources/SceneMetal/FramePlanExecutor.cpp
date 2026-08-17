@@ -3,6 +3,7 @@
 
 #include "SceneMetalDevice.hpp"
 #include "SceneMetalPresentation.hpp"
+#include "OfficialShaderABI.hpp"
 #include "TextCoverageRenderer.hpp"
 
 #include <SceneCore/FormatError.hpp>
@@ -184,11 +185,18 @@ struct ActiveUniform final {
     std::optional<std::uint32_t> fragmentSamplerIndex;
     bool uniformBlock = false;
     bool sampler = false;
-    bool supportedSampler = true;
+    TranslatedMetalShaderPair::TextureDimension samplerDimension =
+        TranslatedMetalShaderPair::TextureDimension::unsupported;
+    bool comparisonSampler = false;
     bool isArray = false;
 };
 
 struct PreparedAudioSpectrumUniform final {
+    std::int32_t location = -1;
+    std::uint32_t activeElementCount = 0;
+};
+
+struct PreparedBuiltinArrayUniform final {
     std::int32_t location = -1;
     std::uint32_t activeElementCount = 0;
 };
@@ -211,6 +219,17 @@ struct Vertex final {
     float position[3];
     float texCoord[2];
 };
+
+struct PuppetDrawVertex final {
+    float position[4];
+    float normal[3];
+    float tangent[4];
+    std::uint32_t blendIndices[4];
+    float blendWeights[4];
+    float texCoord[4];
+};
+
+static_assert(sizeof(PuppetDrawVertex) == sizeof(float) * 23);
 
 struct ParticleVertex final {
     float position[3];
@@ -308,125 +327,10 @@ struct CursorProjection final {
     };
 }
 
-// Project the canonical bottom-left pointer into one image's local space.  The
-// projection is deliberately usable outside the image bounds as well: a
-// pressed layer keeps receiving drag/up events after the pointer leaves it.
-[[nodiscard]] std::optional<CursorProjection> projectCursorImage(
-    const FramePlan& plan,
-    const FrameImageDescriptor& image,
-    FrameVector2 pointer
-) {
-    if (!std::isfinite(pointer.x) || !std::isfinite(pointer.y) ||
-        plan.width == 0 || plan.height == 0) {
-        return std::nullopt;
-    }
-    const double worldX = std::clamp(pointer.x, 0.0, 1.0) *
-        static_cast<double>(plan.width);
-    const double worldY = std::clamp(pointer.y, 0.0, 1.0) *
-        static_cast<double>(plan.height);
-    const auto& transform = image.worldTransform;
-    const double scaledWidth = image.size.x * transform.scale.x;
-    const double scaledHeight = image.size.y * transform.scale.y;
-    if (!std::isfinite(worldX) || !std::isfinite(worldY) ||
-        !std::isfinite(scaledWidth) || !std::isfinite(scaledHeight) ||
-        image.size.x <= 0.0 || image.size.y <= 0.0 ||
-        transform.scale.x == 0.0 || transform.scale.y == 0.0 ||
-        !std::isfinite(transform.origin.x) ||
-        !std::isfinite(transform.origin.y) ||
-        !std::isfinite(transform.origin.z) ||
-        !std::isfinite(transform.angles.z)) {
-        return std::nullopt;
-    }
-
-    // Keep pointer projection paired with prepareDraw's authored-scene to
-    // offscreen-scene conversion, including the final presentation flip.
-    double centerX = transform.origin.x -
-        static_cast<double>(plan.width) * 0.5;
-    double centerY = centeredWallpaperY(transform.origin.y, plan.height);
-    if (image.horizontalAlignment.find("left") != std::string::npos) {
-        centerX += scaledWidth * 0.5;
-    } else if (image.horizontalAlignment.find("right") != std::string::npos) {
-        centerX -= scaledWidth * 0.5;
-    }
-    if (image.horizontalAlignment.find("top") != std::string::npos) {
-        centerY += scaledHeight * 0.5;
-    } else if (image.horizontalAlignment.find("bottom") != std::string::npos) {
-        centerY -= scaledHeight * 0.5;
-    }
-
-    const double sceneX = worldX - static_cast<double>(plan.width) * 0.5;
-    const double sceneY = centeredWallpaperY(worldY, plan.height);
-    const double dx = sceneX - centerX;
-    const double dy = sceneY - centerY;
-    const double cosine = std::cos(transform.angles.z);
-    const double sine = std::sin(transform.angles.z);
-    // prepareDraw applies R(-angle); inverse it with R(+angle).
-    const double rotatedX = cosine * dx - sine * dy;
-    const double rotatedY = sine * dx + cosine * dy;
-    const double localX = rotatedX / transform.scale.x + image.size.x * 0.5;
-    const double localY = rotatedY / transform.scale.y + image.size.y * 0.5;
-    const double epsilon = 1e-9;
-    return CursorProjection{
-        .hit = CursorHit{
-            .layerId = image.objectId,
-            .worldX = worldX,
-            .worldY = worldY,
-            .worldZ = transform.origin.z,
-            .localX = std::clamp(localX, 0.0, image.size.x),
-            .localY = std::clamp(localY, 0.0, image.size.y),
-            .localZ = 0.0,
-        },
-        .inside = localX >= -epsilon && localX <= image.size.x + epsilon &&
-            localY >= -epsilon && localY <= image.size.y + epsilon,
-    };
-}
-
-[[nodiscard]] std::optional<CursorHit> hitTestInteractiveImage(
-    const FramePlan& plan,
-    const FrameImageDescriptor& image,
-    FrameVector2 pointer
-) {
-    if (!image.visible || !image.cursorInteractive) return std::nullopt;
-    const auto projection = projectCursorImage(plan, image, pointer);
-    if (!projection || !projection->inside) return std::nullopt;
-    return projection->hit;
-}
-
-[[nodiscard]] std::vector<CursorHit> hitTestInteractiveLayers(
-    const FramePlan& plan,
-    FrameVector2 pointer
-) {
-    // Cursor callbacks are layer-local. Preserve front-to-back render order,
-    // but dispatch to every interactive layer under the pointer; overlapping
-    // controls keep independent SceneScript state in Wallpaper Engine.
-    std::vector<CursorHit> hits;
-    std::set<int> seenLayerIds;
-    for (auto iterator = plan.images.rbegin(); iterator != plan.images.rend(); ++iterator) {
-        if (const auto hit = hitTestInteractiveImage(plan, *iterator, pointer);
-            hit && seenLayerIds.insert(hit->layerId).second) {
-            hits.push_back(*hit);
-        }
-    }
-    return hits;
-}
-
-[[nodiscard]] std::optional<CursorHit> projectCursorLayer(
-    const FramePlan& plan,
-    int layerId,
-    FrameVector2 pointer
-) {
-    for (auto iterator = plan.images.rbegin(); iterator != plan.images.rend(); ++iterator) {
-        if (iterator->objectId != layerId) continue;
-        const auto projection = projectCursorImage(plan, *iterator, pointer);
-        if (projection) return projection->hit;
-    }
-    return std::nullopt;
-}
-
 struct TextureAnimationSelection final {
     std::size_t imageIndex = 0;
     std::array<float, 2> translation{0.0F, 0.0F};
-    std::array<float, 4> rotation{0.0F, 0.0F, 0.0F, 0.0F};
+    std::array<float, 4> rotation{1.0F, 0.0F, 0.0F, 1.0F};
     bool animated = false;
 };
 
@@ -549,6 +453,155 @@ void applyTexture0FormatCombo(
         default:
             break;
     }
+}
+
+void applyLightCombos(ComboMap& combos, const FramePlan& plan) {
+    const auto checked = [](std::size_t count, std::string_view name) {
+        if (count > 4) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Scene light combination '" + std::string(name) +
+                    "' exceeds Wallpaper Engine's four-light limit"
+            );
+        }
+        return static_cast<int>(count);
+    };
+    combos.insert_or_assign(
+        "LIGHTS_POINT", checked(plan.lightConfiguration.point, "LIGHTS_POINT")
+    );
+    combos.insert_or_assign(
+        "LIGHTS_SPOT", checked(plan.lightConfiguration.spot, "LIGHTS_SPOT")
+    );
+    combos.insert_or_assign(
+        "LIGHTS_TUBE", checked(plan.lightConfiguration.tube, "LIGHTS_TUBE")
+    );
+    combos.insert_or_assign(
+        "LIGHTS_DIRECTIONAL",
+        checked(plan.lightConfiguration.directional, "LIGHTS_DIRECTIONAL")
+    );
+    combos.insert_or_assign(
+        "LIGHTS_POINT_SHADOW",
+        checked(
+            plan.lightConfiguration.pointShadow, "LIGHTS_POINT_SHADOW"
+        )
+    );
+    combos.insert_or_assign(
+        "LIGHTS_SPOT_COOKIE",
+        checked(plan.lightConfiguration.spotCookie, "LIGHTS_SPOT_COOKIE")
+    );
+    combos.insert_or_assign(
+        "LIGHTS_SPOT_SHADOW",
+        checked(plan.lightConfiguration.spotShadow, "LIGHTS_SPOT_SHADOW")
+    );
+    combos.insert_or_assign(
+        "LIGHTS_SPOT_SHADOW_COOKIE",
+        checked(
+            plan.lightConfiguration.spotShadowCookie,
+            "LIGHTS_SPOT_SHADOW_COOKIE"
+        )
+    );
+    combos.insert_or_assign(
+        "LIGHTS_DIRECTIONAL_SHADOW",
+        checked(
+            plan.lightConfiguration.directionalShadow,
+            "LIGHTS_DIRECTIONAL_SHADOW"
+        )
+    );
+    const bool shadowMapping = plan.lightConfiguration.pointShadow > 0 ||
+        plan.lightConfiguration.spotShadow > 0 ||
+        plan.lightConfiguration.spotShadowCookie > 0 ||
+        plan.lightConfiguration.directionalShadow > 0;
+    const bool cookies = plan.lightConfiguration.spotCookie > 0 ||
+        plan.lightConfiguration.spotShadowCookie > 0;
+    combos.insert_or_assign("LIGHTS_SHADOW_MAPPING", shadowMapping ? 1 : 0);
+    combos.insert_or_assign("LIGHTS_COOKIE", cookies ? 1 : 0);
+    // common_pbr_2.h uses this combo for both PCF kernel selection and point
+    // atlas face compensation. Leaving it undefined silently selects the
+    // shader's generic fallback, which is not the authored quality contract.
+    combos.insert_or_assign(
+        "LIGHTS_SHADOW_MAPPING_QUALITY",
+        static_cast<int>(plan.renderQuality)
+    );
+}
+
+void applyFogCombos(ComboMap& combos, const FramePlan& plan) {
+    combos.insert_or_assign("FOG_DIST", plan.distanceFog.enabled ? 1 : 0);
+    combos.insert_or_assign("FOG_HEIGHT", plan.heightFog.enabled ? 1 : 0);
+}
+
+void applyPuppetCombos(
+    ComboMap& combos,
+    const FrameImageDescriptor& image,
+    FrameGeometryKind geometry,
+    std::size_t submeshIndex
+) {
+    const PuppetSubmesh* submesh = geometry == FrameGeometryKind::puppetMesh &&
+            image.puppetMesh && submeshIndex < image.puppetMesh->submeshes.size()
+        ? &image.puppetMesh->submeshes[submeshIndex]
+        : nullptr;
+    const bool skinning = geometry == FrameGeometryKind::puppetMesh &&
+        image.puppetMesh && !image.puppetMesh->bones.empty() &&
+        (submesh == nullptr || !submesh->blendMapRowCount);
+    const bool morphing = geometry == FrameGeometryKind::puppetMesh &&
+        image.puppetMesh && submeshIndex < image.puppetMesh->submeshes.size() &&
+        image.puppetMesh->submeshes[submeshIndex].morph.has_value();
+    const bool morphingModifiers = morphing && std::ranges::any_of(
+        image.puppetMesh->submeshes[submeshIndex].morph->targets,
+        [](const PuppetMorphTarget& target) {
+            return target.modifier.has_value();
+        }
+    );
+    const bool skinningAlpha = submesh != nullptr &&
+        (submesh->auxiliaryFlags & puppetSubmeshBonesAlphaFlag) != 0;
+    combos.insert_or_assign("SKINNING", skinning ? 1 : 0);
+    if (skinningAlpha) {
+        combos.insert_or_assign("SKINNING_ALPHA", 1);
+    } else {
+        combos.erase("SKINNING_ALPHA");
+    }
+    if (morphing) {
+        combos.insert_or_assign("MORPHING", 1);
+    } else {
+        combos.erase("MORPHING");
+    }
+    if (morphingModifiers) {
+        combos.insert_or_assign("MORPHING_MODIFIERS", 1);
+    } else {
+        combos.erase("MORPHING_MODIFIERS");
+    }
+    if (submesh != nullptr && submesh->blendMapRowCount) {
+        combos.insert_or_assign(
+            "BLENDROWCOUNT", static_cast<int>(*submesh->blendMapRowCount)
+        );
+    } else {
+        combos.erase("BLENDROWCOUNT");
+    }
+    if (geometry != FrameGeometryKind::puppetMesh || !image.puppetMesh) {
+        return;
+    }
+    if (image.puppetMesh->bones.size() >
+        static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Puppet skeleton exceeds the shader combination integer range"
+        );
+    }
+    combos.insert_or_assign(
+        "BONECOUNT", static_cast<int>(image.puppetMesh->bones.size())
+    );
+}
+
+void applyImagePassCombos(
+    ComboMap& combos,
+    const FramePlan& plan,
+    const FrameImageDescriptor& image,
+    const FrameRenderPass& pass
+) {
+    applyLightCombos(combos, plan);
+    applyFogCombos(combos, plan);
+    applyPuppetCombos(
+        combos, image, pass.geometry, pass.puppetSubmeshIndex
+    );
 }
 
 PixelFormat pixelFormat(FramebufferFormat format) {
@@ -864,6 +917,21 @@ namespace {
     );
 }
 
+[[nodiscard]] FrameRenderQuality frameRenderQuality(
+    const std::optional<PhysicalRenderTarget>& target
+) noexcept {
+    if (!target) return FrameRenderQuality::high;
+    switch (target->quality) {
+        case PhysicalRenderQuality::balanced:
+            return FrameRenderQuality::balanced;
+        case PhysicalRenderQuality::powerSaving:
+            return FrameRenderQuality::powerSaving;
+        case PhysicalRenderQuality::ultra:
+            return FrameRenderQuality::ultra;
+    }
+    std::terminate();
+}
+
 }  // namespace
 
 PhysicalRenderSize physicalRenderSize(
@@ -930,6 +998,11 @@ PhysicalRenderSize physicalRenderSize(
                 .height = roundedPhysicalOutputDimension(
                     balanced.height, 0.5, "Power-saving physical render height"
                 ),
+            };
+        case PhysicalRenderQuality::ultra:
+            return {
+                .width = logicalPlan.width,
+                .height = logicalPlan.height,
             };
     }
     throw Error(
@@ -1316,10 +1389,10 @@ Matrix orthographic(float left, float right, float bottom, float top, float near
     Matrix result{};
     result[0] = 2.0F / (right - left);
     result[5] = 2.0F / (top - bottom);
-    result[10] = -2.0F / (far - near);
+    result[10] = -1.0F / (far - near);
     result[12] = -(right + left) / (right - left);
     result[13] = -(top + bottom) / (top - bottom);
-    result[14] = -(far + near) / (far - near);
+    result[14] = -near / (far - near);
     result[15] = 1.0F;
     return result;
 }
@@ -1329,25 +1402,25 @@ Matrix perspective(float fieldOfViewRadians, float aspect, float near, float far
         !std::isfinite(aspect) || !std::isfinite(near) ||
         !std::isfinite(far) || fieldOfViewRadians <= 0.0F ||
         fieldOfViewRadians >= 3.14159265358979323846F ||
-        aspect <= 0.0F || near <= 0.0F || far <= near) {
+        aspect <= 0.0F || near == 0.0F || far == near) {
         throw Error(
             ErrorCode::resourceValidation,
-            "Degenerate particle perspective projection"
+            "Degenerate scene perspective projection"
         );
     }
     const float tangent = std::tan(fieldOfViewRadians * 0.5F);
     if (!std::isfinite(tangent) || tangent <= 0.0F) {
         throw Error(
             ErrorCode::resourceValidation,
-            "Particle perspective field of view is invalid"
+            "Scene perspective field of view is invalid"
         );
     }
     Matrix result{};
     result[0] = 1.0F / (aspect * tangent);
     result[5] = 1.0F / tangent;
-    result[10] = -(far + near) / (far - near);
+    result[10] = -far / (far - near);
     result[11] = -1.0F;
-    result[14] = -(2.0F * far * near) / (far - near);
+    result[14] = -(near * far) / (far - near);
     return result;
 }
 
@@ -1386,6 +1459,291 @@ Matrix lookAt(const FrameCameraDescriptor& camera) {
     result[12] = float(-dot(side, camera.eye));
     result[13] = float(-dot(up, camera.eye));
     result[14] = float(dot(forward, camera.eye));
+    return result;
+}
+
+struct ShadowProjectionData final {
+    std::vector<Matrix> projected;
+    std::vector<std::array<float, 4>> projectedAtlasTransforms;
+    std::vector<std::array<float, 4>> pointProjectionInfo;
+    std::vector<std::array<float, 4>> pointAtlasTransforms;
+    std::array<Matrix, 6> firstCasterViewProjections{};
+    bool hasCasterViewProjections = false;
+};
+
+ShadowProjectionData shadowProjectionData(const FramePlan& plan) {
+    const auto finiteFloat = [](double value, std::string_view description) {
+        if (!std::isfinite(value) ||
+            value > static_cast<double>(std::numeric_limits<float>::max()) ||
+            value < -static_cast<double>(std::numeric_limits<float>::max())) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                std::string(description) +
+                    " contains a non-finite or out-of-range value"
+            );
+        }
+        return static_cast<float>(value);
+    };
+    const auto featureRank = [](const FrameLightDescriptor& light) {
+        switch (light.type) {
+            case FrameLightType::point:
+                return light.castShadow ? 0 : 1;
+            case FrameLightType::spot:
+                if (light.castShadow && light.useCookie) return 0;
+                if (light.useCookie) return 1;
+                if (light.castShadow) return 2;
+                return 3;
+            case FrameLightType::directional:
+                return light.castShadow ? 0 : 1;
+            case FrameLightType::tube:
+                return 0;
+        }
+        std::terminate();
+    };
+    std::vector<const FrameLightDescriptor*> orderedLights;
+    for (const FrameLightDescriptor& light : plan.lights) {
+        if (!light.visible || light.type == FrameLightType::tube) continue;
+        const bool projection = light.type == FrameLightType::directional
+            ? light.castShadow
+            : light.castShadow || light.useCookie;
+        if (projection) orderedLights.push_back(&light);
+    }
+    std::stable_sort(
+        orderedLights.begin(), orderedLights.end(),
+        [&](const FrameLightDescriptor* lhs,
+            const FrameLightDescriptor* rhs) {
+            if (lhs->type != rhs->type) {
+                return static_cast<int>(lhs->type) <
+                    static_cast<int>(rhs->type);
+            }
+            return featureRank(*lhs) < featureRank(*rhs);
+        }
+    );
+    ShadowProjectionData result;
+    if (orderedLights.empty()) return result;
+
+    constexpr double degreesToRadians =
+        3.14159265358979323846264338327950288 / 180.0;
+    const std::uint32_t atlasWidth = std::max(plan.shadowAtlasWidth, 2U);
+    const std::uint32_t atlasHeight = std::max(plan.shadowAtlasHeight, 2U);
+    for (const FrameLightDescriptor* lightPointer : orderedLights) {
+        const FrameLightDescriptor& light = *lightPointer;
+        const std::size_t lightIndex = static_cast<std::size_t>(
+            lightPointer - plan.lights.data()
+        );
+        std::vector<const FrameShadowAtlasEntry*> atlasEntries;
+        for (const FrameShadowAtlasEntry& entry : plan.shadowAtlasEntries) {
+            if (entry.lightIndex == lightIndex) atlasEntries.push_back(&entry);
+        }
+        std::ranges::sort(
+            atlasEntries,
+            [](const FrameShadowAtlasEntry* lhs,
+               const FrameShadowAtlasEntry* rhs) {
+                return lhs->cascade < rhs->cascade;
+            }
+        );
+        const auto atlasTransform = [&](const FrameShadowAtlasEntry& entry) {
+            return std::array<float, 4>{
+                finiteFloat(
+                    static_cast<double>(entry.x) / atlasWidth,
+                    "Shadow atlas X transform"
+                ),
+                finiteFloat(
+                    static_cast<double>(entry.y) / atlasHeight,
+                    "Shadow atlas Y transform"
+                ),
+                finiteFloat(
+                    static_cast<double>(entry.size) / atlasWidth,
+                    "Shadow atlas X scale"
+                ),
+                finiteFloat(
+                    static_cast<double>(entry.size) / atlasHeight,
+                    "Shadow atlas Y scale"
+                ),
+            };
+        };
+
+        const float originX = finiteFloat(
+            light.worldTransform.origin.x, "Shadow light origin X"
+        );
+        const float originY = finiteFloat(
+            light.worldTransform.origin.y, "Shadow light origin Y"
+        );
+        const float originZ = finiteFloat(
+            light.worldTransform.origin.z, "Shadow light origin Z"
+        );
+        const Matrix orientation = multiply(
+            rotationZ(finiteFloat(
+                light.worldTransform.angles.z, "Shadow light Z angle"
+            )),
+            multiply(
+                rotationY(finiteFloat(
+                    light.worldTransform.angles.y, "Shadow light Y angle"
+                )),
+                rotationX(finiteFloat(
+                    light.worldTransform.angles.x, "Shadow light X angle"
+                ))
+            )
+        );
+        const Vector3 origin{originX, originY, originZ};
+        const Vector3 forward{
+            orientation[0], orientation[1], orientation[2],
+        };
+        const Vector3 up{
+            orientation[4], orientation[5], orientation[6],
+        };
+        const float radius = std::max(
+            finiteFloat(light.radius, "Shadow light radius"), 0.02F
+        );
+        const float nearPlane = std::max(radius * 0.001F, 0.01F);
+        const float farPlane = std::max(radius, nearPlane + 0.01F);
+
+        if (light.type == FrameLightType::point) {
+            if (atlasEntries.size() != 1U) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Point shadow light must own one atlas entry"
+                );
+            }
+            const Matrix projection = perspective(
+                static_cast<float>(90.0 * degreesToRadians),
+                1.0F,
+                farPlane,
+                nearPlane
+            );
+            result.pointProjectionInfo.push_back({
+                projection[10], projection[14],
+                projection[11], projection[15],
+            });
+            result.pointAtlasTransforms.push_back(
+                atlasTransform(*atlasEntries.front())
+            );
+            static constexpr std::array<Vector3, 6> directions{{
+                {1.0, 0.0, 0.0}, {-1.0, 0.0, 0.0},
+                {0.0, 1.0, 0.0}, {0.0, -1.0, 0.0},
+                {0.0, 0.0, 1.0}, {0.0, 0.0, -1.0},
+            }};
+            static constexpr std::array<Vector3, 6> ups{{
+                {0.0, 1.0, 0.0}, {0.0, 1.0, 0.0},
+                {0.0, 0.0, 1.0}, {0.0, 0.0, -1.0},
+                {0.0, 1.0, 0.0}, {0.0, 1.0, 0.0},
+            }};
+            if (!result.hasCasterViewProjections) {
+                for (std::size_t face = 0; face < directions.size(); ++face) {
+                    FrameCameraDescriptor camera{
+                        .center = {
+                            origin.x + directions[face].x,
+                            origin.y + directions[face].y,
+                            origin.z + directions[face].z,
+                        },
+                        .eye = origin,
+                        .up = ups[face],
+                    };
+                    result.firstCasterViewProjections[face] = multiply(
+                        projection, lookAt(camera)
+                    );
+                }
+                result.hasCasterViewProjections = true;
+            }
+        } else if (light.type == FrameLightType::spot) {
+            if (light.castShadow && atlasEntries.size() != 1U) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Spot shadow light must own one atlas entry"
+                );
+            }
+            const double fieldOfView = std::clamp(
+                light.outerCone * 2.0, 0.01, 179.0
+            );
+            const Matrix projection = perspective(
+                finiteFloat(
+                    fieldOfView * degreesToRadians,
+                    "Spot shadow field of view"
+                ),
+                1.0F,
+                farPlane,
+                nearPlane
+            );
+            const FrameCameraDescriptor camera{
+                .center = {
+                    origin.x + forward.x,
+                    origin.y + forward.y,
+                    origin.z + forward.z,
+                },
+                .eye = origin,
+                .up = up,
+            };
+            Matrix viewProjection = multiply(
+                projection, lookAt(camera)
+            );
+            if (light.castShadow) viewProjection[14] -= 0.000500000024F;
+            result.projected.push_back(viewProjection);
+            result.projectedAtlasTransforms.push_back(
+                light.castShadow
+                    ? atlasTransform(*atlasEntries.front())
+                    : std::array<float, 4>{0.0F, 0.0F, 1.0F, 1.0F}
+            );
+            if (!result.hasCasterViewProjections) {
+                result.firstCasterViewProjections.fill(viewProjection);
+                result.hasCasterViewProjections = true;
+            }
+        } else if (light.type == FrameLightType::directional) {
+            if (atlasEntries.size() != 3U) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Directional shadow light must own three atlas entries"
+                );
+            }
+            std::array<Matrix, 3> cascades{};
+            const double defaultExtent = std::max(
+                static_cast<double>(plan.camera.orthogonalProjectionWidth),
+                static_cast<double>(plan.camera.orthogonalProjectionHeight)
+            ) * 0.5;
+            for (std::size_t cascade = 0; cascade < cascades.size(); ++cascade) {
+                const double authoredDistance =
+                    light.cascadeDistances[cascade];
+                const float extent = finiteFloat(
+                    authoredDistance > 0.0
+                        ? authoredDistance
+                        : defaultExtent *
+                            static_cast<double>(cascade + 1) /
+                            static_cast<double>(cascades.size()),
+                    "Directional shadow cascade distance"
+                );
+                const Vector3 center = plan.camera.center;
+                const FrameCameraDescriptor camera{
+                    .center = center,
+                    .eye = {
+                        center.x - forward.x * extent * 2.0,
+                        center.y - forward.y * extent * 2.0,
+                        center.z - forward.z * extent * 2.0,
+                    },
+                    .up = up,
+                };
+                cascades[cascade] = multiply(
+                    orthographic(
+                        -extent, extent, -extent, extent,
+                        -extent * 4.0F, extent * 4.0F
+                    ),
+                    lookAt(camera)
+                );
+                cascades[cascade][14] -= 0.000500000024F;
+                result.projected.push_back(cascades[cascade]);
+                result.projectedAtlasTransforms.push_back(
+                    atlasTransform(*atlasEntries[cascade])
+                );
+            }
+            if (!result.hasCasterViewProjections) {
+                for (std::size_t index = 0;
+                     index < result.firstCasterViewProjections.size();
+                     ++index) {
+                    result.firstCasterViewProjections[index] =
+                        cascades[std::min(index, cascades.size() - 1)];
+                }
+                result.hasCasterViewProjections = true;
+            }
+        }
+    }
     return result;
 }
 
@@ -1452,58 +1810,68 @@ struct ParticleView final {
     std::array<float, 3> eyePosition{};
 };
 
-ParticleView particlePerspectiveView(
+ParticleView scenePerspectiveView(
     const FrameCameraDescriptor& camera,
     float width,
     float height
 ) {
     if (!std::isfinite(width) || !std::isfinite(height) ||
-        width <= 0.0F || height <= 0.0F ||
-        !std::isfinite(camera.fieldOfView) ||
-        camera.fieldOfView <= 0.0 || camera.fieldOfView >= 180.0) {
+        width <= 0.0F || height <= 0.0F) {
         throw Error(
             ErrorCode::resourceValidation,
-            "Particle perspective dimensions or field of view are invalid"
+            "Scene perspective dimensions are invalid"
         );
     }
-    if (!std::isfinite(camera.nearPlane) ||
-        !std::isfinite(camera.farPlane) ||
-        camera.nearPlane < 0.0 || camera.farPlane <= 0.0) {
+    validateCameraVector(camera.center, "center");
+    validateCameraVector(camera.eye, "eye");
+    validateCameraVector(camera.up, "up");
+    const double fieldOfView = camera.perspectiveOverrideFieldOfView > 0.0
+        ? camera.perspectiveOverrideFieldOfView
+        : (camera.orthographic
+            ? 2.0 * std::atan(static_cast<double>(height) / (2.0 * 1000.0)) *
+                180.0 / 3.14159265358979323846264338327950288
+            : camera.fieldOfView);
+    if (!std::isfinite(fieldOfView) || fieldOfView <= 0.0 ||
+        fieldOfView >= 180.0) {
         throw Error(
             ErrorCode::resourceValidation,
-            "Particle perspective clipping planes are invalid"
+            "Scene perspective field of view is invalid"
         );
     }
     constexpr double degreesToRadians =
         0.017453292519943295769236907684886;
-    const double fieldOfViewRadians = camera.fieldOfView * degreesToRadians;
-    const double tangent = std::tan(fieldOfViewRadians * 0.5);
-    const double eyeDistance = (static_cast<double>(height) * 0.5) / tangent;
-    if (!std::isfinite(eyeDistance) || eyeDistance <= 0.0 ||
-        eyeDistance > std::numeric_limits<float>::max()) {
-        throw Error(
-            ErrorCode::resourceValidation,
-            "Particle perspective eye distance is invalid"
-        );
+    const double fieldOfViewRadians = fieldOfView * degreesToRadians;
+    double nearPlane = 15000.0;
+    double farPlane = 5.0;
+    if (!camera.orthographic) {
+        nearPlane = camera.nearPlane;
+        farPlane = camera.farPlane;
+        if (!std::isfinite(nearPlane) || !std::isfinite(farPlane) ||
+            nearPlane <= 0.0 || farPlane <= nearPlane ||
+            farPlane > std::numeric_limits<float>::max()) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Scene perspective clipping planes are invalid"
+            );
+        }
     }
-    constexpr double minimumNearPlane = 0.01;
-    const double nearPlane = camera.nearPlane > 0.0
-        ? camera.nearPlane : minimumNearPlane;
-    const double minimumFarPlane = eyeDistance +
-        std::max(static_cast<double>(width), static_cast<double>(height));
-    const double farPlane = std::max(camera.farPlane, minimumFarPlane);
-    if (!std::isfinite(nearPlane) || !std::isfinite(farPlane) ||
-        farPlane <= nearPlane ||
-        farPlane > std::numeric_limits<float>::max()) {
-        throw Error(
-            ErrorCode::resourceValidation,
-            "Particle perspective clipping planes are invalid"
-        );
+    FrameCameraDescriptor perspectiveCamera = camera;
+    if (camera.orthographic) {
+        const double tangent = std::tan(fieldOfViewRadians * 0.5);
+        const double eyeDistance = camera.perspectiveOverrideFieldOfView > 0.0
+            ? (static_cast<double>(height) * 0.5) / tangent
+            : 1000.0;
+        if (!std::isfinite(eyeDistance) || eyeDistance <= 0.0 ||
+            eyeDistance > std::numeric_limits<float>::max()) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Scene perspective eye distance is invalid"
+            );
+        }
+        perspectiveCamera.eye = {0.0, 0.0, eyeDistance};
+        perspectiveCamera.center = {0.0, 0.0, 0.0};
+        perspectiveCamera.up = {0.0, 1.0, 0.0};
     }
-    FrameCameraDescriptor particleCamera = camera;
-    particleCamera.eye = {0.0, 0.0, eyeDistance};
-    particleCamera.center = {0.0, 0.0, 0.0};
-    particleCamera.up = {0.0, 1.0, 0.0};
     const Matrix projection = perspective(
         static_cast<float>(fieldOfViewRadians),
         width / height,
@@ -1511,8 +1879,12 @@ ParticleView particlePerspectiveView(
         static_cast<float>(farPlane)
     );
     return {
-        .viewProjection = multiply(projection, lookAt(particleCamera)),
-        .eyePosition = {0.0F, 0.0F, static_cast<float>(eyeDistance)},
+        .viewProjection = multiply(projection, lookAt(perspectiveCamera)),
+        .eyePosition = {
+            static_cast<float>(perspectiveCamera.eye.x),
+            static_cast<float>(perspectiveCamera.eye.y),
+            static_cast<float>(perspectiveCamera.eye.z),
+        },
     };
 }
 
@@ -1612,9 +1984,19 @@ public:
                 "Metal texture binding references a non-sampler uniform"
             );
         }
+        if (uniform.samplerDimension != texture.dimension) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Active sampler '" + uniform.name +
+                    "' and its Metal texture provider have different dimensions"
+            );
+        }
         textures.push_back({
             .texture = &texture,
             .filterOverride = filter,
+            .comparison = uniform.comparisonSampler,
+            .comparisonGreater = uniform.comparisonSampler &&
+                texture.wrap == TextureWrap::clampToBorder,
             .vertexTextureIndex = uniform.vertexTextureIndex,
             .vertexSamplerIndex = uniform.vertexSamplerIndex,
             .fragmentTextureIndex = uniform.fragmentTextureIndex,
@@ -1627,6 +2009,17 @@ public:
         for (std::size_t index = 0; index < bound_.size(); ++index) {
             if (bound_[index]) continue;
             const ActiveUniform& uniform = program_.uniforms[index];
+            if (const auto officialId =
+                    wallpaperEngine2842UniformId(uniform.name)) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    std::string(description) +
+                        " has no provider for official Wallpaper Engine "
+                        "2.8.0.42 builtin #" +
+                        std::to_string(*officialId) + " '" +
+                        uniform.name + "'"
+                );
+            }
             throw Error(
                 ErrorCode::resourceValidation,
                 std::string(description) + " does not provide active shader " +
@@ -1714,6 +2107,332 @@ std::vector<float> numericComponents(
     return result;
 }
 
+struct ImageSceneGeometry final {
+    float left = 0.0F;
+    float right = 0.0F;
+    float bottom = 0.0F;
+    float top = 0.0F;
+    Matrix sceneTransform = identityMatrix();
+};
+
+[[nodiscard]] float imageSceneFloat(
+    double value,
+    std::string_view description
+) {
+    if (!std::isfinite(value) ||
+        value > static_cast<double>(std::numeric_limits<float>::max()) ||
+        value < -static_cast<double>(std::numeric_limits<float>::max())) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            std::string(description) +
+                " contains a non-finite or out-of-range value"
+        );
+    }
+    return static_cast<float>(value);
+}
+
+// Image vertices bake authored size/alignment/XY scale into their scene-space
+// rectangle. This matrix is the remaining node transform used by both drawing
+// and cursor projection, so the two paths cannot diverge on XYZ rotation,
+// depth, or delayed parallax.
+[[nodiscard]] ImageSceneGeometry imageSceneGeometry(
+    const FramePlan& plan,
+    const FrameImageDescriptor& image,
+    const FrameVector2& frameParallax
+) {
+    if (plan.width == 0 || plan.height == 0 ||
+        !std::isfinite(image.size.x) || !std::isfinite(image.size.y) ||
+        image.size.x <= 0.0 || image.size.y <= 0.0) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Image scene geometry requires positive finite scene and image dimensions"
+        );
+    }
+    const auto& transform = image.worldTransform;
+    const double scaledWidth = image.size.x * transform.scale.x;
+    const double scaledHeight = image.size.y * transform.scale.y;
+    if (!std::isfinite(scaledWidth) || !std::isfinite(scaledHeight) ||
+        !std::isfinite(transform.scale.z)) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Image scene scale contains a non-finite value"
+        );
+    }
+    const bool authoredPerspectiveScene = !plan.camera.orthographic;
+    double centerX = authoredPerspectiveScene
+        ? transform.origin.x
+        : transform.origin.x - static_cast<double>(plan.width) * 0.5;
+    double centerY = authoredPerspectiveScene
+        ? transform.origin.y
+        : centeredWallpaperY(transform.origin.y, plan.height);
+    if (image.horizontalAlignment.find("left") != std::string::npos) {
+        centerX += scaledWidth * 0.5;
+    } else if (image.horizontalAlignment.find("right") != std::string::npos) {
+        centerX -= scaledWidth * 0.5;
+    }
+    if (image.horizontalAlignment.find("top") != std::string::npos) {
+        centerY += scaledHeight * 0.5;
+    } else if (image.horizontalAlignment.find("bottom") != std::string::npos) {
+        centerY -= scaledHeight * 0.5;
+    }
+
+    const float pivotX = imageSceneFloat(centerX, "Image rotation pivot X");
+    const float pivotY = imageSceneFloat(centerY, "Image rotation pivot Y");
+    const float originZ = imageSceneFloat(
+        transform.origin.z, "Image scene origin Z"
+    );
+    Matrix sceneTransform = multiply(
+        translation(pivotX, pivotY, originZ),
+        multiply(
+            rotationZ(-imageSceneFloat(transform.angles.z, "Image Z angle")),
+            multiply(
+                rotationY(imageSceneFloat(transform.angles.y, "Image Y angle")),
+                multiply(
+                    rotationX(-imageSceneFloat(transform.angles.x, "Image X angle")),
+                    translation(-pivotX, -pivotY, 0.0F)
+                )
+            )
+        )
+    );
+    if (plan.parallax.enabled) {
+        const auto depth = numericComponents(
+            image.parallaxDepth.value, 2, "Image parallax depth"
+        );
+        const FrameVector2 parallaxOffset = sceneParallaxOffset(
+            plan.width,
+            {
+                .x = static_cast<double>(depth[0]),
+                .y = static_cast<double>(depth[1]),
+            },
+            frameParallax,
+            "image"
+        );
+        sceneTransform = multiply(
+            sceneTransform,
+            translation(
+                imageSceneFloat(parallaxOffset.x, "Image parallax X"),
+                imageSceneFloat(parallaxOffset.y, "Image parallax Y"),
+                0.0F
+            )
+        );
+    }
+    return {
+        .left = imageSceneFloat(
+            centerX - scaledWidth * 0.5, "Image scene left edge"
+        ),
+        .right = imageSceneFloat(
+            centerX + scaledWidth * 0.5, "Image scene right edge"
+        ),
+        .bottom = imageSceneFloat(
+            centerY - scaledHeight * 0.5, "Image scene bottom edge"
+        ),
+        .top = imageSceneFloat(
+            centerY + scaledHeight * 0.5, "Image scene top edge"
+        ),
+        .sceneTransform = sceneTransform,
+    };
+}
+
+struct CartesianPoint final {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+};
+
+[[nodiscard]] CartesianPoint transformCartesianPoint(
+    const Matrix& matrix,
+    double x,
+    double y,
+    double z,
+    double w,
+    std::string_view description
+) {
+    const std::array<double, 4> input{x, y, z, w};
+    std::array<double, 4> output{};
+    for (std::size_t row = 0; row < 4; ++row) {
+        for (std::size_t column = 0; column < 4; ++column) {
+            output[row] += static_cast<double>(matrix[column * 4 + row]) *
+                input[column];
+        }
+    }
+    if (!std::ranges::all_of(output, [](double value) {
+            return std::isfinite(value);
+        }) || std::abs(output[3]) <= std::numeric_limits<double>::epsilon()) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            std::string(description) + " produced an invalid homogeneous point"
+        );
+    }
+    return {
+        .x = output[0] / output[3],
+        .y = output[1] / output[3],
+        .z = output[2] / output[3],
+    };
+}
+
+// Project the canonical bottom-left pointer through the same camera and image
+// transform used for rendering. Projection remains available outside the
+// rectangle so a pressed layer keeps receiving drag/up coordinates.
+[[nodiscard]] std::optional<CursorProjection> projectCursorImage(
+    const FramePlan& plan,
+    const FrameImageDescriptor& image,
+    FrameVector2 pointer,
+    const FrameVector2& frameParallax
+) {
+    if (!std::isfinite(pointer.x) || !std::isfinite(pointer.y)) {
+        return std::nullopt;
+    }
+    const ImageSceneGeometry geometry = imageSceneGeometry(
+        plan, image, frameParallax
+    );
+    const double width = static_cast<double>(plan.camera.orthogonalProjectionWidth);
+    const double height = static_cast<double>(plan.camera.orthogonalProjectionHeight);
+    if (!std::isfinite(width) || !std::isfinite(height) ||
+        width <= 0.0 || height <= 0.0) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Cursor projection requires positive scene-camera dimensions"
+        );
+    }
+    const bool perspectiveLayer = !plan.camera.orthographic || image.perspective;
+    const Matrix viewProjection = perspectiveLayer
+        ? scenePerspectiveView(
+              plan.camera, static_cast<float>(width), static_cast<float>(height)
+          ).viewProjection
+        : sceneOrthographicViewProjection(
+              plan.camera, static_cast<float>(width), static_cast<float>(height)
+          );
+    const Matrix inverseModelViewProjection = inverse(
+        multiply(viewProjection, geometry.sceneTransform),
+        "Cursor image model-view-projection matrix"
+    );
+    const double ndcX = std::clamp(pointer.x, 0.0, 1.0) * 2.0 - 1.0;
+    const double ndcY = 1.0 - std::clamp(pointer.y, 0.0, 1.0) * 2.0;
+    const CartesianPoint depthZero = transformCartesianPoint(
+        inverseModelViewProjection,
+        ndcX,
+        ndcY,
+        0.0,
+        1.0,
+        "Cursor depth-zero unprojection"
+    );
+    const CartesianPoint depthOne = transformCartesianPoint(
+        inverseModelViewProjection,
+        ndcX,
+        ndcY,
+        1.0,
+        1.0,
+        "Cursor depth-one unprojection"
+    );
+    const double rayZ = depthOne.z - depthZero.z;
+    // Orthographic camera planes at near=0 can round a mathematically exact
+    // intersection to a tiny negative parameter after float matrix inversion.
+    // Keep the tolerance narrow enough to reject genuinely clipped layers.
+    constexpr double epsilon = 1e-5;
+    if (!std::isfinite(rayZ) || std::abs(rayZ) <= epsilon) {
+        return std::nullopt;
+    }
+    const double rayParameter = -depthZero.z / rayZ;
+    if (!std::isfinite(rayParameter) ||
+        rayParameter < -epsilon || rayParameter > 1.0 + epsilon) {
+        return std::nullopt;
+    }
+    const double sceneX = depthZero.x +
+        (depthOne.x - depthZero.x) * rayParameter;
+    const double sceneY = depthZero.y +
+        (depthOne.y - depthZero.y) * rayParameter;
+    const double geometryWidth =
+        static_cast<double>(geometry.right) - geometry.left;
+    const double geometryHeight =
+        static_cast<double>(geometry.top) - geometry.bottom;
+    if (!std::isfinite(sceneX) || !std::isfinite(sceneY) ||
+        std::abs(geometryWidth) <= epsilon ||
+        std::abs(geometryHeight) <= epsilon) {
+        return std::nullopt;
+    }
+    const double unitX = (sceneX - geometry.left) / geometryWidth;
+    const double unitY = (sceneY - geometry.bottom) / geometryHeight;
+    const CartesianPoint finalScene = transformCartesianPoint(
+        geometry.sceneTransform,
+        sceneX,
+        sceneY,
+        0.0,
+        1.0,
+        "Cursor scene intersection"
+    );
+    const double worldX = plan.camera.orthographic
+        ? finalScene.x + static_cast<double>(plan.width) * 0.5
+        : finalScene.x;
+    const double worldY = plan.camera.orthographic
+        ? static_cast<double>(plan.height) * 0.5 - finalScene.y
+        : finalScene.y;
+    const double localX = unitX * image.size.x;
+    const double localY = unitY * image.size.y;
+    return CursorProjection{
+        .hit = CursorHit{
+            .layerId = image.objectId,
+            .worldX = worldX,
+            .worldY = worldY,
+            .worldZ = finalScene.z,
+            .localX = std::clamp(localX, 0.0, image.size.x),
+            .localY = std::clamp(localY, 0.0, image.size.y),
+            .localZ = 0.0,
+        },
+        .inside = unitX >= -epsilon && unitX <= 1.0 + epsilon &&
+            unitY >= -epsilon && unitY <= 1.0 + epsilon,
+    };
+}
+
+[[nodiscard]] std::optional<CursorHit> hitTestInteractiveImage(
+    const FramePlan& plan,
+    const FrameImageDescriptor& image,
+    FrameVector2 pointer,
+    const FrameVector2& frameParallax
+) {
+    if (!image.visible || !image.cursorInteractive) return std::nullopt;
+    const auto projection = projectCursorImage(
+        plan, image, pointer, frameParallax
+    );
+    if (!projection || !projection->inside) return std::nullopt;
+    return projection->hit;
+}
+
+[[nodiscard]] std::vector<CursorHit> hitTestInteractiveLayers(
+    const FramePlan& plan,
+    FrameVector2 pointer,
+    const FrameVector2& frameParallax
+) {
+    // Cursor callbacks are layer-local. Preserve front-to-back render order,
+    // but dispatch to every interactive layer under the pointer; overlapping
+    // controls keep independent SceneScript state in Wallpaper Engine.
+    std::vector<CursorHit> hits;
+    std::set<int> seenLayerIds;
+    for (auto iterator = plan.images.rbegin(); iterator != plan.images.rend(); ++iterator) {
+        if (const auto hit = hitTestInteractiveImage(
+                plan, *iterator, pointer, frameParallax
+            ); hit && seenLayerIds.insert(hit->layerId).second) {
+            hits.push_back(*hit);
+        }
+    }
+    return hits;
+}
+
+[[nodiscard]] std::optional<CursorHit> projectCursorLayer(
+    const FramePlan& plan,
+    int layerId,
+    FrameVector2 pointer,
+    const FrameVector2& frameParallax
+) {
+    for (auto iterator = plan.images.rbegin(); iterator != plan.images.rend(); ++iterator) {
+        if (iterator->objectId != layerId) continue;
+        const auto projection = projectCursorImage(
+            plan, *iterator, pointer, frameParallax
+        );
+        if (projection) return projection->hit;
+    }
+    return std::nullopt;
+}
+
 RuntimeValue metadataDefault(const ShaderParameterDefault& input) {
     return std::visit([](const auto& value) -> RuntimeValue {
         using T = std::decay_t<decltype(value)>;
@@ -1797,6 +2516,7 @@ std::vector<ActiveUniform> activeUniforms(
     ) {
         for (const auto& binding : textures) {
             ActiveUniform& uniform = findOrAppend(binding.name);
+            const bool alreadySampler = uniform.sampler;
             if ((uniform.vertexBufferIndex || uniform.fragmentBufferIndex) &&
                 !uniform.sampler) {
                 throw Error(
@@ -1805,9 +2525,25 @@ std::vector<ActiveUniform> activeUniforms(
                         "' is both a texture and a byte uniform"
                 );
             }
+            if (alreadySampler &&
+                uniform.comparisonSampler != binding.comparison) {
+                throw Error(
+                    ErrorCode::programLink,
+                    "Shader stages disagree on sampler comparison type for '" +
+                        binding.name + "'"
+                );
+            }
+            if (alreadySampler &&
+                uniform.samplerDimension != binding.dimension) {
+                throw Error(
+                    ErrorCode::programLink,
+                    "Shader stages disagree on sampler texture dimension for '" +
+                        binding.name + "'"
+                );
+            }
             uniform.sampler = true;
-            uniform.supportedSampler = uniform.supportedSampler &&
-                binding.supportedFloat2D;
+            uniform.samplerDimension = binding.dimension;
+            uniform.comparisonSampler = binding.comparison;
             if (vertex) {
                 uniform.vertexTextureIndex = binding.textureIndex;
                 uniform.vertexSamplerIndex = binding.samplerIndex;
@@ -1846,6 +2582,17 @@ std::int32_t attributeLocation(
     return found == program.attributes.end()
         ? -1
         : static_cast<std::int32_t>(found->location);
+}
+
+const TranslatedMetalShaderPair::VertexAttribute* activeAttribute(
+    const ProgramResource& program,
+    std::string_view name
+) {
+    const auto found = std::find_if(
+        program.attributes.begin(), program.attributes.end(),
+        [name](const auto& attribute) { return attribute.name == name; }
+    );
+    return found == program.attributes.end() ? nullptr : &*found;
 }
 
 std::int32_t uniformLocation(
@@ -1923,6 +2670,37 @@ PreparedAudioSpectrumUniform prepareAudioSpectrumUniform(
     };
 }
 
+PreparedBuiltinArrayUniform prepareBuiltinArrayUniform(
+    const ProgramResource& program,
+    const std::string& name,
+    TranslatedMetalShaderPair::ValueType expectedType,
+    std::uint32_t configuredSize
+) {
+    const ActiveUniform* uniform = activeUniform(program, name);
+    if (uniform == nullptr) return {};
+    if (configuredSize == 0) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Builtin uniform array '" + name +
+                "' is active while its provider element count is zero"
+        );
+    }
+    if (uniform->uniformBlock || uniform->sampler || !uniform->isArray ||
+        uniform->size == 0 || uniform->size > configuredSize ||
+        uniform->type != expectedType) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Builtin uniform array '" + name +
+                "' is incompatible with the configured " +
+                std::to_string(configuredSize) + "-element contract"
+        );
+    }
+    return {
+        .location = uniformLocation(program, *uniform),
+        .activeElementCount = uniform->size,
+    };
+}
+
 std::optional<int> textureSlot(std::string_view name) {
     constexpr std::string_view prefix = "g_Texture";
     if (!name.starts_with(prefix) || name.size() == prefix.size()) {
@@ -1941,10 +2719,79 @@ std::optional<int> textureSlot(std::string_view name) {
     return slot;
 }
 
-std::optional<int> textureResolutionSlot(std::string_view name) {
-    constexpr std::string_view suffix = "Resolution";
-    if (!name.ends_with(suffix)) return std::nullopt;
-    return textureSlot(name.substr(0, name.size() - suffix.size()));
+std::optional<int> textureMetadataSlot(std::string_view name) {
+    static constexpr std::array<std::string_view, 5> suffixes{
+        "Resolution",
+        "Texel",
+        "MipMapInfo",
+        "Rotation",
+        "Translation",
+    };
+    for (const std::string_view suffix : suffixes) {
+        if (!name.ends_with(suffix)) continue;
+        return textureSlot(name.substr(0, name.size() - suffix.size()));
+    }
+    return std::nullopt;
+}
+
+std::set<int> textureBindingSlots(
+    const std::map<int, FrameTextureBinding>& textures,
+    std::string_view description
+) {
+    std::set<int> result;
+    for (const auto& [slot, binding] : textures) {
+        static_cast<void>(binding);
+        if (slot < 0 || slot >= 32) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                std::string(description) +
+                    " texture slot is outside the supported range 0...31"
+            );
+        }
+        const bool authoredTexture = std::ranges::any_of(
+            binding.candidates,
+            [](const FrameTextureCandidate& candidate) {
+                switch (candidate.source) {
+                    case FrameTextureCandidateSource::materialTexture:
+                    case FrameTextureCandidateSource::materialUserTexture:
+                    case FrameTextureCandidateSource::overrideTexture:
+                    case FrameTextureCandidateSource::overrideUserTexture:
+                        return true;
+                    case FrameTextureCandidateSource::shaderVertexDefault:
+                    case FrameTextureCandidateSource::shaderFragmentDefault:
+                    case FrameTextureCandidateSource::bind:
+                        return false;
+                }
+                std::terminate();
+            }
+        );
+        if (authoredTexture) result.emplace(slot);
+    }
+    return result;
+}
+
+std::array<float, 4> textureTexel(const TextureResource& texture) {
+    if (texture.width == 0 || texture.height == 0) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Active g_TextureNTexel builtin requires non-zero texture dimensions"
+        );
+    }
+    const float width = static_cast<float>(texture.width);
+    const float height = static_cast<float>(texture.height);
+    return {1.0F / width, 1.0F / height, width, height};
+}
+
+float textureMipmapInfo(const TextureResource& texture) {
+    if (texture.mipmapCount == 0) {
+        throw Error(
+            ErrorCode::resourceValidation,
+            "Active g_TextureNMipMapInfo builtin requires a valid mip chain"
+        );
+    }
+    // Stock reflection shaders multiply roughness by this value before
+    // texSample2DLod, so the contract is the greatest valid mip level.
+    return static_cast<float>(texture.mipmapCount - 1);
 }
 
 std::vector<std::pair<FrameTextureCandidateSource, std::string>>
@@ -1989,13 +2836,20 @@ RenderState renderState(const FrameRenderPass& pass) {
         case BlendingMode::additive:
             result.blending = BlendMode::additive;
             break;
+        case BlendingMode::alphaToCoverage:
+            result.blending = BlendMode::alpha;
+            result.alphaToCoverage = true;
+            break;
     }
     result.cullBackFaces = pass.culling != CullingMode::disabled;
-    result.depthTest = pass.depthTest == DepthMode::enabled;
-    result.depthWrite = pass.depthWrite == DepthMode::enabled;
+    result.depthTest = pass.depthTest != DepthMode::disabled;
+    result.depthCompareGreater = pass.depthTest == DepthMode::greater;
+    result.depthWrite = pass.depthWrite != DepthMode::disabled;
     result.depthClamp = pass.geometry == FrameGeometryKind::imageScene ||
         pass.geometry == FrameGeometryKind::passthroughCapture ||
-        pass.geometry == FrameGeometryKind::puppetMesh;
+        pass.geometry == FrameGeometryKind::puppetMesh ||
+        pass.geometry == FrameGeometryKind::lightVolume;
+    result.writeColor = pass.writeColor;
     result.writeAlpha = pass.writeAlpha;
     return result;
 }
@@ -2052,15 +2906,66 @@ struct FramePlanExecutor::Impl final {
         int slot = 0;
         FrameResourceRef resource;
         const TextureResource* assetTexture = nullptr;
+        bool comparison = false;
+        bool sampleDepth = false;
         std::array<float, 4> resolution{};
+        TextureAnimationSelection animation;
         std::int32_t samplerLocation = -1;
         std::int32_t resolutionLocation = -1;
+        std::int32_t texelLocation = -1;
+        std::int32_t mipmapInfoLocation = -1;
+        std::int32_t rotationLocation = -1;
+        std::int32_t translationLocation = -1;
+    };
+
+    struct PreparedLightUniforms final {
+        PreparedBuiltinArrayUniform legacyColorRadius;
+        PreparedBuiltinArrayUniform legacyColorPremultiplied;
+        PreparedBuiltinArrayUniform legacyPosition;
+        PreparedBuiltinArrayUniform pointColor;
+        PreparedBuiltinArrayUniform pointOrigin;
+        PreparedBuiltinArrayUniform spotColor;
+        PreparedBuiltinArrayUniform spotOrigin;
+        PreparedBuiltinArrayUniform spotDirection;
+        PreparedBuiltinArrayUniform spotExponent;
+        PreparedBuiltinArrayUniform tubeColor;
+        PreparedBuiltinArrayUniform tubeOriginA;
+        PreparedBuiltinArrayUniform tubeOriginB;
+        PreparedBuiltinArrayUniform directionalColor;
+        PreparedBuiltinArrayUniform directionalDirection;
+        PreparedBuiltinArrayUniform shadowProjection;
+        PreparedBuiltinArrayUniform shadowProjectionTransform;
+        PreparedBuiltinArrayUniform shadowPointProjection;
+        PreparedBuiltinArrayUniform shadowPointProjectionTransform;
+        std::array<std::array<float, 4>, 4> pointColorValues{};
+        std::array<std::array<float, 4>, 4> pointOriginValues{};
+        std::array<std::array<float, 4>, 4> spotColorValues{};
+        std::array<std::array<float, 4>, 4> spotOriginValues{};
+        std::array<std::array<float, 4>, 4> spotDirectionValues{};
+        std::array<std::array<float, 4>, 4> spotExponentValues{};
+        std::array<std::array<float, 4>, 4> tubeColorValues{};
+        std::array<std::array<float, 4>, 4> tubeOriginAValues{};
+        std::array<std::array<float, 4>, 4> tubeOriginBValues{};
+        std::array<std::array<float, 4>, 4> directionalColorValues{};
+        std::array<std::array<float, 4>, 4> directionalDirectionValues{};
+        std::array<std::array<float, 4>, 4> legacyColorRadiusValues{};
+        std::array<std::array<float, 4>, 3> legacyColorPremultipliedValues{};
+        std::array<std::array<float, 4>, 4> legacyPositionValues{};
+        std::vector<Matrix> shadowProjectionValues;
+        std::vector<std::array<float, 4>> shadowProjectionTransformValues;
+        std::vector<std::array<float, 4>> shadowPointProjectionValues;
+        std::vector<std::array<float, 4>> shadowPointProjectionTransformValues;
     };
 
     struct PreparedCommonUniforms final {
+        PreparedLightUniforms lights;
         std::int32_t textureReductionScale = -1;
         std::int32_t lightAmbientColor = -1;
         std::int32_t lightSkylightColor = -1;
+        std::int32_t fogDistanceColor = -1;
+        std::int32_t fogDistanceParams = -1;
+        std::int32_t fogHeightColor = -1;
+        std::int32_t fogHeightParams = -1;
         std::int32_t brightness = -1;
         std::int32_t userAlpha = -1;
         std::int32_t alpha = -1;
@@ -2078,14 +2983,18 @@ struct FramePlanExecutor::Impl final {
         std::int32_t effectModelViewProjectionInverse = -1;
         std::int32_t model = -1;
         std::int32_t effectModel = -1;
+        std::int32_t layerModel = -1;
         std::int32_t normalModel = -1;
         std::int32_t viewProjection = -1;
+        std::int32_t viewForward = -1;
         std::int32_t pointer = -1;
         std::int32_t pointerLast = -1;
+        std::int32_t pointerState = -1;
         std::int32_t effectTextureProjection = -1;
         std::int32_t effectTextureProjectionInverse = -1;
         std::int32_t texelSize = -1;
         std::int32_t texelSizeHalf = -1;
+        std::int32_t hdrParams = -1;
         PreparedAudioSpectrumUniform audioSpectrum16Left;
         PreparedAudioSpectrumUniform audioSpectrum16Right;
         PreparedAudioSpectrumUniform audioSpectrum32Left;
@@ -2097,6 +3006,10 @@ struct FramePlanExecutor::Impl final {
         Matrix modelViewProjectionInverseValue = identityMatrix();
         std::array<float, 3> ambientColorValue{};
         std::array<float, 3> skylightColorValue{};
+        std::array<float, 3> fogDistanceColorValue{};
+        std::array<float, 4> fogDistanceParamsValue{};
+        std::array<float, 3> fogHeightColorValue{};
+        std::array<float, 4> fogHeightParamsValue{};
         float brightnessValue = 1.0F;
         float alphaValue = 1.0F;
         std::array<float, 3> colorValue{};
@@ -2108,8 +3021,11 @@ struct FramePlanExecutor::Impl final {
         std::array<float, 2> parallaxPositionValue{};
         std::array<float, 2> pointerValue{};
         std::array<float, 2> pointerLastValue{};
+        std::array<float, 4> pointerStateValue{};
+        std::array<float, 3> viewForwardValue{};
         std::array<float, 2> texelSizeValue{};
         std::array<float, 2> texelSizeHalfValue{};
+        std::array<float, 2> hdrParamsValue{};
         AudioSpectrumFrame audioSpectrumValue;
     };
 
@@ -2120,37 +3036,73 @@ struct FramePlanExecutor::Impl final {
     };
 
     struct PreparedImageUniforms final {
-        std::int32_t texture0Translation = -1;
-        std::int32_t texture0Rotation = -1;
+        PreparedBuiltinArrayUniform viewportViewProjectionMatrices;
+        std::array<std::int32_t, 5> renderVariables{{-1, -1, -1, -1, -1}};
         std::int32_t alternateModel = -1;
         std::int32_t alternateNormalModel = -1;
         std::int32_t alternateViewProjection = -1;
         std::int32_t eyePosition = -1;
+        PreparedBuiltinArrayUniform bones;
+        PreparedBuiltinArrayUniform bonesAlpha;
+        PreparedBuiltinArrayUniform blendMap;
+        PreparedBuiltinArrayUniform morphOffsets;
+        PreparedBuiltinArrayUniform morphWeights;
+        PreparedBuiltinArrayUniform morphBoneTransforms;
+        PreparedBuiltinArrayUniform morphBoneRules;
+        std::int32_t morphTexture = -1;
+        std::int32_t morphTextureResolution = -1;
+        std::int32_t morphTextureTexel = -1;
+        std::int32_t morphTextureMipmapInfo = -1;
+        std::int32_t morphTextureRotation = -1;
+        std::int32_t morphTextureTranslation = -1;
     };
 
     struct PreparedDraw final {
         FrameRenderPass pass;
         const ProgramResource* program = nullptr;
         std::vector<PreparedTextureBinding> textures;
-        TextureAnimationSelection texture0Animation;
         PreparedImageUniforms uniforms;
         PreparedCommonUniforms commonUniforms;
         Matrix model = identityMatrix();
         Matrix viewProjection = identityMatrix();
         Matrix modelViewProjection = identityMatrix();
+        Matrix effectModel = identityMatrix();
+        Matrix alternateModel = identityMatrix();
+        Matrix alternateViewProjection = identityMatrix();
         std::array<float, 3> eyePosition{};
         std::vector<PreparedUniform> materialUniforms;
-        std::array<Vertex, 6> vertices{};
-        std::vector<Vertex> puppetVertices;
-        std::vector<std::uint16_t> puppetIndices;
+        std::vector<Vertex> vertices;
+        std::vector<PuppetDrawVertex> puppetVertices;
+        std::vector<std::uint32_t> puppetIndices;
+        std::vector<std::array<float, 16>> puppetBoneMatrices;
+        PuppetBonesAlphaState puppetBonesAlpha;
+        PuppetBlendMapState puppetBlendMap{};
+        std::array<Matrix, 6> viewportViewProjectionMatrices{};
+        std::optional<PuppetMorphState> puppetMorphState;
+        std::optional<PuppetMorphModifierState> puppetMorphModifierState;
+        std::array<std::array<float, 16>, puppetMaximumMorphTargets>
+            puppetMorphBoneTransforms{};
+        std::array<std::array<float, 4>, puppetMaximumMorphTargets>
+            puppetMorphBoneRules{};
+        const TextureResource* puppetMorphTexture = nullptr;
+        std::array<float, 4> puppetMorphTextureResolution{};
+        bool gpuPuppetSkinning = false;
         std::int32_t firstVertex = 0;
         std::int32_t positionLocation = -1;
         std::int32_t texCoordLocation = -1;
+        std::int32_t normalLocation = -1;
+        std::int32_t tangentLocation = -1;
+        std::int32_t blendIndicesLocation = -1;
+        std::int32_t blendWeightsLocation = -1;
+        bool positionIsFloat4 = false;
+        bool texCoordIsFloat4 = false;
     };
 
     struct PreparedClear final {
         FrameResourceRef destination;
         std::array<float, 4> color{};
+        bool clearDepth = false;
+        float depthValue = 1.0F;
     };
 
     struct PreparedText final {
@@ -2160,8 +3112,6 @@ struct FramePlanExecutor::Impl final {
     };
 
     struct PreparedParticleUniforms final {
-        std::int32_t texture0Translation = -1;
-        std::int32_t texture0Rotation = -1;
         std::int32_t modelInverse = -1;
         std::int32_t orientationUp = -1;
         std::int32_t orientationRight = -1;
@@ -2201,7 +3151,7 @@ struct FramePlanExecutor::Impl final {
 
     struct PreparedCamera final {
         std::optional<Matrix> orthographicViewProjection;
-        std::optional<ParticleView> particlePerspective;
+        std::optional<ParticleView> perspectiveView;
         std::array<float, 3> eyePosition{};
     };
 
@@ -2302,6 +3252,19 @@ struct FramePlanExecutor::Impl final {
     static constexpr std::size_t maximumTextRasterEntries = 64;
     static constexpr std::size_t maximumTextRasterBytes = 32 * 1024 * 1024;
 
+    [[nodiscard]] static const AssetResolver& requireAssetResolver(
+        const std::shared_ptr<SceneFrameGraph>& graph
+    ) {
+        if (!graph || !graph->graph() || !graph->graph()->model() ||
+            !graph->graph()->model()->runtime()) {
+            throw Error(
+                ErrorCode::invalidArgument,
+                "FramePlanExecutor requires a runtime-backed frame graph"
+            );
+        }
+        return graph->graph()->model()->runtime()->assetResolver();
+    }
+
     struct LastFrameState final {
         FramePlan sourcePlan;
         FrameEvaluationState evaluation;
@@ -2311,12 +3274,15 @@ struct FramePlanExecutor::Impl final {
     };
 
     explicit Impl(std::shared_ptr<SceneFrameGraph> graph)
-        : frameGraph(std::move(graph)) {
+        : frameGraph(std::move(graph)),
+          textRenderer(requireAssetResolver(frameGraph)) {
         validateGraph();
         initializeDimensions();
     }
     Impl(std::shared_ptr<SceneFrameGraph> graph, void* metalDevice)
-        : frameGraph(std::move(graph)), borrowedMetalDevice(metalDevice) {
+        : frameGraph(std::move(graph)),
+          borrowedMetalDevice(metalDevice),
+          textRenderer(requireAssetResolver(frameGraph)) {
         validateGraph();
         if (borrowedMetalDevice == nullptr) {
             throw Error(ErrorCode::invalidArgument, "Borrowed Metal device is null");
@@ -2331,7 +3297,7 @@ struct FramePlanExecutor::Impl final {
             textRenderer.release(session);
             presentationRenderer.release(session);
             session.destroyBuffer(frameGeometryBuffer);
-            session.destroyFramebuffer(particleRefractSnapshot);
+            session.destroyFramebuffer(feedbackSnapshot);
             session.destroyTexture(mediaThumbnailCurrent.texture);
             session.destroyTexture(mediaThumbnailPrevious.texture);
         } catch (const std::exception& error) {
@@ -3128,6 +4094,97 @@ struct FramePlanExecutor::Impl final {
         return found->second;
     }
 
+    TextureResource& ensurePuppetMorphTexture(
+        Device::Session& session,
+        const PuppetMesh& mesh,
+        std::size_t submeshIndex
+    ) {
+        const std::pair key{&mesh, submeshIndex};
+        if (auto found = puppetMorphTextures.find(key);
+            found != puppetMorphTextures.end()) {
+            return found->second;
+        }
+        if (submeshIndex >= mesh.submeshes.size() ||
+            !mesh.submeshes[submeshIndex].morph) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Puppet morph state references a submesh without MDMP data"
+            );
+        }
+        const PuppetMorphData& morph = *mesh.submeshes[submeshIndex].morph;
+        const std::size_t texelCount = morph.targets.size() *
+            static_cast<std::size_t>(morph.vertexCount);
+        if (texelCount == 0) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Puppet MDMP section does not contain texture data"
+            );
+        }
+        const double sideValue = std::ceil(std::sqrt(
+            static_cast<double>(texelCount)
+        ));
+        if (!std::isfinite(sideValue) || sideValue <= 0.0 ||
+            sideValue > static_cast<double>(
+                std::numeric_limits<std::uint32_t>::max()
+            )) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Puppet morph texture dimensions exceed Metal limits"
+            );
+        }
+        const std::uint32_t side = static_cast<std::uint32_t>(sideValue);
+        if (static_cast<std::size_t>(side) >
+            std::numeric_limits<std::size_t>::max() / side / 4) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Puppet morph texture storage size overflows size_t"
+            );
+        }
+        std::vector<std::uint16_t> pixels(
+            static_cast<std::size_t>(side) * side * 4,
+            0
+        );
+        for (std::size_t targetIndex = 0;
+             targetIndex < morph.targets.size();
+             ++targetIndex) {
+            const PuppetMorphTarget& target = morph.targets[targetIndex];
+            if (target.basePositions.size() != morph.vertexCount ||
+                target.payload1000.size() != morph.vertexCount) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Puppet MDMP RGBA texture upload requires matching base and 0x1000 payloads"
+                );
+            }
+            for (std::size_t vertexIndex = 0;
+                 vertexIndex < morph.vertexCount;
+                 ++vertexIndex) {
+                const std::size_t pixel =
+                    (targetIndex * morph.vertexCount + vertexIndex) * 4;
+                pixels[pixel] = target.basePositions[vertexIndex][0];
+                pixels[pixel + 1] = target.basePositions[vertexIndex][1];
+                pixels[pixel + 2] = target.basePositions[vertexIndex][2];
+                pixels[pixel + 3] = target.payload1000[vertexIndex];
+            }
+        }
+        TextureResource uploaded = session.uploadRGBA16SnormTexture(
+            side, side, pixels
+        );
+        try {
+            const auto [inserted, didInsert] = puppetMorphTextures.try_emplace(
+                key
+            );
+            if (!didInsert) {
+                session.destroyTexture(uploaded);
+            } else {
+                inserted->second = std::move(uploaded);
+            }
+            return inserted->second;
+        } catch (...) {
+            session.destroyTexture(uploaded);
+            throw;
+        }
+    }
+
     AssetTextureResource& prepareAssetTexture(
         Device::Session& session,
         const FrameResourceRef& ref,
@@ -3389,11 +4446,15 @@ struct FramePlanExecutor::Impl final {
         const std::string& vertexShaderPath,
         const std::string& fragmentShaderPath,
         const ComboMap& combos,
+        const std::set<int>& textureSlots,
         std::string_view description
     ) {
         std::ostringstream keyBuilder;
         keyBuilder << vertexShaderPath << '|' << fragmentShaderPath;
         for (const auto& [name, value] : combos) keyBuilder << '|' << name << '=' << value;
+        for (const int slot : textureSlots) {
+            keyBuilder << "|texture-slot=" << slot;
+        }
         const std::string key = keyBuilder.str();
         if (const auto found = programs.find(key); found != programs.end()) {
             if (found->second.failure) {
@@ -3426,6 +4487,7 @@ struct FramePlanExecutor::Impl final {
             }
             ShaderPreprocessOptions options;
             options.combos = combos;
+            options.textureSlots = textureSlots;
             const ShaderPreprocessor preprocessor(resolver());
             const auto preprocessed = preprocessor.preprocessFiles(
                 vertexShaderPath, fragmentShaderPath, options
@@ -3479,18 +4541,13 @@ struct FramePlanExecutor::Impl final {
             return plan.output;
         }
         if (name == "_alias_lightCookie") {
-            for (const FramebufferDescriptor& descriptor : plan.framebuffers) {
-                if (descriptor.resource.logicalName == "_rt_shadowAtlas") {
-                    return {
-                        .kind = FrameResourceKind::framebuffer,
-                        .id = descriptor.resource.id,
-                        .logicalName = "_alias_lightCookie",
-                    };
-                }
+            if (plan.lightCookie.kind == FrameResourceKind::assetTexture &&
+                !plan.lightCookie.id.empty()) {
+                return plan.lightCookie;
             }
             throw Error(
                 ErrorCode::resourceValidation,
-                "Sampler metadata default references unavailable runtime alias '_alias_lightCookie'"
+                "Sampler metadata default references unavailable light-cookie asset"
             );
         }
         if (matches(pass.input)) {
@@ -3544,14 +4601,13 @@ struct FramePlanExecutor::Impl final {
             return plan.output;
         }
         if (name == "_alias_lightCookie") {
-            for (const FramebufferDescriptor& framebuffer : plan.framebuffers) {
-                if (framebuffer.resource.logicalName == "_rt_shadowAtlas") {
-                    return framebuffer.resource;
-                }
+            if (plan.lightCookie.kind == FrameResourceKind::assetTexture &&
+                !plan.lightCookie.id.empty()) {
+                return plan.lightCookie;
             }
             throw Error(
                 ErrorCode::resourceValidation,
-                "Particle sampler metadata default references unavailable runtime alias '_alias_lightCookie'"
+                "Particle sampler metadata default references unavailable light-cookie asset"
             );
         }
         if (descriptor.texture0.logicalName == name ||
@@ -3608,6 +4664,96 @@ struct FramePlanExecutor::Impl final {
         return static_cast<float>(value);
     }
 
+    [[nodiscard]] static std::vector<Vertex> lightVolumeVertices(
+        const FrameLightDescriptor& light
+    ) {
+        constexpr std::size_t azimuthSegments = 20;
+        constexpr std::size_t polarSegments = 10;
+        constexpr double pi = 3.14159265358979323846264338327950288;
+        const float radius = checkedFloat(light.radius, "Light volume radius");
+        if (!(radius > 0.0F)) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Volumetric light radius must be greater than zero"
+            );
+        }
+        const double maximumPolar = light.type == FrameLightType::point
+            ? pi
+            : std::clamp(light.outerCone * pi / 180.0, 0.0, pi);
+        if (light.type == FrameLightType::spot && maximumPolar <= 0.0) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Volumetric spot outer cone must be greater than zero"
+            );
+        }
+        const auto vertex = [radius](double polar, double azimuth) {
+            const double ring = std::sin(polar);
+            return Vertex{
+                .position = {
+                    checkedFloat(radius * std::cos(polar), "Light volume X"),
+                    checkedFloat(
+                        radius * ring * std::cos(azimuth),
+                        "Light volume Y"
+                    ),
+                    checkedFloat(
+                        radius * ring * std::sin(azimuth),
+                        "Light volume Z"
+                    ),
+                },
+                .texCoord = {0.0F, 0.0F},
+            };
+        };
+        std::vector<Vertex> result;
+        result.reserve(
+            polarSegments * azimuthSegments * 6 +
+            (light.type == FrameLightType::spot ? azimuthSegments * 3 : 0)
+        );
+        for (std::size_t polarIndex = 0;
+             polarIndex < polarSegments;
+             ++polarIndex) {
+            const double polar0 = maximumPolar * polarIndex / polarSegments;
+            const double polar1 =
+                maximumPolar * (polarIndex + 1) / polarSegments;
+            for (std::size_t azimuthIndex = 0;
+                 azimuthIndex < azimuthSegments;
+                 ++azimuthIndex) {
+                const double azimuth0 =
+                    2.0 * pi * azimuthIndex / azimuthSegments;
+                const double azimuth1 =
+                    2.0 * pi * (azimuthIndex + 1) / azimuthSegments;
+                const Vertex p00 = vertex(polar0, azimuth0);
+                const Vertex p10 = vertex(polar1, azimuth0);
+                const Vertex p11 = vertex(polar1, azimuth1);
+                const Vertex p01 = vertex(polar0, azimuth1);
+                result.insert(
+                    result.end(), {p00, p10, p11, p00, p11, p01}
+                );
+            }
+        }
+        if (light.type == FrameLightType::spot) {
+            const Vertex apex{
+                .position = {0.0F, 0.0F, 0.0F},
+                .texCoord = {0.0F, 0.0F},
+            };
+            for (std::size_t azimuthIndex = 0;
+                 azimuthIndex < azimuthSegments;
+                 ++azimuthIndex) {
+                const double azimuth0 =
+                    2.0 * pi * azimuthIndex / azimuthSegments;
+                const double azimuth1 =
+                    2.0 * pi * (azimuthIndex + 1) / azimuthSegments;
+                // Reversed ring order gives the finite cone side an outward
+                // winding; the spherical cap above already winds outward.
+                result.insert(
+                    result.end(),
+                    {apex, vertex(maximumPolar, azimuth1),
+                     vertex(maximumPolar, azimuth0)}
+                );
+            }
+        }
+        return result;
+    }
+
     static void validateMatrix(
         const Matrix& matrix,
         std::string_view description
@@ -3620,6 +4766,293 @@ struct FramePlanExecutor::Impl final {
                 );
             }
         }
+    }
+
+    [[nodiscard]] static PreparedLightUniforms prepareLightUniforms(
+        const ProgramResource& program,
+        const FramePlan& plan
+    ) {
+        const auto count = [](std::size_t value) {
+            return static_cast<std::uint32_t>(value);
+        };
+        PreparedLightUniforms result;
+        result.legacyColorRadius = prepareBuiltinArrayUniform(
+            program, "g_LightsColorRadius",
+            TranslatedMetalShaderPair::ValueType::float4, 4
+        );
+        result.legacyColorPremultiplied = prepareBuiltinArrayUniform(
+            program, "g_LightsColorPremultiplied",
+            TranslatedMetalShaderPair::ValueType::float4, 3
+        );
+        result.legacyPosition = prepareBuiltinArrayUniform(
+            program, "g_LightsPosition",
+            TranslatedMetalShaderPair::ValueType::float3, 4
+        );
+        // The generic/generic2 shader generation predates scene light objects.
+        // All official captures, including non-zero modern light scenarios,
+        // upload this same neutral legacy rig and expose no authored provider.
+        for (auto& value : result.legacyColorRadiusValues) {
+            value = {0.0F, 0.0F, 0.0F, 1.0F};
+        }
+        for (auto& value : result.legacyPositionValues) {
+            value = {0.0F, 100.0F, 0.0F, 0.0F};
+        }
+        result.pointColor = prepareBuiltinArrayUniform(
+            program, "g_LPoint_Color",
+            TranslatedMetalShaderPair::ValueType::float4,
+            count(plan.lightConfiguration.point)
+        );
+        result.pointOrigin = prepareBuiltinArrayUniform(
+            program, "g_LPoint_Origin",
+            TranslatedMetalShaderPair::ValueType::float4,
+            count(plan.lightConfiguration.point)
+        );
+        result.spotColor = prepareBuiltinArrayUniform(
+            program, "g_LSpot_Color",
+            TranslatedMetalShaderPair::ValueType::float4,
+            count(plan.lightConfiguration.spot)
+        );
+        result.spotOrigin = prepareBuiltinArrayUniform(
+            program, "g_LSpot_Origin",
+            TranslatedMetalShaderPair::ValueType::float4,
+            count(plan.lightConfiguration.spot)
+        );
+        result.spotDirection = prepareBuiltinArrayUniform(
+            program, "g_LSpot_Direction",
+            TranslatedMetalShaderPair::ValueType::float4,
+            count(plan.lightConfiguration.spot)
+        );
+        result.spotExponent = prepareBuiltinArrayUniform(
+            program, "g_LSpot_Exponent",
+            TranslatedMetalShaderPair::ValueType::float4,
+            count(plan.lightConfiguration.spot)
+        );
+        result.tubeColor = prepareBuiltinArrayUniform(
+            program, "g_LTube_Color",
+            TranslatedMetalShaderPair::ValueType::float4,
+            count(plan.lightConfiguration.tube)
+        );
+        result.tubeOriginA = prepareBuiltinArrayUniform(
+            program, "g_LTube_OriginA",
+            TranslatedMetalShaderPair::ValueType::float4,
+            count(plan.lightConfiguration.tube)
+        );
+        result.tubeOriginB = prepareBuiltinArrayUniform(
+            program, "g_LTube_OriginB",
+            TranslatedMetalShaderPair::ValueType::float4,
+            count(plan.lightConfiguration.tube)
+        );
+        result.directionalColor = prepareBuiltinArrayUniform(
+            program, "g_LDirectional_Color",
+            TranslatedMetalShaderPair::ValueType::float4,
+            count(plan.lightConfiguration.directional)
+        );
+        result.directionalDirection = prepareBuiltinArrayUniform(
+            program, "g_LDirectional_Direction",
+            TranslatedMetalShaderPair::ValueType::float4,
+            count(plan.lightConfiguration.directional)
+        );
+
+        const ShadowProjectionData shadow = shadowProjectionData(plan);
+        result.shadowProjection = prepareBuiltinArrayUniform(
+            program,
+            "g_LFeature_ShadowProjection",
+            TranslatedMetalShaderPair::ValueType::float4x4,
+            static_cast<std::uint32_t>(shadow.projected.size())
+        );
+        result.shadowProjectionTransform = prepareBuiltinArrayUniform(
+            program,
+            "g_LFeature_ShadowProjectionTransform",
+            TranslatedMetalShaderPair::ValueType::float4,
+            static_cast<std::uint32_t>(shadow.projectedAtlasTransforms.size())
+        );
+        result.shadowPointProjection = prepareBuiltinArrayUniform(
+            program,
+            "g_LFeature_ShadowPointProjection",
+            TranslatedMetalShaderPair::ValueType::float4,
+            static_cast<std::uint32_t>(shadow.pointProjectionInfo.size())
+        );
+        result.shadowPointProjectionTransform = prepareBuiltinArrayUniform(
+            program,
+            "g_LFeature_ShadowPointProjectionTransform",
+            TranslatedMetalShaderPair::ValueType::float4,
+            static_cast<std::uint32_t>(shadow.pointAtlasTransforms.size())
+        );
+        result.shadowProjectionValues = shadow.projected;
+        result.shadowProjectionTransformValues = shadow.projectedAtlasTransforms;
+        result.shadowPointProjectionValues = shadow.pointProjectionInfo;
+        result.shadowPointProjectionTransformValues = shadow.pointAtlasTransforms;
+
+        std::size_t pointIndex = 0;
+        std::size_t spotIndex = 0;
+        std::size_t tubeIndex = 0;
+        std::size_t directionalIndex = 0;
+        constexpr double degreesToRadians =
+            3.14159265358979323846264338327950288 / 180.0;
+        const auto featureRank = [](const FrameLightDescriptor& light) {
+            switch (light.type) {
+                case FrameLightType::point:
+                    return light.castShadow ? 0 : 1;
+                case FrameLightType::spot:
+                    if (light.castShadow && light.useCookie) return 0;
+                    if (light.useCookie) return 1;
+                    if (light.castShadow) return 2;
+                    return 3;
+                case FrameLightType::directional:
+                    return light.castShadow ? 0 : 1;
+                case FrameLightType::tube:
+                    return 0;
+            }
+            std::terminate();
+        };
+        std::vector<const FrameLightDescriptor*> orderedLights;
+        orderedLights.reserve(plan.lights.size());
+        for (const FrameLightDescriptor& light : plan.lights) {
+            orderedLights.push_back(&light);
+        }
+        std::stable_sort(
+            orderedLights.begin(), orderedLights.end(),
+            [&](const FrameLightDescriptor* lhs,
+                const FrameLightDescriptor* rhs) {
+                if (lhs->type != rhs->type) {
+                    return static_cast<int>(lhs->type) <
+                        static_cast<int>(rhs->type);
+                }
+                return featureRank(*lhs) < featureRank(*rhs);
+            }
+        );
+        for (const FrameLightDescriptor* lightPointer : orderedLights) {
+            const FrameLightDescriptor& light = *lightPointer;
+            std::size_t* index = nullptr;
+            std::size_t configured = 0;
+            switch (light.type) {
+                case FrameLightType::point:
+                    index = &pointIndex;
+                    configured = plan.lightConfiguration.point;
+                    break;
+                case FrameLightType::spot:
+                    index = &spotIndex;
+                    configured = plan.lightConfiguration.spot;
+                    break;
+                case FrameLightType::tube:
+                    index = &tubeIndex;
+                    configured = plan.lightConfiguration.tube;
+                    break;
+                case FrameLightType::directional:
+                    index = &directionalIndex;
+                    configured = plan.lightConfiguration.directional;
+                    break;
+            }
+            if (index == nullptr || *index >= configured || *index >= 4) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Frame light descriptor exceeds its configured shader array"
+                );
+            }
+            const std::size_t slot = (*index)++;
+            if (!light.visible) continue;
+            const std::array<float, 4> color{
+                checkedFloat(
+                    light.color.red * light.intensity, "Light red intensity"
+                ),
+                checkedFloat(
+                    light.color.green * light.intensity,
+                    "Light green intensity"
+                ),
+                checkedFloat(
+                    light.color.blue * light.intensity, "Light blue intensity"
+                ),
+                light.type == FrameLightType::directional
+                    ? 1.0F
+                    : checkedFloat(light.radius, "Light radius"),
+            };
+            const std::array<float, 4> origin{
+                checkedFloat(light.worldTransform.origin.x, "Light origin X"),
+                checkedFloat(light.worldTransform.origin.y, "Light origin Y"),
+                checkedFloat(light.worldTransform.origin.z, "Light origin Z"),
+                0.0F,
+            };
+            const Matrix orientation = multiply(
+                rotationZ(checkedFloat(
+                    light.worldTransform.angles.z, "Light Z angle"
+                )),
+                multiply(
+                    rotationY(checkedFloat(
+                        light.worldTransform.angles.y, "Light Y angle"
+                    )),
+                    rotationX(checkedFloat(
+                        light.worldTransform.angles.x, "Light X angle"
+                    ))
+                )
+            );
+            const std::array<float, 3> forward{
+                orientation[0], orientation[1], orientation[2],
+            };
+            switch (light.type) {
+                case FrameLightType::point:
+                    result.pointColorValues[slot] = color;
+                    result.pointOriginValues[slot] = origin;
+                    break;
+                case FrameLightType::spot:
+                    result.spotColorValues[slot] = color;
+                    result.spotOriginValues[slot] = {
+                        origin[0], origin[1], origin[2],
+                        checkedFloat(
+                            std::cos(light.innerCone * degreesToRadians),
+                            "Spot inner cone"
+                        ),
+                    };
+                    result.spotDirectionValues[slot] = {
+                        forward[0], forward[1], forward[2],
+                        checkedFloat(
+                            std::cos(light.outerCone * degreesToRadians),
+                            "Spot outer cone"
+                        ),
+                    };
+                    result.spotExponentValues[slot][0] = checkedFloat(
+                        light.exponent, "Spot exponent"
+                    );
+                    break;
+                case FrameLightType::tube: {
+                    result.tubeColorValues[slot] = color;
+                    result.tubeOriginAValues[slot] = origin;
+                    const std::array<float, 3> control{
+                        checkedFloat(
+                            light.controlPoint.x * light.worldTransform.scale.x,
+                            "Tube control point X"
+                        ),
+                        checkedFloat(
+                            light.controlPoint.y * light.worldTransform.scale.y,
+                            "Tube control point Y"
+                        ),
+                        checkedFloat(
+                            light.controlPoint.z * light.worldTransform.scale.z,
+                            "Tube control point Z"
+                        ),
+                    };
+                    result.tubeOriginBValues[slot] = {
+                        origin[0] + orientation[0] * control[0] +
+                            orientation[4] * control[1] +
+                            orientation[8] * control[2],
+                        origin[1] + orientation[1] * control[0] +
+                            orientation[5] * control[1] +
+                            orientation[9] * control[2],
+                        origin[2] + orientation[2] * control[0] +
+                            orientation[6] * control[1] +
+                            orientation[10] * control[2],
+                        0.0F,
+                    };
+                    break;
+                }
+                case FrameLightType::directional:
+                    result.directionalColorValues[slot] = color;
+                    result.directionalDirectionValues[slot] = {
+                        -forward[0], -forward[1], -forward[2], 0.0F,
+                    };
+                    break;
+            }
+        }
+        return result;
     }
 
     [[nodiscard]] static PreparedCommonUniforms prepareCommonUniforms(
@@ -3662,6 +5095,7 @@ struct FramePlanExecutor::Impl final {
         }
 
         PreparedCommonUniforms result;
+        result.lights = prepareLightUniforms(program, logicalPlan);
         result.textureReductionScale = prepareBuiltinUniform(
             program, "g_TextureReductionScale", TranslatedMetalShaderPair::ValueType::float1
         );
@@ -3670,6 +5104,22 @@ struct FramePlanExecutor::Impl final {
         );
         result.lightSkylightColor = prepareBuiltinUniform(
             program, "g_LightSkylightColor", TranslatedMetalShaderPair::ValueType::float3
+        );
+        result.fogDistanceColor = prepareBuiltinUniform(
+            program, "g_FogDistanceColor",
+            TranslatedMetalShaderPair::ValueType::float3
+        );
+        result.fogDistanceParams = prepareBuiltinUniform(
+            program, "g_FogDistanceParams",
+            TranslatedMetalShaderPair::ValueType::float4
+        );
+        result.fogHeightColor = prepareBuiltinUniform(
+            program, "g_FogHeightColor",
+            TranslatedMetalShaderPair::ValueType::float3
+        );
+        result.fogHeightParams = prepareBuiltinUniform(
+            program, "g_FogHeightParams",
+            TranslatedMetalShaderPair::ValueType::float4
         );
         result.brightness = prepareBuiltinUniform(
             program, "g_Brightness", TranslatedMetalShaderPair::ValueType::float1
@@ -3732,17 +5182,28 @@ struct FramePlanExecutor::Impl final {
         result.effectModel = prepareBuiltinUniform(
             program, "g_EffectModelMatrix", TranslatedMetalShaderPair::ValueType::float4x4
         );
+        result.layerModel = prepareBuiltinUniform(
+            program, "g_LayerModelMatrix",
+            TranslatedMetalShaderPair::ValueType::float4x4
+        );
         result.normalModel = prepareBuiltinUniform(
             program, "g_NormalModelMatrix", TranslatedMetalShaderPair::ValueType::float3x3
         );
         result.viewProjection = prepareBuiltinUniform(
             program, "g_ViewProjectionMatrix", TranslatedMetalShaderPair::ValueType::float4x4
         );
+        result.viewForward = prepareBuiltinUniform(
+            program, "g_ViewForward",
+            TranslatedMetalShaderPair::ValueType::float3
+        );
         result.pointer = prepareBuiltinUniform(
             program, "g_PointerPosition", TranslatedMetalShaderPair::ValueType::float2
         );
         result.pointerLast = prepareBuiltinUniform(
             program, "g_PointerPositionLast", TranslatedMetalShaderPair::ValueType::float2
+        );
+        result.pointerState = prepareBuiltinUniform(
+            program, "g_PointerState", TranslatedMetalShaderPair::ValueType::float4
         );
         result.effectTextureProjection = prepareBuiltinUniform(
             program, "g_EffectTextureProjectionMatrix", TranslatedMetalShaderPair::ValueType::float4x4
@@ -3755,6 +5216,9 @@ struct FramePlanExecutor::Impl final {
         );
         result.texelSizeHalf = prepareBuiltinUniform(
             program, "g_TexelSizeHalf", TranslatedMetalShaderPair::ValueType::float2
+        );
+        result.hdrParams = prepareBuiltinUniform(
+            program, "g_HDRParams", TranslatedMetalShaderPair::ValueType::float2
         );
         result.audioSpectrum16Left = prepareAudioSpectrumUniform(
             program, "g_AudioSpectrum16Left", 16
@@ -3790,6 +5254,48 @@ struct FramePlanExecutor::Impl final {
             checkedFloat(logicalPlan.skylightColor.red, "Skylight color"),
             checkedFloat(logicalPlan.skylightColor.green, "Skylight color"),
             checkedFloat(logicalPlan.skylightColor.blue, "Skylight color"),
+        };
+        result.fogDistanceColorValue = {
+            checkedFloat(logicalPlan.distanceFog.color.red, "Distance fog color"),
+            checkedFloat(logicalPlan.distanceFog.color.green, "Distance fog color"),
+            checkedFloat(logicalPlan.distanceFog.color.blue, "Distance fog color"),
+        };
+        result.fogDistanceParamsValue = {
+            checkedFloat(logicalPlan.distanceFog.start, "Distance fog start"),
+            checkedFloat(
+                logicalPlan.distanceFog.end - logicalPlan.distanceFog.start,
+                "Distance fog range"
+            ),
+            checkedFloat(
+                logicalPlan.distanceFog.startDensity,
+                "Distance fog start density"
+            ),
+            checkedFloat(
+                logicalPlan.distanceFog.endDensity -
+                    logicalPlan.distanceFog.startDensity,
+                "Distance fog density range"
+            ),
+        };
+        result.fogHeightColorValue = {
+            checkedFloat(logicalPlan.heightFog.color.red, "Height fog color"),
+            checkedFloat(logicalPlan.heightFog.color.green, "Height fog color"),
+            checkedFloat(logicalPlan.heightFog.color.blue, "Height fog color"),
+        };
+        result.fogHeightParamsValue = {
+            checkedFloat(logicalPlan.heightFog.start, "Height fog start"),
+            checkedFloat(
+                logicalPlan.heightFog.end - logicalPlan.heightFog.start,
+                "Height fog range"
+            ),
+            checkedFloat(
+                logicalPlan.heightFog.startDensity,
+                "Height fog start density"
+            ),
+            checkedFloat(
+                logicalPlan.heightFog.endDensity -
+                    logicalPlan.heightFog.startDensity,
+                "Height fog density range"
+            ),
         };
         result.brightnessValue = checkedFloat(
             renderable.brightness, "Renderable brightness"
@@ -3848,6 +5354,26 @@ struct FramePlanExecutor::Impl final {
                 "Previous pointer position"
             ),
         };
+        // Wallpaper Engine 2.8.0.42 registers g_PointerState as dynamic
+        // builtin 106. Its stock cursor-ripple/fluid shaders consume only Z
+        // as held-pointer strength; the renderer samples VK_LBUTTON and keeps
+        // current/previous button bits around the draw. The direct Windows
+        // buffer capture established the neutral vec4 but not the other three
+        // channel semantics, so do not invent values for them.
+        result.pointerStateValue = {
+            0.0F,
+            0.0F,
+            inputs.pointerLeftDown ? 1.0F : 0.0F,
+            0.0F,
+        };
+        const Vector3 viewForward = normalized(subtract(
+            logicalPlan.camera.center, logicalPlan.camera.eye
+        ));
+        result.viewForwardValue = {
+            checkedFloat(viewForward.x, "Camera view forward X"),
+            checkedFloat(viewForward.y, "Camera view forward Y"),
+            checkedFloat(viewForward.z, "Camera view forward Z"),
+        };
         result.texelSizeValue = {
             1.0F / static_cast<float>(physicalOutput.width),
             1.0F / static_cast<float>(physicalOutput.height),
@@ -3856,6 +5382,12 @@ struct FramePlanExecutor::Impl final {
             result.texelSizeValue[0] * 0.5F,
             result.texelSizeValue[1] * 0.5F,
         };
+        // Device::Session::framebufferForDrawable accepts only 8-bit UNorm
+        // presentation targets. Wallpaper Engine's captured SDR contract uses
+        // x=1 for the linear-to-sRGB divisor and y=1 for the video clamp scale.
+        // This represents the backend's actual presentation capability; HDR
+        // drawable support must extend both that boundary and this value.
+        result.hdrParamsValue = {1.0F, 1.0F};
         if (inputs.audioSpectrum) {
             result.audioSpectrumValue = *inputs.audioSpectrum;
         }
@@ -3870,15 +5402,109 @@ struct FramePlanExecutor::Impl final {
         const PreparedCommonUniforms& uniforms,
         const Matrix& model,
         const Matrix& viewProjection,
-        const Matrix& modelViewProjection
+        const Matrix& modelViewProjection,
+        const Matrix& effectModel
     ) {
         const Matrix identity4 = identityMatrix();
+        const auto bindLightArray = [&bindings](
+            const PreparedBuiltinArrayUniform& uniform,
+            const auto& values
+        ) {
+            if (uniform.location >= 0) {
+                bindings.bind(
+                    uniform.location,
+                    values.data(),
+                    sizeof(values.front()) * uniform.activeElementCount
+                );
+            }
+        };
+        bindLightArray(
+            uniforms.lights.legacyColorRadius,
+            uniforms.lights.legacyColorRadiusValues
+        );
+        bindLightArray(
+            uniforms.lights.legacyColorPremultiplied,
+            uniforms.lights.legacyColorPremultipliedValues
+        );
+        bindLightArray(
+            uniforms.lights.legacyPosition,
+            uniforms.lights.legacyPositionValues
+        );
+        bindLightArray(
+            uniforms.lights.pointColor, uniforms.lights.pointColorValues
+        );
+        bindLightArray(
+            uniforms.lights.pointOrigin, uniforms.lights.pointOriginValues
+        );
+        bindLightArray(
+            uniforms.lights.spotColor, uniforms.lights.spotColorValues
+        );
+        bindLightArray(
+            uniforms.lights.spotOrigin, uniforms.lights.spotOriginValues
+        );
+        bindLightArray(
+            uniforms.lights.spotDirection,
+            uniforms.lights.spotDirectionValues
+        );
+        bindLightArray(
+            uniforms.lights.spotExponent,
+            uniforms.lights.spotExponentValues
+        );
+        bindLightArray(
+            uniforms.lights.tubeColor, uniforms.lights.tubeColorValues
+        );
+        bindLightArray(
+            uniforms.lights.tubeOriginA, uniforms.lights.tubeOriginAValues
+        );
+        bindLightArray(
+            uniforms.lights.tubeOriginB, uniforms.lights.tubeOriginBValues
+        );
+        bindLightArray(
+            uniforms.lights.directionalColor,
+            uniforms.lights.directionalColorValues
+        );
+        bindLightArray(
+            uniforms.lights.directionalDirection,
+            uniforms.lights.directionalDirectionValues
+        );
+        bindLightArray(
+            uniforms.lights.shadowProjection,
+            uniforms.lights.shadowProjectionValues
+        );
+        bindLightArray(
+            uniforms.lights.shadowProjectionTransform,
+            uniforms.lights.shadowProjectionTransformValues
+        );
+        bindLightArray(
+            uniforms.lights.shadowPointProjection,
+            uniforms.lights.shadowPointProjectionValues
+        );
+        bindLightArray(
+            uniforms.lights.shadowPointProjectionTransform,
+            uniforms.lights.shadowPointProjectionTransformValues
+        );
         if (uniforms.textureReductionScale >= 0) {
             const float value = 1.0F;
             bindings.bind(uniforms.textureReductionScale, value);
         }
         bindVector3(bindings, uniforms.lightAmbientColor, uniforms.ambientColorValue);
         bindVector3(bindings, uniforms.lightSkylightColor, uniforms.skylightColorValue);
+        bindVector3(
+            bindings, uniforms.fogDistanceColor,
+            uniforms.fogDistanceColorValue
+        );
+        bindVector4(
+            bindings, uniforms.fogDistanceParams,
+            uniforms.fogDistanceParamsValue
+        );
+        bindVector3(
+            bindings, uniforms.fogHeightColor,
+            uniforms.fogHeightColorValue
+        );
+        bindVector4(
+            bindings, uniforms.fogHeightParams,
+            uniforms.fogHeightParamsValue
+        );
         if (uniforms.brightness >= 0) {
             bindings.bind(uniforms.brightness, uniforms.brightnessValue);
         }
@@ -3921,17 +5547,25 @@ struct FramePlanExecutor::Impl final {
             uniforms.modelViewProjectionInverseValue
         );
         bindMatrix(bindings, uniforms.model, model);
-        bindMatrix(bindings, uniforms.effectModel, model);
+        bindMatrix(bindings, uniforms.effectModel, effectModel);
+        bindMatrix(bindings, uniforms.layerModel, model);
         bindMatrix3(
             bindings, uniforms.normalModel, identityNormalMatrix()
         );
         bindMatrix(bindings, uniforms.viewProjection, viewProjection);
+        bindVector3(
+            bindings, uniforms.viewForward, uniforms.viewForwardValue
+        );
         bindVector2(bindings, uniforms.pointer, uniforms.pointerValue);
         bindVector2(bindings, uniforms.pointerLast, uniforms.pointerLastValue);
+        bindVector4(
+            bindings, uniforms.pointerState, uniforms.pointerStateValue
+        );
         bindMatrix(bindings, uniforms.effectTextureProjection, identity4);
         bindMatrix(bindings, uniforms.effectTextureProjectionInverse, identity4);
         bindVector2(bindings, uniforms.texelSize, uniforms.texelSizeValue);
         bindVector2(bindings, uniforms.texelSizeHalf, uniforms.texelSizeHalfValue);
+        bindVector2(bindings, uniforms.hdrParams, uniforms.hdrParamsValue);
         const auto bindAudio = [&bindings](
             const PreparedAudioSpectrumUniform& uniform,
             const float* values
@@ -4058,11 +5692,60 @@ struct FramePlanExecutor::Impl final {
         }
     }
 
-    [[nodiscard]] const TextureResource& preparedTexture(
-        const PreparedTextureBinding& binding
+    [[nodiscard]] bool samplesDestination(
+        const PreparedTextureBinding& binding,
+        const FramebufferResource& destination
     ) {
-        if (binding.assetTexture != nullptr) return *binding.assetTexture;
-        return framebuffer(binding.resource).colorTexture;
+        if (binding.sampleDepth || binding.assetTexture != nullptr ||
+            binding.resource.kind != FrameResourceKind::framebuffer) {
+            return false;
+        }
+        return framebuffer(binding.resource).colorTexture.texture.get() ==
+            destination.colorTexture.texture.get();
+    }
+
+    [[nodiscard]] const TextureResource& preparedTexture(
+        const PreparedTextureBinding& binding,
+        const FramebufferResource& destination,
+        bool hasFeedbackSnapshot
+    ) {
+        if (binding.assetTexture != nullptr) {
+            if (binding.sampleDepth) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Depth sampling requires a framebuffer provider"
+                );
+            }
+            if (binding.comparison &&
+                binding.assetTexture->format != PixelFormat::depth32f) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Comparison sampler requires a depth texture provider"
+                );
+            }
+            return *binding.assetTexture;
+        }
+        if (hasFeedbackSnapshot && samplesDestination(binding, destination)) {
+            return feedbackSnapshot.colorTexture;
+        }
+        const FramebufferResource& source = framebuffer(binding.resource);
+        if (binding.sampleDepth) {
+            if (!source.depthSampleTexture) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Back-buffer sampler framebuffer has no sampleable depth attachment"
+                );
+            }
+            return source.depthSampleTexture;
+        }
+        if (!binding.comparison) return source.colorTexture;
+        if (!source.depthSampleTexture) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Comparison sampler framebuffer has no sampleable depth attachment"
+            );
+        }
+        return source.depthSampleTexture;
     }
 
     [[nodiscard]] PreparedDraw prepareDraw(
@@ -4105,30 +5788,107 @@ struct FramePlanExecutor::Impl final {
             plan.camera.eye.y,
             plan.camera.eye.z
         );
-        auto& destination = framebuffer(pass.destination, aliases);
+        static_cast<void>(framebuffer(pass.destination, aliases));
+        const bool puppetGeometry =
+            pass.geometry == FrameGeometryKind::puppetMesh;
+        const bool perspectiveLayer =
+            !plan.camera.orthographic || image.perspective;
+        const bool lightVolumeGeometry =
+            pass.geometry == FrameGeometryKind::lightVolume;
+        const FrameLightDescriptor* volumeLight = nullptr;
+        if (lightVolumeGeometry) {
+            if (!pass.lightIndex || *pass.lightIndex >= plan.lights.size()) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Light-volume render pass has no valid light descriptor"
+                );
+            }
+            volumeLight = &plan.lights[*pass.lightIndex];
+            if (volumeLight->type != FrameLightType::point &&
+                volumeLight->type != FrameLightType::spot) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Light-volume geometry requires a point or spot light"
+                );
+            }
+        }
+        const PuppetSubmesh* puppetSubmesh = puppetGeometry && image.puppetMesh &&
+                pass.puppetSubmeshIndex < image.puppetMesh->submeshes.size()
+            ? &image.puppetMesh->submeshes[pass.puppetSubmeshIndex]
+            : nullptr;
+        const bool morphing = puppetGeometry && image.puppetMesh &&
+            puppetSubmesh != nullptr && puppetSubmesh->morph.has_value();
+        const bool morphingModifiers = morphing && std::ranges::any_of(
+            puppetSubmesh->morph->targets,
+            [](const PuppetMorphTarget& target) {
+                return target.modifier.has_value();
+            }
+        );
+        const bool skinningAlpha = puppetSubmesh != nullptr &&
+            (puppetSubmesh->auxiliaryFlags &
+             puppetSubmeshBonesAlphaFlag) != 0;
+        const std::uint32_t blendMapRows = puppetSubmesh != nullptr &&
+                puppetSubmesh->blendMapRowCount
+            ? *puppetSubmesh->blendMapRowCount
+            : 0U;
         ComboMap effectiveCombos = pass.combos;
+        applyImagePassCombos(effectiveCombos, plan, image, pass);
         if (image.source.kind == FrameResourceKind::assetTexture) {
             applyTexture0FormatCombo(
                 effectiveCombos,
                 ensureAssetTexture(session, image.source).format
             );
         }
+        const std::set<int> linkedTextureSlots = textureBindingSlots(
+            pass.textures,
+            "Frame render pass"
+        );
         ProgramResource& programResource = program(
             session,
             pass.vertexShaderPath,
             pass.fragmentShaderPath,
             effectiveCombos,
+            linkedTextureSlots,
             "Frame render pass"
         );
+        const ProgramResource* shadowSourceProgram = nullptr;
+        if (pass.shadowCaster) {
+            if (pass.shadowSourceVertexShaderPath.empty() ||
+                pass.shadowSourceFragmentShaderPath.empty()) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Shadow caster has no source material shader identity"
+                );
+            }
+            ComboMap sourceCombos = pass.shadowSourceCombos;
+            applyImagePassCombos(sourceCombos, plan, image, pass);
+            if (image.source.kind == FrameResourceKind::assetTexture) {
+                applyTexture0FormatCombo(
+                    sourceCombos,
+                    ensureAssetTexture(session, image.source).format
+                );
+            }
+            shadowSourceProgram = &program(
+                session,
+                pass.shadowSourceVertexShaderPath,
+                pass.shadowSourceFragmentShaderPath,
+                sourceCombos,
+                linkedTextureSlots,
+                "Shadow caster source material"
+            );
+        }
         PreparedDraw result{
             .pass = pass,
             .program = &programResource,
         };
-        const auto selectTexture0 = [&](const FrameResourceRef& resource) {
+        const auto selectAssetTextureAnimation = [&](
+            const FrameResourceRef& resource,
+            int slot
+        ) {
             AssetTextureResource& textureResource = prepareAssetTexture(
                 session, resource, inputs.timeSeconds
             );
-            if (image.textureAnimation &&
+            if (slot == 0 && image.textureAnimation &&
                 image.textureAnimation->assetIdentity == resource.id) {
                 return selectTextureAnimationFrame(
                     textureResource, image.textureAnimation->frame
@@ -4140,15 +5900,17 @@ struct FramePlanExecutor::Impl final {
         };
 
         std::map<int, const ActiveUniform*> activeSamplers;
-        std::set<int> activeResolutionSlots;
+        std::set<int> activeTextureMetadataSlots;
         for (const ActiveUniform& uniform : programResource.uniforms) {
             if (!uniform.sampler) {
-                if (const auto slot = textureResolutionSlot(uniform.name)) {
-                    activeResolutionSlots.emplace(*slot);
+                if (const auto slot =
+                        textureMetadataSlot(uniform.name)) {
+                    activeTextureMetadataSlots.emplace(*slot);
                 }
                 continue;
             }
-            if (!uniform.supportedSampler) {
+            if (uniform.samplerDimension ==
+                TranslatedMetalShaderPair::TextureDimension::unsupported) {
                 throw Error(
                     ErrorCode::resourceValidation,
                     "Active sampler '" + uniform.name +
@@ -4166,26 +5928,18 @@ struct FramePlanExecutor::Impl final {
             activeSamplers.insert_or_assign(*slot, &uniform);
         }
 
-        std::set<int> textureSlots;
-        for (const auto& [slot, binding] : pass.textures) {
-            static_cast<void>(binding);
-            if (slot < 0 || slot >= 32) {
-                throw Error(
-                    ErrorCode::resourceValidation,
-                    "Texture slot is outside the supported range"
-                );
-            }
-            textureSlots.emplace(slot);
-        }
+        std::set<int> textureSlots = linkedTextureSlots;
         for (const auto& [slot, uniform] : activeSamplers) {
             static_cast<void>(uniform);
             textureSlots.emplace(slot);
         }
         textureSlots.insert(
-            activeResolutionSlots.begin(), activeResolutionSlots.end()
+            activeTextureMetadataSlots.begin(),
+            activeTextureMetadataSlots.end()
         );
 
         for (const int slot : textureSlots) {
+            if (morphing && slot == 5) continue;
             const std::string samplerName =
                 "g_Texture" + std::to_string(slot);
             const auto active = activeSamplers.find(slot);
@@ -4213,7 +5967,7 @@ struct FramePlanExecutor::Impl final {
             }
             const bool hasProviderContract =
                 authored != pass.textures.end() || !candidates.empty() ||
-                slot == 0 || activeResolutionSlots.contains(slot);
+                slot == 0 || activeTextureMetadataSlots.contains(slot);
             if (!hasProviderContract) {
                 throw Error(
                     ErrorCode::resourceValidation,
@@ -4240,49 +5994,115 @@ struct FramePlanExecutor::Impl final {
                 );
             }
             const FrameResourceRef& resource = *selected;
-            if (resource.kind == FrameResourceKind::framebuffer &&
-                framebuffer(resource, aliases).colorTexture.texture.get() ==
-                    destination.colorTexture.texture.get()) {
+            const bool comparisonSampler = active != activeSamplers.end() &&
+                active->second->comparisonSampler;
+            const bool sampleDepth = (authored != pass.textures.end() &&
+                authored->second.sampleDepth) ||
+                (comparisonSampler &&
+                 resource.kind == FrameResourceKind::framebuffer);
+            if (sampleDepth &&
+                resource.kind != FrameResourceKind::framebuffer) {
                 throw Error(
                     ErrorCode::resourceValidation,
-                    "Active sampler '" + samplerName +
-                        "' resolves to the render destination '" +
-                        resource.logicalName + "'"
+                    "Depth texture binding selected a non-framebuffer resource"
                 );
             }
-            std::size_t imageIndex = 0;
+            TextureAnimationSelection animation;
             const TextureResource* assetTextureValue = nullptr;
-            if (slot == 0 &&
-                resource.kind == FrameResourceKind::assetTexture) {
-                result.texture0Animation = selectTexture0(resource);
-                imageIndex = result.texture0Animation.imageIndex;
-            }
-            if (resource.kind == FrameResourceKind::assetTexture ||
-                resource.kind == FrameResourceKind::hostTexture) {
+            if (resource.kind == FrameResourceKind::assetTexture) {
+                animation = selectAssetTextureAnimation(resource, slot);
                 assetTextureValue = &texture(
-                    session, resource, imageIndex, inputs.timeSeconds
+                    session, resource, animation.imageIndex,
+                    inputs.timeSeconds
+                );
+            } else if (resource.kind == FrameResourceKind::hostTexture) {
+                assetTextureValue = &texture(
+                    session, resource, 0, inputs.timeSeconds
                 );
             } else {
                 static_cast<void>(framebuffer(resource, aliases));
             }
+            const std::int32_t samplerLocation = prepareBuiltinUniform(
+                programResource,
+                samplerName,
+                TranslatedMetalShaderPair::ValueType::unsupported
+            );
             result.textures.push_back({
                 .slot = slot,
                 .resource = resource,
                 .assetTexture = assetTextureValue,
+                .comparison = samplerLocation >= 0 &&
+                    programResource.uniforms.at(static_cast<std::size_t>(samplerLocation)).comparisonSampler,
+                .sampleDepth = sampleDepth,
                 .resolution = textureResolution(resource, aliases),
-                .samplerLocation = prepareBuiltinUniform(
-                    programResource, samplerName, TranslatedMetalShaderPair::ValueType::unsupported
-                ),
+                .animation = animation,
+                .samplerLocation = samplerLocation,
                 .resolutionLocation = prepareBuiltinUniform(
                     programResource, samplerName + "Resolution", TranslatedMetalShaderPair::ValueType::float4
                 ),
+                .texelLocation = prepareBuiltinUniform(
+                    programResource, samplerName + "Texel",
+                    TranslatedMetalShaderPair::ValueType::float4
+                ),
+                .mipmapInfoLocation = prepareBuiltinUniform(
+                    programResource, samplerName + "MipMapInfo",
+                    TranslatedMetalShaderPair::ValueType::float1
+                ),
+                .rotationLocation = prepareBuiltinUniform(
+                    programResource, samplerName + "Rotation",
+                    TranslatedMetalShaderPair::ValueType::float4
+                ),
+                .translationLocation = prepareBuiltinUniform(
+                    programResource, samplerName + "Translation",
+                    TranslatedMetalShaderPair::ValueType::float2
+                ),
             });
         }
-        result.uniforms.texture0Translation = prepareBuiltinUniform(
-            programResource, "g_Texture0Translation", TranslatedMetalShaderPair::ValueType::float2
+        const ShadowProjectionData shadow = shadowProjectionData(plan);
+        if (pass.matrixOverrides.viewportViewProjections.size() > 6) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Frame pass provides more than six viewport view-projection matrices"
+            );
+        }
+        const bool passViewportMatrices =
+            !pass.matrixOverrides.viewportViewProjections.empty();
+        result.uniforms.viewportViewProjectionMatrices =
+            prepareBuiltinArrayUniform(
+                programResource,
+                "g_ViewportViewProjectionMatrices",
+                TranslatedMetalShaderPair::ValueType::float4x4,
+                passViewportMatrices || shadow.hasCasterViewProjections
+                    ? 6U
+                    : 0U
+            );
+        if (!passViewportMatrices && shadow.hasCasterViewProjections) {
+            result.viewportViewProjectionMatrices =
+                shadow.firstCasterViewProjections;
+        }
+        // Render variables are pass-local. Keep each official name explicit
+        // here so the ABI audit can distinguish typed preparation from a
+        // name-only registry entry; draw() binds a value only when the pass
+        // carries the matching payload.
+        result.uniforms.renderVariables[0] = prepareBuiltinUniform(
+            programResource, "g_RenderVar0",
+            TranslatedMetalShaderPair::ValueType::float4
         );
-        result.uniforms.texture0Rotation = prepareBuiltinUniform(
-            programResource, "g_Texture0Rotation", TranslatedMetalShaderPair::ValueType::float4
+        result.uniforms.renderVariables[1] = prepareBuiltinUniform(
+            programResource, "g_RenderVar1",
+            TranslatedMetalShaderPair::ValueType::float4
+        );
+        result.uniforms.renderVariables[2] = prepareBuiltinUniform(
+            programResource, "g_RenderVar2",
+            TranslatedMetalShaderPair::ValueType::float4
+        );
+        result.uniforms.renderVariables[3] = prepareBuiltinUniform(
+            programResource, "g_RenderVar3",
+            TranslatedMetalShaderPair::ValueType::float4
+        );
+        result.uniforms.renderVariables[4] = prepareBuiltinUniform(
+            programResource, "g_RenderVar4",
+            TranslatedMetalShaderPair::ValueType::float4
         );
         result.uniforms.alternateModel = prepareBuiltinUniform(
             programResource, "g_AltModelMatrix", TranslatedMetalShaderPair::ValueType::float4x4
@@ -4298,6 +6118,87 @@ struct FramePlanExecutor::Impl final {
             programResource, "g_EyePosition",
             TranslatedMetalShaderPair::ValueType::float3
         );
+        result.uniforms.bones = prepareBuiltinArrayUniform(
+            programResource,
+            "g_Bones",
+            TranslatedMetalShaderPair::ValueType::float4x3,
+            puppetGeometry && image.puppetMesh
+                ? static_cast<std::uint32_t>(image.puppetMesh->bones.size())
+                : 0
+        );
+        result.uniforms.bonesAlpha = prepareBuiltinArrayUniform(
+            programResource,
+            "g_BonesAlpha",
+            TranslatedMetalShaderPair::ValueType::float1,
+            skinningAlpha && image.puppetMesh
+                ? static_cast<std::uint32_t>(image.puppetMesh->bones.size())
+                : 0U
+        );
+        result.uniforms.blendMap = prepareBuiltinArrayUniform(
+            programResource,
+            "g_BlendMap",
+            TranslatedMetalShaderPair::ValueType::float4,
+            blendMapRows
+        );
+        result.uniforms.morphOffsets = prepareBuiltinArrayUniform(
+            programResource,
+            "g_MorphOffsets",
+            TranslatedMetalShaderPair::ValueType::uint32,
+            morphing ? 12 : 0
+        );
+        result.uniforms.morphWeights = prepareBuiltinArrayUniform(
+            programResource,
+            "g_MorphWeights",
+            TranslatedMetalShaderPair::ValueType::float1,
+            morphing ? 12 : 0
+        );
+        result.uniforms.morphBoneTransforms = prepareBuiltinArrayUniform(
+            programResource,
+            "g_MorphBoneTransform",
+            TranslatedMetalShaderPair::ValueType::float4x3,
+            morphingModifiers
+                ? static_cast<std::uint32_t>(puppetMaximumMorphTargets)
+                : 0
+        );
+        result.uniforms.morphBoneRules = prepareBuiltinArrayUniform(
+            programResource,
+            "g_MorphBoneRules",
+            TranslatedMetalShaderPair::ValueType::float3,
+            morphingModifiers
+                ? static_cast<std::uint32_t>(puppetMaximumMorphTargets)
+                : 0
+        );
+        result.uniforms.morphTexture = prepareBuiltinUniform(
+            programResource,
+            "g_Texture5",
+            TranslatedMetalShaderPair::ValueType::unsupported
+        );
+        result.uniforms.morphTextureResolution = prepareBuiltinUniform(
+            programResource,
+            "g_Texture5Resolution",
+            TranslatedMetalShaderPair::ValueType::float4
+        );
+        result.uniforms.morphTextureTexel = prepareBuiltinUniform(
+            programResource,
+            "g_Texture5Texel",
+            TranslatedMetalShaderPair::ValueType::float4
+        );
+        result.uniforms.morphTextureMipmapInfo = prepareBuiltinUniform(
+            programResource,
+            "g_Texture5MipMapInfo",
+            TranslatedMetalShaderPair::ValueType::float1
+        );
+        result.uniforms.morphTextureRotation = prepareBuiltinUniform(
+            programResource,
+            "g_Texture5Rotation",
+            TranslatedMetalShaderPair::ValueType::float4
+        );
+        result.uniforms.morphTextureTranslation = prepareBuiltinUniform(
+            programResource,
+            "g_Texture5Translation",
+            TranslatedMetalShaderPair::ValueType::float2
+        );
+        result.gpuPuppetSkinning = result.uniforms.bones.location >= 0;
         const auto identity = identityMatrix();
         const float imageWidth = checkedFloat(image.size.x, "Image width");
         const float imageHeight = checkedFloat(image.size.y, "Image height");
@@ -4311,8 +6212,6 @@ struct FramePlanExecutor::Impl final {
         float right = 1.0F;
         float bottom = -1.0F;
         float top = 1.0F;
-        const bool puppetGeometry =
-            pass.geometry == FrameGeometryKind::puppetMesh;
         const bool puppetSceneSpace = puppetGeometry &&
             pass.destination.kind == plan.output.kind &&
             pass.destination.id == plan.output.id;
@@ -4322,125 +6221,167 @@ struct FramePlanExecutor::Impl final {
             right = imageWidth;
             bottom = 0.0F;
             top = imageHeight;
-            result.modelViewProjection = localProjection;
+            result.modelViewProjection =
+                puppetGeometry && result.gpuPuppetSkinning
+                    ? multiply(
+                          localProjection,
+                          multiply(
+                              translation(
+                                  imageWidth * 0.5F,
+                                  imageHeight * 0.5F,
+                                  0.0F
+                              ),
+                              scaling(1.0F, -1.0F, 1.0F)
+                          )
+                      )
+                    : localProjection;
         } else if (pass.geometry == FrameGeometryKind::imageScene ||
                    pass.geometry == FrameGeometryKind::passthroughCapture ||
                    puppetSceneSpace) {
             const auto& transform = image.worldTransform;
-            // Wallpaper Engine's authored Y grows upward from the scene's
-            // bottom edge. Convert it once for the vertically flipped
-            // offscreen scene; presentation restores the visible orientation.
-            // Alignment and scale remain baked into geometry because shaders
-            // may inspect each common matrix separately.
-            const double scaledWidth = image.size.x * transform.scale.x;
-            const double scaledHeight = image.size.y * transform.scale.y;
-            double centerX =
-                transform.origin.x -
-                    static_cast<double>(plan.width) * 0.5;
-            double centerY = centeredWallpaperY(
-                transform.origin.y, plan.height
+            const ImageSceneGeometry sceneGeometry = imageSceneGeometry(
+                plan, image, frameParallax
             );
-            if (image.horizontalAlignment.find("left") != std::string::npos) {
-                centerX += scaledWidth * 0.5;
-            } else if (
-                image.horizontalAlignment.find("right") != std::string::npos
-            ) {
-                centerX -= scaledWidth * 0.5;
-            }
-            if (image.horizontalAlignment.find("top") != std::string::npos) {
-                centerY += scaledHeight * 0.5;
-            } else if (
-                image.horizontalAlignment.find("bottom") != std::string::npos
-            ) {
-                centerY -= scaledHeight * 0.5;
-            }
-            left = checkedFloat(
-                centerX - scaledWidth * 0.5, "Image scene left edge"
-            );
-            right = checkedFloat(
-                centerX + scaledWidth * 0.5, "Image scene right edge"
-            );
-            bottom = checkedFloat(
-                centerY - scaledHeight * 0.5, "Image scene bottom edge"
-            );
-            top = checkedFloat(
-                centerY + scaledHeight * 0.5, "Image scene top edge"
-            );
-            const float pivotX = checkedFloat(centerX, "Image rotation pivot");
-            const float pivotY = checkedFloat(centerY, "Image rotation pivot");
-            const float angle = checkedFloat(
-                transform.angles.z, "Image Z angle"
-            );
-            Matrix screenTransform = multiply(
-                translation(pivotX, pivotY, 0.0F),
-                multiply(
-                    rotationZ(-angle),
-                    translation(-pivotX, -pivotY, 0.0F)
-                )
-            );
-            if (plan.parallax.enabled) {
-                const auto depth = numericComponents(
-                    image.parallaxDepth.value,
-                    2,
-                    "Image parallax depth"
-                );
-                const FrameVector2 parallaxOffset = sceneParallaxOffset(
-                    plan.width,
-                    {
-                        .x = static_cast<double>(depth[0]),
-                        .y = static_cast<double>(depth[1]),
-                    },
-                    frameParallax,
-                    "image"
-                );
-                // Linux post-multiplies this translation into the rotated
-                // screen MVP. This order matters when the image is rotated.
-                screenTransform = multiply(
-                    screenTransform,
-                    translation(
-                        checkedFloat(parallaxOffset.x, "Image parallax X"),
-                        checkedFloat(parallaxOffset.y, "Image parallax Y"),
-                        0.0F
-                    )
-                );
-            }
-            if (!camera.orthographicViewProjection) {
-                throw Error(
-                    ErrorCode::internalFailure,
-                    "Scene orthographic camera was not prepared"
-                );
+            left = sceneGeometry.left;
+            right = sceneGeometry.right;
+            bottom = sceneGeometry.bottom;
+            top = sceneGeometry.top;
+            const Matrix& screenTransform = sceneGeometry.sceneTransform;
+            const Matrix* sceneViewProjection = nullptr;
+            if (perspectiveLayer) {
+                if (!camera.perspectiveView) {
+                    throw Error(
+                        ErrorCode::internalFailure,
+                        "Scene perspective camera was not prepared"
+                    );
+                }
+                sceneViewProjection = &camera.perspectiveView->viewProjection;
+                result.viewProjection = *sceneViewProjection;
+                result.eyePosition = camera.perspectiveView->eyePosition;
+            } else {
+                if (!camera.orthographicViewProjection) {
+                    throw Error(
+                        ErrorCode::internalFailure,
+                        "Scene orthographic camera was not prepared"
+                    );
+                }
+                sceneViewProjection = &*camera.orthographicViewProjection;
             }
             if (puppetSceneSpace) {
                 // MDLV positions are image-local offsets around the mesh
                 // centre. Map those local coordinates through the authored
                 // image transform before applying the scene camera.
-                const Matrix localToScene = multiply(
-                    translation(pivotX, pivotY, 0.0F),
-                    multiply(
-                        scaling(
-                            checkedFloat(transform.scale.x, "Image scale X"),
-                            checkedFloat(transform.scale.y, "Image scale Y"),
-                            checkedFloat(transform.scale.z, "Image scale Z")
-                        ),
-                        translation(
-                            -imageWidth * 0.5F,
-                            -imageHeight * 0.5F,
-                            0.0F
-                        )
-                    )
+                const Matrix imageScale = scaling(
+                    checkedFloat(transform.scale.x, "Image scale X"),
+                    checkedFloat(
+                        result.gpuPuppetSkinning
+                            ? -transform.scale.y
+                            : transform.scale.y,
+                        "Image scale Y"
+                    ),
+                    checkedFloat(transform.scale.z, "Image scale Z")
+                );
+                const Matrix localToScene = result.gpuPuppetSkinning
+                    ? multiply(
+                          translation(
+                              (left + right) * 0.5F,
+                              (bottom + top) * 0.5F,
+                              0.0F
+                          ),
+                          imageScale
+                      )
+                    : multiply(
+                          translation(
+                              (left + right) * 0.5F,
+                              (bottom + top) * 0.5F,
+                              0.0F
+                          ),
+                          multiply(
+                              imageScale,
+                              translation(
+                                  -imageWidth * 0.5F,
+                                  -imageHeight * 0.5F,
+                                  0.0F
+                              )
+                          )
                 );
                 result.modelViewProjection = multiply(
-                    *camera.orthographicViewProjection,
+                    *sceneViewProjection,
                     multiply(screenTransform, localToScene)
                 );
             } else {
                 result.modelViewProjection = multiply(
-                    *camera.orthographicViewProjection,
+                    *sceneViewProjection,
                     screenTransform
                 );
             }
         } else {
             result.modelViewProjection = identity;
+        }
+        const auto preparedMatrixOverride = [](const auto& source,
+                                               std::string_view name)
+            -> std::optional<Matrix> {
+            if (!source) return std::nullopt;
+            Matrix result{};
+            for (std::size_t index = 0; index < result.size(); ++index) {
+                result[index] = checkedFloat(source->at(index), name);
+            }
+            validateMatrix(result, name);
+            return result;
+        };
+        if (passViewportMatrices) {
+            const auto& matrices =
+                pass.matrixOverrides.viewportViewProjections;
+            const auto first = preparedMatrixOverride(
+                std::optional<std::array<double, 16>>(matrices.front()),
+                "Frame pass viewport view-projection matrix"
+            );
+            result.viewportViewProjectionMatrices.fill(*first);
+            for (std::size_t index = 0; index < matrices.size(); ++index) {
+                result.viewportViewProjectionMatrices[index] =
+                    *preparedMatrixOverride(
+                        std::optional<std::array<double, 16>>(matrices[index]),
+                        "Frame pass viewport view-projection matrix"
+                    );
+            }
+        }
+        if (const auto value = preparedMatrixOverride(
+                pass.matrixOverrides.model, "Frame pass model matrix"
+            )) {
+            result.model = *value;
+        }
+        if (const auto value = preparedMatrixOverride(
+                pass.matrixOverrides.viewProjection,
+                "Frame pass view-projection matrix"
+            )) {
+            result.viewProjection = *value;
+        }
+        if (pass.matrixOverrides.model ||
+            pass.matrixOverrides.viewProjection) {
+            result.modelViewProjection = multiply(
+                result.viewProjection, result.model
+            );
+        }
+        result.effectModel = result.model;
+        result.alternateModel = result.model;
+        result.alternateViewProjection = result.viewProjection;
+        if (const auto value = preparedMatrixOverride(
+                pass.matrixOverrides.effectModel,
+                "Frame pass effect-model matrix"
+            )) {
+            result.effectModel = *value;
+        }
+        if (const auto value = preparedMatrixOverride(
+                pass.matrixOverrides.alternateModel,
+                "Frame pass alternate-model matrix"
+            )) {
+            result.alternateModel = *value;
+        }
+        if (const auto value = preparedMatrixOverride(
+                pass.matrixOverrides.alternateViewProjection,
+                "Frame pass alternate view-projection matrix"
+            )) {
+            result.alternateViewProjection = *value;
         }
         validateMatrix(result.model, "Image model matrix");
         validateMatrix(result.viewProjection, "Image view-projection matrix");
@@ -4472,11 +6413,33 @@ struct FramePlanExecutor::Impl final {
                 .color = {color[0], color[1], color[2], color[3]},
             }
         );
+        const auto shadowSourceDefault = [&] (
+            std::string_view materialKey
+        ) -> const ShaderParameterDefault* {
+            if (shadowSourceProgram == nullptr) return nullptr;
+            for (const auto& source : shadowSourceProgram->parameters) {
+                if (!source.material || *source.material != materialKey ||
+                    isSamplerParameter(source) || !source.defaultValue) {
+                    continue;
+                }
+                return &*source.defaultValue;
+            }
+            return nullptr;
+        };
         for (const auto& metadata : programResource.parameters) {
             if (!metadata.material || isSamplerParameter(metadata)) continue;
             if (const auto value = pass.constants.find(*metadata.material); value != pass.constants.end()) {
                 if (auto uniform = prepareRuntimeUniform(
                         programResource, metadata.name, value->second.value
+                    )) {
+                    result.materialUniforms.push_back(*uniform);
+                }
+            } else if (const auto* sourceDefault =
+                           shadowSourceDefault(*metadata.material)) {
+                if (auto uniform = prepareRuntimeUniform(
+                        programResource,
+                        metadata.name,
+                        metadataDefault(*sourceDefault)
                     )) {
                     result.materialUniforms.push_back(*uniform);
                 }
@@ -4512,8 +6475,16 @@ struct FramePlanExecutor::Impl final {
                 );
             }
             const PuppetMesh& mesh = *image.puppetMesh;
-            if (mesh.vertices.empty() || mesh.indices.empty() ||
-                mesh.indices.size() > static_cast<std::size_t>(
+            if (pass.puppetSubmeshIndex >= mesh.submeshes.size()) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Puppet render pass references an unknown submesh"
+                );
+            }
+            const PuppetSubmesh& submesh =
+                mesh.submeshes[pass.puppetSubmeshIndex];
+            if (submesh.vertices.empty() || submesh.indices.empty() ||
+                submesh.indices.size() > static_cast<std::size_t>(
                     std::numeric_limits<std::uint32_t>::max()
                 )) {
                 throw Error(
@@ -4532,58 +6503,294 @@ struct FramePlanExecutor::Impl final {
                     .additive = layer.additive,
                 });
             }
-            const std::vector<std::array<float, 3>> puppetPositions =
-                evaluatePuppetPositions(mesh, animationLayers);
-            if (puppetPositions.size() != mesh.vertices.size()) {
-                throw Error(
-                    ErrorCode::resourceValidation,
-                    "Puppet animation produced a vertex-count mismatch"
+            if (blendMapRows != 0) {
+                const std::size_t blendMapScalarCount = blendMapRows * 4U;
+                if (std::ranges::any_of(
+                        mesh.animations,
+                        [blendMapScalarCount](const PuppetAnimation& animation) {
+                            return animation.blendMapTracks.size() >
+                                blendMapScalarCount;
+                        })) {
+                    throw Error(
+                        ErrorCode::resourceValidation,
+                        "Puppet BlendMap animation exceeds the submesh row capacity"
+                    );
+                }
+                result.puppetBlendMap = evaluatePuppetBlendMap(
+                    mesh, animationLayers
                 );
             }
-            result.puppetVertices.reserve(mesh.vertices.size());
+            if (skinningAlpha) {
+                result.puppetBonesAlpha = evaluatePuppetBonesAlpha(
+                    mesh, animationLayers
+                );
+                if (result.puppetBonesAlpha.size() != mesh.bones.size()) {
+                    throw Error(
+                        ErrorCode::resourceValidation,
+                        "Puppet BonesAlpha evaluation produced a bone-count mismatch"
+                    );
+                }
+            }
+            const PuppetPoseState pose = evaluatePuppetPose(
+                mesh, animationLayers
+            );
+            const std::vector<PuppetSkinMatrix>& skinMatrices =
+                pose.skinMatrices;
+            if (skinMatrices.size() != mesh.bones.size()) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Puppet animation produced a bone-count mismatch"
+                );
+            }
+            result.puppetMorphState = evaluatePuppetMorphState(
+                mesh, pass.puppetSubmeshIndex, animationLayers
+            );
+            result.puppetMorphModifierState =
+                evaluatePuppetMorphModifierState(
+                    mesh, pass.puppetSubmeshIndex, pose
+                );
+            if (result.puppetMorphModifierState) {
+                for (std::size_t targetIndex = 0;
+                     targetIndex < puppetMaximumMorphTargets;
+                     ++targetIndex) {
+                    const PuppetSkinMatrix& transform =
+                        result.puppetMorphModifierState->transforms[targetIndex];
+                    result.puppetMorphBoneTransforms[targetIndex] = {
+                        transform[0], transform[1], transform[2], 0.0F,
+                        transform[3], transform[4], transform[5], 0.0F,
+                        transform[6], transform[7], transform[8], 0.0F,
+                        transform[9], transform[10], transform[11], 0.0F,
+                    };
+                    const std::array<float, 3>& rule =
+                        result.puppetMorphModifierState->rules[targetIndex];
+                    result.puppetMorphBoneRules[targetIndex] = {
+                        rule[0], rule[1], rule[2], 0.0F,
+                    };
+                }
+            }
+            if (result.puppetMorphState) {
+                TextureResource& morphTexture = ensurePuppetMorphTexture(
+                    session, mesh, result.puppetMorphState->submeshIndex
+                );
+                result.puppetMorphTexture = &morphTexture;
+                result.puppetMorphTextureResolution = {
+                    static_cast<float>(morphTexture.width),
+                    static_cast<float>(morphTexture.height),
+                    static_cast<float>(morphTexture.width),
+                    static_cast<float>(morphTexture.height),
+                };
+            }
+            if (result.puppetMorphState && !mesh.bones.empty() &&
+                !result.gpuPuppetSkinning) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Morphing a skinned Puppet requires the active g_Bones provider"
+                );
+            }
+            std::vector<std::array<float, 3>> puppetPositions;
+            if (result.gpuPuppetSkinning) {
+                if (result.uniforms.bones.activeElementCount !=
+                    skinMatrices.size()) {
+                    throw Error(
+                        ErrorCode::resourceValidation,
+                        "Active g_Bones array length does not match the Puppet skeleton"
+                    );
+                }
+                result.puppetBoneMatrices.reserve(skinMatrices.size());
+                for (const PuppetSkinMatrix& matrix : skinMatrices) {
+                    result.puppetBoneMatrices.push_back({
+                        matrix[0], matrix[1], matrix[2], 0.0F,
+                        matrix[3], matrix[4], matrix[5], 0.0F,
+                        matrix[6], matrix[7], matrix[8], 0.0F,
+                        matrix[9], matrix[10], matrix[11], 0.0F,
+                    });
+                }
+            } else {
+                puppetPositions = applyPuppetSkinMatrices(
+                    mesh, pass.puppetSubmeshIndex, skinMatrices
+                );
+                if (puppetPositions.size() != submesh.vertices.size()) {
+                    throw Error(
+                        ErrorCode::resourceValidation,
+                        "Puppet animation produced a vertex-count mismatch"
+                    );
+                }
+            }
+            result.puppetVertices.reserve(submesh.vertices.size());
             for (std::size_t vertexIndex = 0;
-                 vertexIndex < mesh.vertices.size();
+                 vertexIndex < submesh.vertices.size();
                  ++vertexIndex) {
-                const PuppetVertex& vertex = mesh.vertices[vertexIndex];
-                const auto& position = puppetPositions[vertexIndex];
-                const float localX = imageWidth * 0.5F + position[0];
-                const float localY = imageHeight * 0.5F - position[1];
-                if (!std::isfinite(localX) || !std::isfinite(localY) ||
-                    !std::isfinite(position[2])) {
+                const PuppetVertex& vertex = submesh.vertices[vertexIndex];
+                const std::array<float, 3> position =
+                    result.gpuPuppetSkinning
+                        ? std::array<float, 3>{
+                              vertex.position[0],
+                              vertex.position[1],
+                              vertex.position[2],
+                          }
+                        : puppetPositions[vertexIndex];
+                const std::array<float, 3> drawPosition =
+                    result.gpuPuppetSkinning
+                        ? position
+                        : std::array<float, 3>{
+                              imageWidth * 0.5F + position[0],
+                              imageHeight * 0.5F - position[1],
+                              position[2],
+                          };
+                if (!std::ranges::all_of(drawPosition, [](float value) {
+                        return std::isfinite(value);
+                    })) {
                     throw Error(
                         ErrorCode::resourceValidation,
                         "Puppet mesh position is non-finite after image-size conversion"
                     );
                 }
                 result.puppetVertices.push_back({
-                    .position = {localX, localY, position[2]},
-                    .texCoord = {vertex.texCoord[0], vertex.texCoord[1]},
+                    .position = {
+                        drawPosition[0], drawPosition[1], drawPosition[2],
+                        vertex.morphMapIndex,
+                    },
+                    .normal = {
+                        vertex.normal[0], vertex.normal[1], vertex.normal[2],
+                    },
+                    .tangent = {
+                        vertex.tangent[0], vertex.tangent[1],
+                        vertex.tangent[2], vertex.tangent[3],
+                    },
+                    .blendIndices = {
+                        vertex.boneIndices[0], vertex.boneIndices[1],
+                        vertex.boneIndices[2], vertex.boneIndices[3],
+                    },
+                    .blendWeights = {
+                        vertex.boneWeights[0], vertex.boneWeights[1],
+                        vertex.boneWeights[2], vertex.boneWeights[3],
+                    },
+                    .texCoord = {
+                        vertex.texCoord[0], vertex.texCoord[1],
+                        vertex.texCoord[2], vertex.texCoord[3],
+                    },
                 });
             }
-            result.puppetIndices = mesh.indices;
+            result.puppetIndices = submesh.indices;
+        } else if (lightVolumeGeometry) {
+            result.vertices = lightVolumeVertices(*volumeLight);
         } else {
-            result.vertices = {{
+            result.vertices = {
                 {{left, bottom, 0}, {0, 0}},
                 {{right, bottom, 0}, {uMax, 0}},
                 {{right, top, 0}, {uMax, vMax}},
                 {{left, bottom, 0}, {0, 0}},
                 {{right, top, 0}, {uMax, vMax}},
                 {{left, top, 0}, {0, vMax}},
-            }};
+            };
         }
-        result.positionLocation = attributeLocation(
-            programResource, "a_Position"
+        const auto* position = activeAttribute(programResource, "a_Position");
+        const auto* positionVec4 = activeAttribute(
+            programResource, "a_PositionVec4"
         );
-        result.texCoordLocation = attributeLocation(
-            programResource, "a_TexCoord"
-        );
-        if (result.positionLocation >= 0 &&
-            result.positionLocation == result.texCoordLocation) {
+        if (position != nullptr && positionVec4 != nullptr) {
             throw Error(
                 ErrorCode::resourceValidation,
-                "Image position and texture-coordinate attributes share a Metal location"
+                "Image shader activates both a_Position and a_PositionVec4"
             );
         }
+        const auto* selectedPosition = positionVec4 != nullptr
+            ? positionVec4
+            : position;
+        if (positionVec4 != nullptr && (!puppetGeometry || !morphing)) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Active a_PositionVec4 requires morphing Puppet geometry"
+            );
+        }
+        if (selectedPosition != nullptr &&
+            selectedPosition->componentCount != 3 &&
+            selectedPosition->componentCount != 4) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Image position attribute must contain three or four components"
+            );
+        }
+        if (selectedPosition != nullptr &&
+            selectedPosition->componentCount == 4 && !puppetGeometry) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Four-component image position requires Puppet geometry"
+            );
+        }
+        result.positionLocation = selectedPosition == nullptr
+            ? -1
+            : static_cast<std::int32_t>(selectedPosition->location);
+        result.positionIsFloat4 = selectedPosition != nullptr &&
+            selectedPosition->componentCount == 4;
+        const auto* texCoord = activeAttribute(programResource, "a_TexCoord");
+        const auto* texCoordVec4 = activeAttribute(
+            programResource, "a_TexCoordVec4"
+        );
+        if (texCoord != nullptr && texCoordVec4 != nullptr) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Image shader activates both a_TexCoord and a_TexCoordVec4"
+            );
+        }
+        const auto* selectedTexCoord = texCoordVec4 != nullptr
+            ? texCoordVec4
+            : texCoord;
+        if (texCoordVec4 != nullptr && !puppetGeometry) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Four-component image texture coordinates require Puppet geometry"
+            );
+        }
+        if (selectedTexCoord != nullptr &&
+            selectedTexCoord->componentCount != 2 &&
+            selectedTexCoord->componentCount != 4) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Image texture-coordinate attribute must contain two or four components"
+            );
+        }
+        result.texCoordLocation = selectedTexCoord == nullptr
+            ? -1
+            : static_cast<std::int32_t>(selectedTexCoord->location);
+        result.texCoordIsFloat4 = selectedTexCoord != nullptr &&
+            selectedTexCoord->componentCount == 4;
+        result.normalLocation = attributeLocation(programResource, "a_Normal");
+        result.tangentLocation = attributeLocation(
+            programResource, "a_Tangent4"
+        );
+        result.blendIndicesLocation = attributeLocation(
+            programResource, "a_BlendIndices"
+        );
+        result.blendWeightsLocation = attributeLocation(
+            programResource, "a_BlendWeights"
+        );
+        if (result.gpuPuppetSkinning &&
+            (result.blendIndicesLocation < 0 ||
+             result.blendWeightsLocation < 0)) {
+            throw Error(
+                ErrorCode::resourceValidation,
+                "Active g_Bones requires Puppet blend-index and blend-weight attributes"
+            );
+        }
+        std::set<std::int32_t> activeAttributeLocations;
+        for (const std::int32_t location : {
+                 result.positionLocation,
+                 result.texCoordLocation,
+                 result.normalLocation,
+                 result.tangentLocation,
+                 result.blendIndicesLocation,
+                 result.blendWeightsLocation,
+             }) {
+            if (location >= 0 &&
+                !activeAttributeLocations.emplace(location).second) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Image shader attributes share a Metal location"
+                );
+            }
+        }
+
         return result;
     }
 
@@ -4602,30 +6809,164 @@ struct FramePlanExecutor::Impl final {
         }
         DrawBindings bindings(*prepared.program);
 
+        const bool needsFeedbackSnapshot = std::ranges::any_of(
+            prepared.textures,
+            [&](const PreparedTextureBinding& binding) {
+                return samplesDestination(binding, destination);
+            }
+        );
+        if (needsFeedbackSnapshot) {
+            snapshotFeedbackInput(session, destination);
+        }
+
         for (const PreparedTextureBinding& binding : prepared.textures) {
+            const TextureResource& textureValue = preparedTexture(
+                binding, destination, needsFeedbackSnapshot
+            );
             if (binding.samplerLocation >= 0) {
                 bindings.bindTexture(
                     binding.samplerLocation,
-                    preparedTexture(binding)
+                    textureValue
                 );
             }
             if (binding.resolutionLocation >= 0) {
                 bindings.bind(binding.resolutionLocation, binding.resolution);
             }
-        }
-        if (prepared.uniforms.texture0Translation >= 0) {
-            bindings.bind(
-                prepared.uniforms.texture0Translation,
-                prepared.texture0Animation.translation
+            if (binding.texelLocation >= 0) {
+                bindings.bind(
+                    binding.texelLocation, textureTexel(textureValue)
+                );
+            }
+            if (binding.mipmapInfoLocation >= 0) {
+                bindings.bind(
+                    binding.mipmapInfoLocation,
+                    textureMipmapInfo(textureValue)
+                );
+            }
+            bindVector4(
+                bindings, binding.rotationLocation,
+                binding.animation.rotation
+            );
+            bindVector2(
+                bindings, binding.translationLocation,
+                binding.animation.translation
             );
         }
-        if (prepared.uniforms.texture0Rotation >= 0) {
-            bindings.bind(
-                prepared.uniforms.texture0Rotation,
-                prepared.texture0Animation.rotation
+        if (prepared.uniforms.morphTexture >= 0) {
+            if (prepared.puppetMorphTexture == nullptr) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active g_Texture5 has no prepared Puppet morph texture"
+                );
+            }
+            bindings.bindTexture(
+                prepared.uniforms.morphTexture,
+                *prepared.puppetMorphTexture
             );
         }
-
+        bindVector4(
+            bindings,
+            prepared.uniforms.morphTextureResolution,
+            prepared.puppetMorphTextureResolution
+        );
+        if (prepared.uniforms.morphTextureTexel >= 0) {
+            if (prepared.puppetMorphTexture == nullptr) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active g_Texture5Texel has no prepared Puppet morph texture"
+                );
+            }
+            bindings.bind(
+                prepared.uniforms.morphTextureTexel,
+                textureTexel(*prepared.puppetMorphTexture)
+            );
+        }
+        if (prepared.uniforms.morphTextureMipmapInfo >= 0) {
+            if (prepared.puppetMorphTexture == nullptr) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active g_Texture5MipMapInfo has no prepared Puppet morph texture"
+                );
+            }
+            bindings.bind(
+                prepared.uniforms.morphTextureMipmapInfo,
+                textureMipmapInfo(*prepared.puppetMorphTexture)
+            );
+        }
+        bindVector4(
+            bindings,
+            prepared.uniforms.morphTextureRotation,
+            std::array<float, 4>{1.0F, 0.0F, 0.0F, 1.0F}
+        );
+        bindVector2(
+            bindings,
+            prepared.uniforms.morphTextureTranslation,
+            std::array<float, 2>{0.0F, 0.0F}
+        );
+        if (prepared.uniforms.morphOffsets.location >= 0) {
+            if (!prepared.puppetMorphState) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active g_MorphOffsets has no evaluated Puppet morph state"
+                );
+            }
+            bindings.bind(
+                prepared.uniforms.morphOffsets.location,
+                prepared.puppetMorphState->offsets.data(),
+                sizeof(prepared.puppetMorphState->offsets.front()) *
+                    prepared.uniforms.morphOffsets.activeElementCount
+            );
+        }
+        if (prepared.uniforms.morphWeights.location >= 0) {
+            if (!prepared.puppetMorphState) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active g_MorphWeights has no evaluated Puppet morph state"
+                );
+            }
+            bindings.bind(
+                prepared.uniforms.morphWeights.location,
+                prepared.puppetMorphState->weights.data(),
+                sizeof(prepared.puppetMorphState->weights.front()) *
+                    prepared.uniforms.morphWeights.activeElementCount
+            );
+        }
+        if (prepared.uniforms.morphBoneTransforms.location >= 0) {
+            if (!prepared.puppetMorphModifierState) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active g_MorphBoneTransform has no evaluated Puppet modifier state"
+                );
+            }
+            bindings.bind(
+                prepared.uniforms.morphBoneTransforms.location,
+                prepared.puppetMorphBoneTransforms.data(),
+                sizeof(prepared.puppetMorphBoneTransforms.front()) *
+                    prepared.uniforms.morphBoneTransforms.activeElementCount
+            );
+        }
+        if (prepared.uniforms.morphBoneRules.location >= 0) {
+            if (!prepared.puppetMorphModifierState) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active g_MorphBoneRules has no evaluated Puppet modifier state"
+                );
+            }
+            bindings.bind(
+                prepared.uniforms.morphBoneRules.location,
+                prepared.puppetMorphBoneRules.data(),
+                sizeof(prepared.puppetMorphBoneRules.front()) *
+                    prepared.uniforms.morphBoneRules.activeElementCount
+            );
+        }
+        if (prepared.uniforms.viewportViewProjectionMatrices.location >= 0) {
+            bindings.bind(
+                prepared.uniforms.viewportViewProjectionMatrices.location,
+                prepared.viewportViewProjectionMatrices.data(),
+                sizeof(prepared.viewportViewProjectionMatrices.front()) *
+                    prepared.uniforms.viewportViewProjectionMatrices.activeElementCount
+            );
+        }
         for (const PreparedUniform& uniform : prepared.materialUniforms) {
             bindPreparedUniform(bindings, uniform);
         }
@@ -4634,9 +6975,13 @@ struct FramePlanExecutor::Impl final {
             prepared.commonUniforms,
             prepared.model,
             prepared.viewProjection,
-            prepared.modelViewProjection
+            prepared.modelViewProjection,
+            prepared.effectModel
         );
-        bindMatrix(bindings, prepared.uniforms.alternateModel, prepared.model);
+        bindMatrix(
+            bindings, prepared.uniforms.alternateModel,
+            prepared.alternateModel
+        );
         bindMatrix3(
             bindings,
             prepared.uniforms.alternateNormalModel,
@@ -4644,7 +6989,7 @@ struct FramePlanExecutor::Impl final {
         );
         bindMatrix(
             bindings, prepared.uniforms.alternateViewProjection,
-            prepared.viewProjection
+            prepared.alternateViewProjection
         );
         // The previous OpenGL image path left this uniform at GLSL's zero
         // initialization value. Keep that image-specific contract explicit;
@@ -4652,21 +6997,138 @@ struct FramePlanExecutor::Impl final {
         bindVector3(
             bindings, prepared.uniforms.eyePosition, prepared.eyePosition
         );
+        for (std::size_t index = 0;
+             index < prepared.uniforms.renderVariables.size(); ++index) {
+            const std::int32_t location =
+                prepared.uniforms.renderVariables[index];
+            const auto& payload = prepared.pass.renderVariables[index];
+            if (location < 0 || !payload) continue;
+            std::array<float, 4> values{};
+            for (std::size_t component = 0; component < values.size();
+                 ++component) {
+                values[component] = checkedFloat(
+                    payload->values[component],
+                    "g_RenderVar" + std::to_string(index)
+                );
+            }
+            bindings.bind(location, values);
+        }
+        if (prepared.uniforms.bones.location >= 0) {
+            bindings.bind(
+                prepared.uniforms.bones.location,
+                prepared.puppetBoneMatrices.data(),
+                sizeof(prepared.puppetBoneMatrices.front()) *
+                    prepared.uniforms.bones.activeElementCount
+            );
+        }
+        if (prepared.uniforms.bonesAlpha.location >= 0) {
+            if (prepared.puppetBonesAlpha.size() <
+                prepared.uniforms.bonesAlpha.activeElementCount) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Active g_BonesAlpha exceeds the evaluated Puppet bone-alpha state"
+                );
+            }
+            bindings.bind(
+                prepared.uniforms.bonesAlpha.location,
+                prepared.puppetBonesAlpha.data(),
+                sizeof(prepared.puppetBonesAlpha.front()) *
+                    prepared.uniforms.bonesAlpha.activeElementCount
+            );
+        }
+        if (prepared.uniforms.blendMap.location >= 0) {
+            bindings.bind(
+                prepared.uniforms.blendMap.location,
+                prepared.puppetBlendMap.data(),
+                sizeof(float) * 4U *
+                    prepared.uniforms.blendMap.activeElementCount
+            );
+        }
         bindings.validateComplete("Frame render pass");
 
-        VertexLayout layout{.stride = sizeof(Vertex)};
+        const bool puppetGeometry =
+            prepared.pass.geometry == FrameGeometryKind::puppetMesh;
+        VertexLayout layout{
+            .stride = puppetGeometry
+                ? sizeof(PuppetDrawVertex)
+                : sizeof(Vertex),
+        };
         if (prepared.positionLocation >= 0) {
             layout.attributes.push_back({
                 .location = static_cast<std::uint32_t>(prepared.positionLocation),
-                .format = VertexFormat::float3,
-                .offset = offsetof(Vertex, position),
+                .format = prepared.positionIsFloat4
+                    ? VertexFormat::float4
+                    : VertexFormat::float3,
+                .offset = puppetGeometry
+                    ? offsetof(PuppetDrawVertex, position)
+                    : offsetof(Vertex, position),
             });
         }
         if (prepared.texCoordLocation >= 0) {
             layout.attributes.push_back({
                 .location = static_cast<std::uint32_t>(prepared.texCoordLocation),
-                .format = VertexFormat::float2,
-                .offset = offsetof(Vertex, texCoord),
+                .format = prepared.texCoordIsFloat4
+                    ? VertexFormat::float4
+                    : VertexFormat::float2,
+                .offset = puppetGeometry
+                    ? offsetof(PuppetDrawVertex, texCoord)
+                    : offsetof(Vertex, texCoord),
+            });
+        }
+        if (prepared.normalLocation >= 0) {
+            if (!puppetGeometry) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Image shader requires a normal attribute without Puppet geometry"
+                );
+            }
+            layout.attributes.push_back({
+                .location = static_cast<std::uint32_t>(prepared.normalLocation),
+                .format = VertexFormat::float3,
+                .offset = offsetof(PuppetDrawVertex, normal),
+            });
+        }
+        if (prepared.tangentLocation >= 0) {
+            if (!puppetGeometry) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Image shader requires a tangent attribute without Puppet geometry"
+                );
+            }
+            layout.attributes.push_back({
+                .location = static_cast<std::uint32_t>(prepared.tangentLocation),
+                .format = VertexFormat::float4,
+                .offset = offsetof(PuppetDrawVertex, tangent),
+            });
+        }
+        if (prepared.blendIndicesLocation >= 0) {
+            if (!puppetGeometry) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Image shader requires blend indices without Puppet geometry"
+                );
+            }
+            layout.attributes.push_back({
+                .location = static_cast<std::uint32_t>(
+                    prepared.blendIndicesLocation
+                ),
+                .format = VertexFormat::uint4,
+                .offset = offsetof(PuppetDrawVertex, blendIndices),
+            });
+        }
+        if (prepared.blendWeightsLocation >= 0) {
+            if (!puppetGeometry) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Image shader requires blend weights without Puppet geometry"
+                );
+            }
+            layout.attributes.push_back({
+                .location = static_cast<std::uint32_t>(
+                    prepared.blendWeightsLocation
+                ),
+                .format = VertexFormat::float4,
+                .offset = offsetof(PuppetDrawVertex, blendWeights),
             });
         }
         DrawRequest request{
@@ -4677,19 +7139,48 @@ struct FramePlanExecutor::Impl final {
             .vertexBuffer = &geometryBuffer,
             .uniforms = std::move(bindings.uniforms),
             .textures = std::move(bindings.textures),
+            .viewport = prepared.pass.viewport
+                ? std::optional<DrawRequest::Region>(DrawRequest::Region{
+                      .x = prepared.pass.viewport->x,
+                      .y = prepared.pass.viewport->y,
+                      .width = prepared.pass.viewport->width,
+                      .height = prepared.pass.viewport->height,
+                  })
+                : std::nullopt,
+            .scissor = prepared.pass.scissor
+                ? std::optional<DrawRequest::Region>(DrawRequest::Region{
+                      .x = prepared.pass.scissor->x,
+                      .y = prepared.pass.scissor->y,
+                      .width = prepared.pass.scissor->width,
+                      .height = prepared.pass.scissor->height,
+                  })
+                : std::nullopt,
+            .instanceCount = prepared.pass.instanceCount,
+            .depthBias = checkedFloat(
+                prepared.pass.depthBias, "Frame pass depth bias"
+            ),
+            .depthSlopeScale = checkedFloat(
+                prepared.pass.depthSlopeScale,
+                "Frame pass depth slope scale"
+            ),
+            .depthBiasClamp = checkedFloat(
+                prepared.pass.depthBiasClamp,
+                "Frame pass depth bias clamp"
+            ),
         };
 
-        if (prepared.pass.geometry == FrameGeometryKind::puppetMesh) {
+        if (puppetGeometry) {
             if (prepared.puppetVertices.empty() ||
                 prepared.puppetIndices.empty() ||
                 prepared.puppetIndices.size() > static_cast<std::size_t>(
                     std::numeric_limits<std::uint32_t>::max()
                 ) ||
                 prepared.puppetVertices.size() >
-                    std::numeric_limits<std::size_t>::max() / sizeof(Vertex) ||
+                    std::numeric_limits<std::size_t>::max() /
+                        sizeof(PuppetDrawVertex) ||
                 prepared.puppetIndices.size() >
                     std::numeric_limits<std::size_t>::max() /
-                        sizeof(std::uint16_t)) {
+                        sizeof(std::uint32_t)) {
                 throw Error(
                     ErrorCode::resourceValidation,
                     "Puppet draw data exceeds Metal buffer limits"
@@ -4707,7 +7198,7 @@ struct FramePlanExecutor::Impl final {
             session.drawIndexed(
                 request,
                 static_cast<std::uint32_t>(prepared.puppetIndices.size()),
-                false
+                true
             );
         } else {
             if (prepared.firstVertex < 0) {
@@ -4716,10 +7207,18 @@ struct FramePlanExecutor::Impl final {
                     "Prepared image draw has a negative vertex offset"
                 );
             }
+            if (prepared.vertices.empty() ||
+                prepared.vertices.size() >
+                    std::numeric_limits<std::uint32_t>::max()) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Prepared image geometry has an invalid vertex count"
+                );
+            }
             session.draw(
                 request,
                 static_cast<std::uint32_t>(prepared.firstVertex),
-                6
+                static_cast<std::uint32_t>(prepared.vertices.size())
             );
         }
     }
@@ -4824,12 +7323,17 @@ struct FramePlanExecutor::Impl final {
                 checkedFloat(command.color.blue, "Clear color"),
                 checkedFloat(command.color.alpha, "Clear color"),
             },
+            .clearDepth = command.clearDepth,
+            .depthValue = checkedFloat(command.depthValue, "Clear depth value"),
         };
     }
 
     void clear(Device::Session& session, const PreparedClear& prepared) {
         auto& destination = framebuffer(prepared.destination);
-        session.clear(destination, prepared.color, false);
+        session.clear(
+            destination, prepared.color, prepared.clearDepth,
+            prepared.depthValue
+        );
     }
 
     [[nodiscard]] PreparedText prepareText(
@@ -4854,6 +7358,38 @@ struct FramePlanExecutor::Impl final {
         const CachedTextRaster& cachedRaster = cachedTextRaster(descriptor);
         const text::RasterizedText& rasterized = cachedRaster.rasterized;
         const TextLayout layout = textLayout(descriptor, rasterized);
+        const TextFontStyle fontStyle{
+            .msdf = descriptor.msdf,
+            .blur = descriptor.blur,
+            .outline = descriptor.outline,
+            .dropShadow = descriptor.dropShadow,
+            .blurSize = checkedFloat(
+                descriptor.blurSize, "Text blur size"
+            ),
+            .outlineThickness = checkedFloat(
+                descriptor.outlineThickness, "Text outline thickness"
+            ),
+            .outlineColor = {
+                checkedFloat(descriptor.outlineColor.red, "Text outline red"),
+                checkedFloat(descriptor.outlineColor.green, "Text outline green"),
+                checkedFloat(descriptor.outlineColor.blue, "Text outline blue"),
+            },
+            .dropShadowSize = checkedFloat(
+                descriptor.dropShadowSize, "Text drop-shadow size"
+            ),
+            .dropShadowColor = {
+                checkedFloat(descriptor.dropShadowColor.red, "Text drop-shadow red"),
+                checkedFloat(descriptor.dropShadowColor.green, "Text drop-shadow green"),
+                checkedFloat(descriptor.dropShadowColor.blue, "Text drop-shadow blue"),
+            },
+            .dropShadowOffset = {
+                checkedFloat(descriptor.dropShadowOffset.x, "Text drop-shadow X offset"),
+                checkedFloat(descriptor.dropShadowOffset.y, "Text drop-shadow Y offset"),
+            },
+            .dropShadowOpacity = checkedFloat(
+                descriptor.dropShadowOpacity, "Text drop-shadow opacity"
+            ),
+        };
 
         const double effectiveAlpha = descriptor.color.alpha * descriptor.alpha;
         const std::array<double, 4> colorComponents{
@@ -4921,12 +7457,17 @@ struct FramePlanExecutor::Impl final {
                 )
             );
         } else {
+            const bool perspectiveLayer =
+                !plan.camera.orthographic || descriptor.perspective;
             const float originX = static_cast<float>(
-                transform.origin.x -
-                    static_cast<double>(plan.width) * 0.5
+                perspectiveLayer && !plan.camera.orthographic
+                    ? transform.origin.x
+                    : transform.origin.x - static_cast<double>(plan.width) * 0.5
             );
             const float originY = static_cast<float>(
-                centeredWallpaperY(transform.origin.y, plan.height)
+                perspectiveLayer && !plan.camera.orthographic
+                    ? transform.origin.y
+                    : centeredWallpaperY(transform.origin.y, plan.height)
             );
             const Matrix world = multiply(
                 translation(originX, originY, float(transform.origin.z)),
@@ -4945,14 +7486,26 @@ struct FramePlanExecutor::Impl final {
                     )
                 )
             );
-            if (!camera.orthographicViewProjection) {
-                throw Error(
-                    ErrorCode::internalFailure,
-                    "Scene orthographic camera was not prepared"
-                );
+            const Matrix* sceneViewProjection = nullptr;
+            if (perspectiveLayer) {
+                if (!camera.perspectiveView) {
+                    throw Error(
+                        ErrorCode::internalFailure,
+                        "Scene perspective camera was not prepared"
+                    );
+                }
+                sceneViewProjection = &camera.perspectiveView->viewProjection;
+            } else {
+                if (!camera.orthographicViewProjection) {
+                    throw Error(
+                        ErrorCode::internalFailure,
+                        "Scene orthographic camera was not prepared"
+                    );
+                }
+                sceneViewProjection = &*camera.orthographicViewProjection;
             }
             modelViewProjection = multiply(
-                *camera.orthographicViewProjection,
+                *sceneViewProjection,
                 multiply(world, alignment)
             );
         }
@@ -4960,11 +7513,12 @@ struct FramePlanExecutor::Impl final {
         return {
             .destination = command.destination,
             .coverage = textRenderer.prepare(
-                session, rasterized, cachedRaster.coverageKey
+                session, rasterized, cachedRaster.coverageKey, fontStyle
             ),
             .request = {
                 .modelViewProjection = modelViewProjection,
                 .color = color,
+                .fontStyle = fontStyle,
             },
         };
     }
@@ -6048,6 +8602,8 @@ struct FramePlanExecutor::Impl final {
         }
 
         ComboMap effectiveCombos = descriptor.combos;
+        applyLightCombos(effectiveCombos, plan);
+        applyFogCombos(effectiveCombos, plan);
         applyTexture0FormatCombo(effectiveCombos, textureResource.format);
         const auto requireCombo = [&](const char* name, int expected) {
             const auto authored = effectiveCombos.find(name);
@@ -6082,11 +8638,16 @@ struct FramePlanExecutor::Impl final {
                 ? 1 : 0
         );
         effectiveCombos["SPRITESHEET"] = batch->atlas.enabled() ? 1 : 0;
+        const std::set<int> linkedTextureSlots = textureBindingSlots(
+            descriptor.textures,
+            "Particle render pass"
+        );
         ProgramResource& programResource = program(
             session,
             descriptor.vertexShaderPath,
             descriptor.fragmentShaderPath,
             effectiveCombos,
+            linkedTextureSlots,
             "Particle render pass"
         );
         PreparedParticle prepared{
@@ -6104,15 +8665,17 @@ struct FramePlanExecutor::Impl final {
         };
         const FrameResourceRef destination = command.destination;
         std::map<int, const ActiveUniform*> activeSamplers;
-        std::set<int> activeResolutionSlots;
+        std::set<int> activeTextureMetadataSlots;
         for (const ActiveUniform& uniform : programResource.uniforms) {
             if (!uniform.sampler) {
-                if (const auto slot = textureResolutionSlot(uniform.name)) {
-                    activeResolutionSlots.emplace(*slot);
+                if (const auto slot =
+                        textureMetadataSlot(uniform.name)) {
+                    activeTextureMetadataSlots.emplace(*slot);
                 }
                 continue;
             }
-            if (!uniform.supportedSampler) {
+            if (uniform.samplerDimension ==
+                TranslatedMetalShaderPair::TextureDimension::unsupported) {
                 throw Error(
                     ErrorCode::resourceValidation,
                     "Active particle sampler '" + uniform.name +
@@ -6130,17 +8693,7 @@ struct FramePlanExecutor::Impl final {
             activeSamplers.insert_or_assign(*slot, &uniform);
         }
 
-        std::set<int> textureSlots;
-        for (const auto& [slot, binding] : descriptor.textures) {
-            static_cast<void>(binding);
-            if (slot < 0 || slot >= 32) {
-                throw Error(
-                    ErrorCode::resourceValidation,
-                    "Particle texture slot is outside the supported range 0...31"
-                );
-            }
-            textureSlots.emplace(slot);
-        }
+        std::set<int> textureSlots = linkedTextureSlots;
         for (const auto& [slot, uniform] : activeSamplers) {
             static_cast<void>(uniform);
             if (slot < 0 || slot >= 32) {
@@ -6152,7 +8705,8 @@ struct FramePlanExecutor::Impl final {
             textureSlots.emplace(slot);
         }
         textureSlots.insert(
-            activeResolutionSlots.begin(), activeResolutionSlots.end()
+            activeTextureMetadataSlots.begin(),
+            activeTextureMetadataSlots.end()
         );
 
         for (const int slot : textureSlots) {
@@ -6184,7 +8738,7 @@ struct FramePlanExecutor::Impl final {
             const bool hasProviderContract =
                 authored != descriptor.textures.end() ||
                 !candidates.empty() || slot == 0 ||
-                activeResolutionSlots.contains(slot);
+                activeTextureMetadataSlots.contains(slot);
             if (!hasProviderContract) {
                 throw Error(
                     ErrorCode::resourceValidation,
@@ -6217,22 +8771,33 @@ struct FramePlanExecutor::Impl final {
                     "Particle texture slot has an empty resource identity"
                 );
             }
+            TextureAnimationSelection animation;
             const TextureResource* assetTextureValue = nullptr;
             if (resource.kind == FrameResourceKind::assetTexture) {
-                const std::size_t imageIndex = slot == 0
-                    ? texture0Animation.imageIndex : 0;
                 if (slot == 0 && resource.id == descriptor.texture0.id) {
-                    if (imageIndex >= textureResource.images.size()) {
+                    animation = texture0Animation;
+                    if (animation.imageIndex >= textureResource.images.size()) {
                         throw Error(
                             ErrorCode::resourceValidation,
                             "Particle texture animation selected an unavailable image"
                         );
                     }
-                    assetTextureValue = &textureResource.images[imageIndex];
+                    assetTextureValue =
+                        &textureResource.images[animation.imageIndex];
                 } else {
-                    assetTextureValue = &texture(
-                        session, resource, imageIndex, inputs.timeSeconds
-                    );
+                    AssetTextureResource& selectedTexture =
+                        prepareAssetTexture(
+                            session, resource, inputs.timeSeconds
+                        );
+                    if (selectedTexture.images.empty()) {
+                        throw Error(
+                            ErrorCode::resourceValidation,
+                            "Particle secondary texture has no decoded image"
+                        );
+                    }
+                    // Only the primary particle texture owns a TEXS timeline.
+                    // Secondary slots bind image zero with a neutral UV basis.
+                    assetTextureValue = &selectedTexture.images.front();
                 }
             } else if (resource.kind == FrameResourceKind::hostTexture) {
                 assetTextureValue = &texture(
@@ -6256,31 +8821,49 @@ struct FramePlanExecutor::Impl final {
                     "Particle texture slots must reference asset textures or framebuffers"
                 );
             }
+            const std::int32_t samplerLocation = prepareBuiltinUniform(
+                programResource,
+                "g_Texture" + std::to_string(slot),
+                TranslatedMetalShaderPair::ValueType::unsupported
+            );
             PreparedTextureBinding binding{
                 .slot = slot,
                 .resource = resource,
                 .assetTexture = assetTextureValue,
+                .comparison = samplerLocation >= 0 &&
+                    programResource.uniforms.at(static_cast<std::size_t>(samplerLocation)).comparisonSampler,
                 .resolution = textureResolution(resource, aliases),
-                .samplerLocation = prepareBuiltinUniform(
-                    programResource,
-                    "g_Texture" + std::to_string(slot),
-                    TranslatedMetalShaderPair::ValueType::unsupported
-                ),
+                .animation = animation,
+                .samplerLocation = samplerLocation,
                 .resolutionLocation = prepareBuiltinUniform(
                     programResource,
                     "g_Texture" + std::to_string(slot) + "Resolution",
                     TranslatedMetalShaderPair::ValueType::float4
                 ),
+                .texelLocation = prepareBuiltinUniform(
+                    programResource,
+                    "g_Texture" + std::to_string(slot) + "Texel",
+                    TranslatedMetalShaderPair::ValueType::float4
+                ),
+                .mipmapInfoLocation = prepareBuiltinUniform(
+                    programResource,
+                    "g_Texture" + std::to_string(slot) + "MipMapInfo",
+                    TranslatedMetalShaderPair::ValueType::float1
+                ),
+                .rotationLocation = prepareBuiltinUniform(
+                    programResource,
+                    "g_Texture" + std::to_string(slot) + "Rotation",
+                    TranslatedMetalShaderPair::ValueType::float4
+                ),
+                .translationLocation = prepareBuiltinUniform(
+                    programResource,
+                    "g_Texture" + std::to_string(slot) + "Translation",
+                    TranslatedMetalShaderPair::ValueType::float2
+                ),
             };
             prepared.textures.push_back(std::move(binding));
         }
         prepared.attributeLocations.fill(-1);
-        prepared.uniforms.texture0Translation = prepareBuiltinUniform(
-            programResource, "g_Texture0Translation", TranslatedMetalShaderPair::ValueType::float2
-        );
-        prepared.uniforms.texture0Rotation = prepareBuiltinUniform(
-            programResource, "g_Texture0Rotation", TranslatedMetalShaderPair::ValueType::float4
-        );
         prepared.uniforms.modelInverse = prepareBuiltinUniform(
             programResource, "g_ModelMatrixInverse",
             TranslatedMetalShaderPair::ValueType::float4x4
@@ -6318,13 +8901,17 @@ struct FramePlanExecutor::Impl final {
             );
         }
         const auto& transform = descriptor.worldTransform;
+        const bool authoredPerspectiveScene = !plan.camera.orthographic;
         const float originX = particleFloat(
-            transform.origin.x -
-                static_cast<double>(plan.width) * 0.5,
+            authoredPerspectiveScene
+                ? transform.origin.x
+                : transform.origin.x - static_cast<double>(plan.width) * 0.5,
             "object origin"
         );
         const float originY = particleFloat(
-            centeredWallpaperY(transform.origin.y, plan.height),
+            authoredPerspectiveScene
+                ? transform.origin.y
+                : centeredWallpaperY(transform.origin.y, plan.height),
             "object origin"
         );
         const float originZ = particleFloat(transform.origin.z, "object origin");
@@ -6377,15 +8964,15 @@ struct FramePlanExecutor::Impl final {
         }
         Matrix viewProjection;
         std::array<float, 3> eyePosition = camera.eyePosition;
-        if (descriptor.perspective) {
-            if (!camera.particlePerspective) {
+        if (!plan.camera.orthographic || descriptor.perspective) {
+            if (!camera.perspectiveView) {
                 throw Error(
                     ErrorCode::internalFailure,
-                    "Particle perspective camera was not prepared"
+                    "Scene perspective camera was not prepared"
                 );
             }
-            viewProjection = camera.particlePerspective->viewProjection;
-            eyePosition = camera.particlePerspective->eyePosition;
+            viewProjection = camera.perspectiveView->viewProjection;
+            eyePosition = camera.perspectiveView->eyePosition;
         } else {
             if (!camera.orthographicViewProjection) {
                 throw Error(
@@ -6557,35 +9144,37 @@ struct FramePlanExecutor::Impl final {
         };
     }
 
-    void ensureParticleRefractSnapshot(
+    void ensureFeedbackSnapshot(
         Device::Session& session,
         const FramebufferResource& destination
     ) {
-        if (particleRefractSnapshot &&
-            particleRefractSnapshot.width == destination.width &&
-            particleRefractSnapshot.height == destination.height &&
-            particleRefractSnapshot.format == destination.format) {
+        if (feedbackSnapshot &&
+            feedbackSnapshot.width == destination.width &&
+            feedbackSnapshot.height == destination.height &&
+            feedbackSnapshot.format == destination.format &&
+            feedbackSnapshot.colorTexture.wrap ==
+                destination.colorTexture.wrap) {
             return;
         }
         FramebufferResource candidate = session.createFramebuffer(
             destination.format,
             destination.width,
             destination.height,
-            TextureWrap::clampToEdge,
+            destination.colorTexture.wrap,
             false
         );
-        session.destroyFramebuffer(particleRefractSnapshot);
-        particleRefractSnapshot = std::move(candidate);
+        session.destroyFramebuffer(feedbackSnapshot);
+        feedbackSnapshot = std::move(candidate);
     }
 
-    void snapshotParticleRefractInput(
+    void snapshotFeedbackInput(
         Device::Session& session,
         const FramebufferResource& destination
     ) {
-        ensureParticleRefractSnapshot(session, destination);
+        ensureFeedbackSnapshot(session, destination);
         session.copy(
             destination.colorTexture,
-            particleRefractSnapshot.colorTexture
+            feedbackSnapshot.colorTexture
         );
     }
 
@@ -6621,7 +9210,7 @@ struct FramePlanExecutor::Impl final {
             }
         }
         if (needsRefractSnapshot) {
-            snapshotParticleRefractInput(session, destination);
+            snapshotFeedbackInput(session, destination);
         }
         DrawBindings bindings(*prepared.program);
         for (const PreparedTextureBinding& binding : prepared.textures) {
@@ -6629,11 +9218,21 @@ struct FramePlanExecutor::Impl final {
             if (textureValue == nullptr &&
                 binding.resource.kind == FrameResourceKind::framebuffer) {
                 const auto& source = framebuffer(binding.resource);
-                textureValue = source.colorTexture.texture.get() ==
-                            destination.colorTexture.texture.get() &&
-                        needsRefractSnapshot
-                    ? &particleRefractSnapshot.colorTexture
-                    : &source.colorTexture;
+                if (binding.comparison) {
+                    if (!source.depthSampleTexture) {
+                        throw Error(
+                            ErrorCode::resourceValidation,
+                            "Particle comparison sampler framebuffer has no sampleable depth attachment"
+                        );
+                    }
+                    textureValue = &source.depthSampleTexture;
+                } else {
+                    textureValue = source.colorTexture.texture.get() ==
+                                destination.colorTexture.texture.get() &&
+                            needsRefractSnapshot
+                        ? &feedbackSnapshot.colorTexture
+                        : &source.colorTexture;
+                }
             }
             if (textureValue == nullptr || !*textureValue) {
                 throw Error(
@@ -6641,22 +9240,40 @@ struct FramePlanExecutor::Impl final {
                     "Particle texture binding resolved to an empty Metal texture"
                 );
             }
+            if (binding.comparison &&
+                textureValue->format != PixelFormat::depth32f) {
+                throw Error(
+                    ErrorCode::resourceValidation,
+                    "Particle comparison sampler requires a depth texture provider"
+                );
+            }
             if (binding.samplerLocation >= 0) {
                 bindings.bindTexture(binding.samplerLocation, *textureValue);
             }
             bindVector4(bindings, binding.resolutionLocation, binding.resolution);
+            if (binding.texelLocation >= 0) {
+                bindings.bind(
+                    binding.texelLocation, textureTexel(*textureValue)
+                );
+            }
+            if (binding.mipmapInfoLocation >= 0) {
+                bindings.bind(
+                    binding.mipmapInfoLocation,
+                    textureMipmapInfo(*textureValue)
+                );
+            }
+            bindVector4(
+                bindings, binding.rotationLocation,
+                binding.animation.rotation
+            );
+            bindVector2(
+                bindings, binding.translationLocation,
+                binding.animation.translation
+            );
         }
         for (const PreparedUniform& uniform : prepared.materialUniforms) {
             bindPreparedUniform(bindings, uniform);
         }
-        bindVector2(
-            bindings, prepared.uniforms.texture0Translation,
-            prepared.texture0Animation.translation
-        );
-        bindVector4(
-            bindings, prepared.uniforms.texture0Rotation,
-            prepared.texture0Animation.rotation
-        );
         if (prepared.uniforms.refractAmount >= 0) {
             const float refractAmount = 0.05F;
             bindings.bind(prepared.uniforms.refractAmount, refractAmount);
@@ -6666,7 +9283,8 @@ struct FramePlanExecutor::Impl final {
             prepared.commonUniforms,
             prepared.model,
             prepared.viewProjection,
-            prepared.modelViewProjection
+            prepared.modelViewProjection,
+            prepared.model
         );
         bindMatrix(
             bindings, prepared.uniforms.modelInverse, prepared.modelInverse
@@ -6768,8 +9386,9 @@ struct FramePlanExecutor::Impl final {
                 ? BlendMode::alpha
                 : BlendMode::additive;
         state.cullBackFaces = prepared.culling != CullingMode::disabled;
-        state.depthTest = prepared.depthTest == DepthMode::enabled;
-        state.depthWrite = prepared.depthWrite == DepthMode::enabled;
+        state.depthTest = prepared.depthTest != DepthMode::disabled;
+        state.depthCompareGreater = prepared.depthTest == DepthMode::greater;
+        state.depthWrite = prepared.depthWrite != DepthMode::disabled;
         // The OpenGL renderer clamps every particle draw. Particle systems
         // intentionally use positions outside the scene camera's near/far
         // range, so Metal must preserve that render-state contract.
@@ -7043,6 +9662,7 @@ struct FramePlanExecutor::Impl final {
         }
         const FrameImageDescriptor& image = plan.images[pass.origin.imageIndex];
         ComboMap combos = pass.combos;
+        applyImagePassCombos(combos, plan, image, pass);
         if (image.source.kind == FrameResourceKind::assetTexture) {
             applyTexture0FormatCombo(
                 combos,
@@ -7058,6 +9678,7 @@ struct FramePlanExecutor::Impl final {
             pass.vertexShaderPath,
             pass.fragmentShaderPath,
             combos,
+            textureBindingSlots(pass.textures, "Frame render pass"),
             "Frame render pass"
         );
         collectSamplerDefaultFramebufferRequirements(
@@ -7105,6 +9726,8 @@ struct FramePlanExecutor::Impl final {
         }
 
         ComboMap combos = descriptor.combos;
+        applyLightCombos(combos, plan);
+        applyFogCombos(combos, plan);
         applyTexture0FormatCombo(combos, texture.format);
         const auto requireCombo = [&combos](const char* name, int expected) {
             const auto authored = combos.find(name);
@@ -7133,6 +9756,10 @@ struct FramePlanExecutor::Impl final {
             descriptor.vertexShaderPath,
             descriptor.fragmentShaderPath,
             combos,
+            textureBindingSlots(
+                descriptor.textures,
+                "Particle render pass"
+            ),
             "Particle render pass"
         );
         collectSamplerDefaultFramebufferRequirements(
@@ -7216,22 +9843,37 @@ struct FramePlanExecutor::Impl final {
 
     [[nodiscard]] PreparedCamera prepareCamera(const FramePlan& plan) const {
         bool needsOrthographic = false;
-        bool needsParticlePerspective = false;
+        bool needsPerspective = !plan.camera.orthographic;
         bool needsOrthographicEye = false;
         for (const FrameOperation& operation : plan.operations) {
             if (const auto* pass = std::get_if<FrameRenderPass>(&operation)) {
-                needsOrthographic = needsOrthographic ||
-                    pass->geometry == FrameGeometryKind::imageScene ||
+                if (pass->geometry == FrameGeometryKind::imageScene ||
                     pass->geometry == FrameGeometryKind::passthroughCapture ||
-                    pass->geometry == FrameGeometryKind::puppetMesh;
+                    pass->geometry == FrameGeometryKind::puppetMesh) {
+                    const bool perspectiveLayer =
+                        pass->origin.imageIndex < plan.images.size() &&
+                        plan.images.at(pass->origin.imageIndex).perspective;
+                    if (plan.camera.orthographic && !perspectiveLayer) {
+                        needsOrthographic = true;
+                    } else {
+                        needsPerspective = true;
+                    }
+                }
             } else if (std::holds_alternative<FrameTextCommand>(operation)) {
-                needsOrthographic = true;
+                const auto& command = std::get<FrameTextCommand>(operation);
+                const bool perspectiveLayer = command.textIndex < plan.texts.size() &&
+                    plan.texts.at(command.textIndex).perspective;
+                if (plan.camera.orthographic && !perspectiveLayer) {
+                    needsOrthographic = true;
+                } else {
+                    needsPerspective = true;
+                }
             } else if (const auto* command =
                            std::get_if<FrameParticleCommand>(&operation)) {
                 const FrameParticleDescriptor& descriptor =
                     plan.particles.at(command->particleIndex);
-                if (descriptor.perspective) {
-                    needsParticlePerspective = true;
+                if (!plan.camera.orthographic || descriptor.perspective) {
+                    needsPerspective = true;
                 } else {
                     needsOrthographic = true;
                     needsOrthographicEye = true;
@@ -7260,13 +9902,13 @@ struct FramePlanExecutor::Impl final {
                 "Scene orthographic view-projection matrix"
             );
         }
-        if (needsParticlePerspective) {
-            result.particlePerspective.emplace(
-                particlePerspectiveView(plan.camera, cameraWidth, cameraHeight)
+        if (needsPerspective) {
+            result.perspectiveView.emplace(
+                scenePerspectiveView(plan.camera, cameraWidth, cameraHeight)
             );
             validateMatrix(
-                result.particlePerspective->viewProjection,
-                "Particle perspective view-projection matrix"
+                result.perspectiveView->viewProjection,
+                "Scene perspective view-projection matrix"
             );
         }
         if (needsOrthographicEye) {
@@ -7391,6 +10033,22 @@ struct FramePlanExecutor::Impl final {
                     .message = std::move(message),
                 });
             };
+            const auto recordSkippedShadowCaster = [&](std::string message) {
+                frameTraceLog(
+                    "prepare.skip shadow-caster object=%d operation=%zu reason=%s",
+                    group.objectId,
+                    failingOperation,
+                    message.c_str()
+                );
+                result.issues.push_back({
+                    .severity = FramePlanIssueSeverity::warning,
+                    .objectIndex = group.objectIndex,
+                    .objectId = group.objectId,
+                    .operationIndex = failingOperation,
+                    .message = "Shadow caster was skipped: " +
+                        std::move(message),
+                });
+            };
 
             try {
                 for (const std::size_t operationIndex :
@@ -7400,6 +10058,30 @@ struct FramePlanExecutor::Impl final {
                         plan.operations[operationIndex];
                     if (const auto* pass =
                             std::get_if<FrameRenderPass>(&operation)) {
+                        if (pass->shadowCaster) {
+                            try {
+                                candidateOperations.emplace_back(
+                                    operationIndex,
+                                    prepareDraw(
+                                        session, plan, executionLayout, *pass,
+                                        inputs, frameParallax, camera,
+                                        candidateAliases
+                                    )
+                                );
+                            } catch (const std::bad_alloc&) {
+                                throw;
+                            } catch (const Error& error) {
+                                if (isFrameFatalPreparationError(error)) {
+                                    throw;
+                                }
+                                recordSkippedShadowCaster(error.what());
+                            } catch (const ShaderCompileError& error) {
+                                recordSkippedShadowCaster(error.what());
+                            } catch (const FormatError& error) {
+                                recordSkippedShadowCaster(error.what());
+                            }
+                            continue;
+                        }
                         candidateOperations.emplace_back(
                             operationIndex,
                             prepareDraw(
@@ -7860,7 +10542,9 @@ struct FramePlanExecutor::Impl final {
         std::vector<script::ScriptCursorEvent>& events
     ) {
         const std::vector<CursorHit> hits = inputs.pointerActive
-            ? hitTestInteractiveLayers(previousPlan, inputs.pointerPosition)
+            ? hitTestInteractiveLayers(
+                  previousPlan, inputs.pointerPosition, parallaxDisplacement
+              )
             : std::vector<CursorHit>{};
         const std::vector<CursorHit> previousTargets = cursorTargets;
         const auto makeEvent = [](
@@ -7893,7 +10577,10 @@ struct FramePlanExecutor::Impl final {
         const auto currentProjectionFor = [&](int layerId)
             -> std::optional<CursorHit> {
             return projectCursorLayer(
-                previousPlan, layerId, inputs.pointerPosition
+                previousPlan,
+                layerId,
+                inputs.pointerPosition,
+                parallaxDisplacement
             );
         };
         const auto eventTarget = [&](const CursorHit& fallback) {
@@ -8259,7 +10946,8 @@ struct FramePlanExecutor::Impl final {
                     .mediaSnapshot = resolvedInputs.mediaSnapshot,
                     .soundRuntimeStates = soundRuntimeStates,
                 },
-                projectionFallback
+                projectionFallback,
+                frameRenderQuality(physicalTarget)
             );
             traceStage("frameGraphEvaluate");
             resolveTextEffectGeometry(evaluated.plan);
@@ -8385,16 +11073,24 @@ struct FramePlanExecutor::Impl final {
                 frameGraph->requiresDrawableProjectionFallback() &&
                 (lastFrame->sourcePlan.width != presentation.canvasWidth ||
                  lastFrame->sourcePlan.height != presentation.canvasHeight);
-            FramePlan logicalReplayPlan = needsReprojection
+            const FrameRenderQuality renderQuality = frameRenderQuality(
+                physicalTarget
+            );
+            const bool needsQualityRebuild =
+                lastFrame->sourcePlan.renderQuality != renderQuality;
+            const bool needsPlanRebuild =
+                needsReprojection || needsQualityRebuild;
+            FramePlan logicalReplayPlan = needsPlanRebuild
                 ? frameGraph->reproject(
                       lastFrame->evaluation,
                       FrameProjectionSize{
                           .width = presentation.canvasWidth,
                           .height = presentation.canvasHeight,
-                      }
+                      },
+                      renderQuality
                   )
                 : lastFrame->sourcePlan;
-            if (needsReprojection) {
+            if (needsPlanRebuild) {
                 resolveTextEffectGeometry(logicalReplayPlan);
             }
             PhysicalRenderSize physicalOutput{
@@ -8416,7 +11112,7 @@ struct FramePlanExecutor::Impl final {
                     logicalReplayPlan, physicalOutput
                 ));
             }
-            if (!needsReprojection &&
+            if (!needsPlanRebuild &&
                 width == physicalOutput.width &&
                 height == physicalOutput.height) {
                 return;
@@ -8448,10 +11144,11 @@ struct FramePlanExecutor::Impl final {
             beginFrameOutput(session, logicalReplayPlan);
             executePreparedOperations(session, prepared);
             textRenderer.trimCache(session);
-            if (needsReprojection) {
+            if (needsPlanRebuild) {
                 // Reprojection changes only the frozen logical layout used by
-                // future hit tests/replays. It neither evaluates scripts nor
-                // advances particle simulation or frame time.
+                // future hit tests/replays. A quality-only rebuild likewise
+                // changes resource layout without evaluating scripts or
+                // advancing particle simulation or frame time.
                 if (logicalLayout) {
                     restoreLogicalFramebufferLayout(
                         logicalReplayPlan, std::move(*logicalLayout)
@@ -8499,7 +11196,10 @@ struct FramePlanExecutor::Impl final {
                 "Presentation viewport dimensions do not match the Metal drawable"
             );
         }
-        session.clear(destination, {0.0F, 0.0F, 0.0F, 0.0F}, false);
+        // The final desktop surface is opaque. Intermediate framebuffers keep
+        // authored alpha for blending, but a transparent clear here would
+        // reveal Finder's wallpaper through the NSWindow.
+        session.clear(destination, {0.0F, 0.0F, 0.0F, 1.0F}, false);
         if (slice.hasContent) {
             presentationRenderer.draw(
                 session,
@@ -8526,9 +11226,14 @@ struct FramePlanExecutor::Impl final {
     std::unique_ptr<Device> device;
     std::map<std::string, CachedFramebuffer> framebuffers;
     std::map<std::string, CachedFramebuffer> inactiveFramebuffers;
-    FramebufferResource particleRefractSnapshot;
+    // One sequential scratch target is sufficient for image effects and
+    // refractive particles. It holds the destination pixels as they existed
+    // immediately before a pass that samples and writes the same texture.
+    FramebufferResource feedbackSnapshot;
     std::map<std::string, std::string> framebufferAliases;
     std::map<std::string, AssetTextureResource> assets;
+    std::map<std::pair<const PuppetMesh*, std::size_t>, TextureResource>
+        puppetMorphTextures;
     std::map<std::string, ProgramCacheEntry> programs;
     TextCoverageRenderer textRenderer;
     PresentationRenderer presentationRenderer;

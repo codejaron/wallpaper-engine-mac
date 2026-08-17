@@ -1448,6 +1448,86 @@ private:
         generalDynamic("camerashakeamplitude", literal(0.0));
         generalDynamic("camerashakeroughness", literal(0.0));
         generalDynamic("camerashakespeed", literal(0.0));
+        generalDynamic("fov", literal(50.0));
+        generalDynamic("nearz", literal(0.01));
+        generalDynamic("farz", literal(10000.0));
+        generalDynamic("perspectiveoverridefov", literal(0.0));
+        generalDynamic("fogdistance", literal(false));
+        result.generalValues.emplace(
+            "fogdistancecolor",
+            optionalDynamic(
+                document,
+                general,
+                "fogdistancecolor",
+                "/general",
+                colorLiteral({0.0, 0.0, 0.0, 1.0}),
+                DynamicValueParseMode::color
+            )
+        );
+        generalDynamic("fogdistancestart", literal(1.0));
+        generalDynamic("fogdistanceend", literal(5.0));
+        generalDynamic("fogdistancestartdensity", literal(0.0));
+        generalDynamic("fogdistanceenddensity", literal(1.0));
+        generalDynamic("fogheight", literal(false));
+        result.generalValues.emplace(
+            "fogheightcolor",
+            optionalDynamic(
+                document,
+                general,
+                "fogheightcolor",
+                "/general",
+                colorLiteral({0.0, 0.0, 0.0, 1.0}),
+                DynamicValueParseMode::color
+            )
+        );
+        generalDynamic("fogheightstart", literal(1.0));
+        generalDynamic("fogheightend", literal(-3.0));
+        generalDynamic("fogheightstartdensity", literal(0.0));
+        generalDynamic("fogheightenddensity", literal(1.0));
+
+        if (const Json* lightConfig = optionalField(general, "lightconfig");
+            lightConfig != nullptr && !lightConfig->is_null()) {
+            requireObject(
+                document,
+                *lightConfig,
+                "/general/lightconfig",
+                "Scene light configuration"
+            );
+            const auto lightCount = [&] (
+                std::string_view key
+            ) -> std::optional<std::size_t> {
+                const Json* value = optionalField(*lightConfig, key);
+                if (value == nullptr) return std::nullopt;
+                const int count = intValue(
+                    document,
+                    *value,
+                    childPointer("/general/lightconfig", key),
+                    "Scene light count"
+                );
+                if (count < 0 || count > 4) {
+                    fail(
+                        document,
+                        childPointer("/general/lightconfig", key),
+                        SceneModelErrorCode::invalidValue,
+                        "Scene light count must be between zero and four"
+                    );
+                }
+                return static_cast<std::size_t>(count);
+            };
+            result.lightConfiguration.point = lightCount("point");
+            result.lightConfiguration.pointShadow = lightCount("pointshadow");
+            result.lightConfiguration.spot = lightCount("spot");
+            result.lightConfiguration.spotCookie = lightCount("spotcookie");
+            result.lightConfiguration.spotShadow = lightCount("spotshadow");
+            result.lightConfiguration.spotShadowCookie = lightCount(
+                "spotshadowcookie"
+            );
+            result.lightConfiguration.tube = lightCount("tube");
+            result.lightConfiguration.directional = lightCount("directional");
+            result.lightConfiguration.directionalShadow = lightCount(
+                "directionalshadow"
+            );
+        }
 
         result.camera.preview = optionalBool(
             document,
@@ -1456,62 +1536,81 @@ private:
             "/general",
             false
         );
-        result.camera.nearPlane = optionalDynamic(
-            document,
-            cameraJson,
+        const Json* projection = optionalField(
+            general, "orthogonalprojection"
+        );
+        const bool orthographicScene = projection != nullptr &&
+            !projection->is_null();
+        // The scene contract owns camera projection values under `/camera`.
+        // A few older exporters duplicated them in `/general`; use those
+        // only when the camera field is absent. Keep the historical camera
+        // defaults for orthographic documents that omit both representations;
+        // pure perspective scenes use the official general defaults.
+        const auto cameraDynamic = [&] (
+            std::string_view key,
+            DynamicValue legacyDefault
+        ) {
+            if (optionalField(cameraJson, key) != nullptr) {
+                return optionalDynamic(
+                    document,
+                    cameraJson,
+                    key,
+                    "/camera",
+                    std::move(legacyDefault),
+                    DynamicValueParseMode::standard
+                );
+            }
+            if (optionalField(general, key) != nullptr) {
+                return result.generalValues.at(std::string(key));
+            }
+            return legacyDefault;
+        };
+        result.camera.nearPlane = cameraDynamic(
             "nearz",
-            "/camera",
-            literal(0.0),
-            DynamicValueParseMode::standard
+            orthographicScene
+                ? literal(0.0)
+                : result.generalValues.at("nearz")
         );
-        result.camera.farPlane = optionalDynamic(
-            document,
-            cameraJson,
+        result.camera.farPlane = cameraDynamic(
             "farz",
-            "/camera",
-            literal(1000.0),
-            DynamicValueParseMode::standard
+            orthographicScene
+                ? literal(1000.0)
+                : result.generalValues.at("farz")
         );
-        result.camera.fieldOfView = optionalDynamic(
-            document,
-            cameraJson,
-            "fov",
-            "/camera",
-            literal(50.0),
-            DynamicValueParseMode::standard
-        );
-        const Json& projection = requiredField(
-            document,
-            general,
-            "orthogonalprojection",
-            "/general"
-        );
-        requireObject(
-            document,
-            projection,
-            "/general/orthogonalprojection",
-            "Orthogonal projection"
-        );
-        result.camera.projectionAuto = optionalBool(
-            document,
-            projection,
-            "auto",
-            "/general/orthogonalprojection",
-            false
-        );
-        if (!result.camera.projectionAuto) {
-            result.camera.projectionWidth = requiredInt(
+        result.camera.fieldOfView = cameraDynamic("fov", literal(50.0));
+        result.camera.perspectiveOverrideFieldOfView =
+            result.generalValues.at("perspectiveoverridefov");
+        result.camera.orthographic = orthographicScene;
+        if (!result.camera.orthographic) {
+            result.camera.projectionAuto = false;
+        } else {
+            requireObject(
                 document,
-                projection,
-                "width",
-                "/general/orthogonalprojection"
+                *projection,
+                "/general/orthogonalprojection",
+                "Orthogonal projection"
             );
-            result.camera.projectionHeight = requiredInt(
+            result.camera.projectionAuto = optionalBool(
                 document,
-                projection,
-                "height",
-                "/general/orthogonalprojection"
+                *projection,
+                "auto",
+                "/general/orthogonalprojection",
+                false
             );
+            if (!result.camera.projectionAuto) {
+                result.camera.projectionWidth = requiredInt(
+                    document,
+                    *projection,
+                    "width",
+                    "/general/orthogonalprojection"
+                );
+                result.camera.projectionHeight = requiredInt(
+                    document,
+                    *projection,
+                    "height",
+                    "/general/orthogonalprojection"
+                );
+            }
         }
 
         result.objects.reserve(objects.size());
@@ -3121,10 +3220,12 @@ private:
         const Json* textValue = optionalField(source, "text");
         const Json* soundValue = optionalField(source, "sound");
         const Json* particleValue = optionalField(source, "particle");
+        const Json* lightValue = optionalField(source, "light");
         const bool hasImage = imageValue != nullptr && imageValue->is_string();
         const bool hasText = textValue != nullptr;
         const bool hasSound = soundValue != nullptr && soundValue->is_array();
         const bool hasParticle = particleValue != nullptr;
+        const bool hasLight = lightValue != nullptr && lightValue->is_string();
 
         // Match upstream's deterministic discriminator precedence. Exported
         // scenes can retain stale fields from a previous object type.
@@ -3136,8 +3237,147 @@ private:
             result.data = parseParticle(document, source, pointer);
         } else if (hasText) {
             result.data = parseText(document, source, pointer);
+        } else if (hasLight) {
+            result.data = parseLight(document, source, pointer);
         } else {
             result.data = GroupObject{};
+        }
+        return result;
+    }
+
+    LightObject parseLight(
+        const Document& document,
+        const Json& source,
+        std::string_view pointer
+    ) {
+        LightObject result;
+        const std::string kind = stringValue(
+            document,
+            requiredField(document, source, "light", pointer),
+            childPointer(pointer, "light"),
+            "Light type"
+        );
+        if (kind == "lpoint") {
+            result.type = LightType::point;
+        } else if (kind == "lspot") {
+            result.type = LightType::spot;
+        } else if (kind == "ltube") {
+            result.type = LightType::tube;
+        } else if (kind == "ldirectional") {
+            result.type = LightType::directional;
+        } else {
+            fail(
+                document,
+                childPointer(pointer, "light"),
+                SceneModelErrorCode::invalidValue,
+                "Unsupported scene light type '" + kind + "'"
+            );
+        }
+
+        result.color = optionalDynamic(
+            document,
+            source,
+            "color",
+            pointer,
+            colorLiteral({0.0, 0.0, 0.0, 1.0}),
+            DynamicValueParseMode::color
+        );
+        result.intensity = optionalDynamic(
+            document,
+            source,
+            "intensity",
+            pointer,
+            literal(0.0),
+            DynamicValueParseMode::standard
+        );
+        if (result.type != LightType::directional) {
+            result.radius = optionalDynamic(
+                document,
+                source,
+                "radius",
+                pointer,
+                literal(1.0),
+                DynamicValueParseMode::standard
+            );
+        } else {
+            result.radius = literal(1.0);
+        }
+        if (result.type == LightType::spot) {
+            result.exponent = optionalDynamic(
+                document,
+                source,
+                "exponent",
+                pointer,
+                literal(2.0),
+                DynamicValueParseMode::standard
+            );
+            result.innerCone = optionalDynamic(
+                document,
+                source,
+                "innercone",
+                pointer,
+                literal(20.0),
+                DynamicValueParseMode::standard
+            );
+            result.outerCone = optionalDynamic(
+                document,
+                source,
+                "outercone",
+                pointer,
+                literal(30.0),
+                DynamicValueParseMode::standard
+            );
+        } else {
+            result.exponent = literal(0.0);
+            result.innerCone = literal(0.0);
+            result.outerCone = literal(0.0);
+        }
+        result.controlPoint = optionalDynamic(
+            document,
+            source,
+            "controlpoint",
+            pointer,
+            literal(std::string("2 0 0")),
+            DynamicValueParseMode::standard
+        );
+        result.castShadow = optionalDynamic(
+            document, source, "castshadow", pointer, literal(false),
+            DynamicValueParseMode::standard
+        );
+        result.cookie = optionalDynamic(
+            document, source, "cookie", pointer, literal(std::string()),
+            DynamicValueParseMode::standard
+        );
+        result.useCookie = optionalDynamic(
+            document, source, "usecookie", pointer, literal(false),
+            DynamicValueParseMode::standard
+        );
+        result.castVolumetrics = optionalDynamic(
+            document, source, "castvolumetrics", pointer, literal(false),
+            DynamicValueParseMode::standard
+        );
+        result.density = optionalDynamic(
+            document, source, "density", pointer, literal(1.0),
+            DynamicValueParseMode::standard
+        );
+        result.volumetricsExponent = optionalDynamic(
+            document, source, "volumetricsexponent", pointer, literal(1.0),
+            DynamicValueParseMode::standard
+        );
+        result.lightSourceSize = optionalDynamic(
+            document, source, "lightsourcesize", pointer, literal(0.0),
+            DynamicValueParseMode::standard
+        );
+        for (std::size_t index = 0; index < result.cascadeDistances.size();
+             ++index) {
+            result.cascadeDistances[index] = optionalDynamic(
+                document,
+                source,
+                "cascadedistance" + std::to_string(index),
+                pointer,
+                literal(0.0),
+                DynamicValueParseMode::standard
+            );
         }
         return result;
     }
@@ -3229,6 +3469,13 @@ private:
             "alignment",
             pointer
         ).value_or("center"));
+        result.castShadow = optionalBool(
+            document,
+            source,
+            "castshadow",
+            pointer,
+            false
+        );
         result.copyBackground = optionalBool(
             document,
             source,
@@ -3479,6 +3726,44 @@ private:
             pointer,
             literal(0.0),
             DynamicValueParseMode::standard
+        );
+        result.msdf = optionalBool(document, source, "msdf", pointer, false);
+        result.blur = optionalBool(document, source, "blur", pointer, false);
+        result.blurSize = optionalDynamic(
+            document, source, "blursize", pointer,
+            literal(0.0), DynamicValueParseMode::standard
+        );
+        result.dropShadow = optionalBool(
+            document, source, "dropshadow", pointer, false
+        );
+        result.dropShadowColor = optionalDynamic(
+            document, source, "dropshadowcolor", pointer,
+            colorLiteral({0.0, 0.0, 0.0, 1.0}),
+            DynamicValueParseMode::color
+        );
+        result.dropShadowOffset = optionalDynamic(
+            document, source, "dropshadowoffset", pointer,
+            literal(std::string("0 0")), DynamicValueParseMode::standard
+        );
+        result.dropShadowOpacity = optionalDynamic(
+            document, source, "dropshadowopacity", pointer,
+            literal(1.0), DynamicValueParseMode::standard
+        );
+        result.dropShadowSize = optionalDynamic(
+            document, source, "dropshadowsize", pointer,
+            literal(0.0), DynamicValueParseMode::standard
+        );
+        result.outline = optionalBool(
+            document, source, "outline", pointer, false
+        );
+        result.outlineColor = optionalDynamic(
+            document, source, "outlinecolor", pointer,
+            colorLiteral({0.0, 0.0, 0.0, 1.0}),
+            DynamicValueParseMode::color
+        );
+        result.outlineThickness = optionalDynamic(
+            document, source, "outlinethickness", pointer,
+            literal(0.0), DynamicValueParseMode::standard
         );
         parseLayerEffects(
             document,
@@ -3952,6 +4237,9 @@ private:
         }
         if (value == "additive") {
             return BlendingMode::additive;
+        }
+        if (value == "alphatocoverage") {
+            return BlendingMode::alphaToCoverage;
         }
         fail(
             document,

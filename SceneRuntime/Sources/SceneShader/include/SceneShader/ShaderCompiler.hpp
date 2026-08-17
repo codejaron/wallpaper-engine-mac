@@ -29,6 +29,12 @@ private:
 };
 
 struct TranslatedMetalShaderPair {
+    enum class TextureDimension : std::uint32_t {
+        unsupported = 0,
+        texture2D = 2,
+        texture3D = 3,
+    };
+
     enum class ValueType : std::uint32_t {
         boolean,
         int32,
@@ -38,6 +44,7 @@ struct TranslatedMetalShaderPair {
         float3,
         float4,
         float3x3,
+        float4x3,
         float4x4,
         unsupported,
     };
@@ -55,7 +62,8 @@ struct TranslatedMetalShaderPair {
         std::string name;
         std::uint32_t textureIndex = 0;
         std::uint32_t samplerIndex = 0;
-        bool supportedFloat2D = false;
+        TextureDimension dimension = TextureDimension::unsupported;
+        bool comparison = false;
     };
 
     struct VertexAttribute {

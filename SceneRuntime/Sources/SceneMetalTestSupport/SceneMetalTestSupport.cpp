@@ -452,7 +452,7 @@ extern "C" int we_scene_metal_test_present_pattern(
             presentationPattern(source_width, source_height)
         );
         auto destination = session.createFramebuffer(
-            metal::PixelFormat::rgba8,
+            metal::PixelFormat::bgra8,
             nativeViewport.drawableWidth,
             nativeViewport.drawableHeight,
             metal::TextureWrap::clampToEdge

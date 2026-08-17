@@ -304,7 +304,8 @@ std::vector<script::ScriptLayerDescriptor> sceneLayerDescriptors(
             type = script::ScriptLayerType::particle;
         } else if (std::holds_alternative<SoundObject>(object.data)) {
             type = script::ScriptLayerType::sound;
-        } else if (std::holds_alternative<GroupObject>(object.data)) {
+        } else if (std::holds_alternative<GroupObject>(object.data) ||
+                   std::holds_alternative<LightObject>(object.data)) {
             type = script::ScriptLayerType::group;
         } else {
             continue;
@@ -356,6 +357,13 @@ std::vector<script::ScriptLayerDescriptor> sceneLayerDescriptors(
             add("alpha", text->alpha);
             add("padding", text->padding);
             add("spacing", text->spacing);
+            add("blursize", text->blurSize);
+            add("dropshadowcolor", text->dropShadowColor);
+            add("dropshadowoffset", text->dropShadowOffset);
+            add("dropshadowopacity", text->dropShadowOpacity);
+            add("dropshadowsize", text->dropShadowSize);
+            add("outlinecolor", text->outlineColor);
+            add("outlinethickness", text->outlineThickness);
         } else if (const auto* particle = std::get_if<ParticleObject>(&object.data)) {
             add("parallaxDepth", particle->parallaxDepth);
             add("enabled", particle->instanceOverride.enabled);
@@ -370,6 +378,27 @@ std::vector<script::ScriptLayerDescriptor> sceneLayerDescriptors(
         } else if (const auto* sound = std::get_if<SoundObject>(&object.data)) {
             descriptor.soundStartsAutomatically = !sound->startSilent;
             add("volume", sound->volume);
+        } else if (const auto* light = std::get_if<LightObject>(&object.data)) {
+            add("color", light->color);
+            add("intensity", light->intensity);
+            add("radius", light->radius);
+            add("exponent", light->exponent);
+            add("innercone", light->innerCone);
+            add("outercone", light->outerCone);
+            add("controlpoint", light->controlPoint);
+            add("castshadow", light->castShadow);
+            add("usecookie", light->useCookie);
+            add("castvolumetrics", light->castVolumetrics);
+            add("density", light->density);
+            add("volumetricsexponent", light->volumetricsExponent);
+            add("lightsourcesize", light->lightSourceSize);
+            for (std::size_t index = 0;
+                 index < light->cascadeDistances.size(); ++index) {
+                add(
+                    "cascadedistance" + std::to_string(index),
+                    light->cascadeDistances[index]
+                );
+            }
         }
         result.push_back(std::move(descriptor));
     }
@@ -409,6 +438,25 @@ void forEachLayerDynamicProperty(
         callback(LayerDynamicPropertyRef{"alpha", &text->alpha});
         callback(LayerDynamicPropertyRef{"padding", &text->padding});
         callback(LayerDynamicPropertyRef{"spacing", &text->spacing});
+        callback(LayerDynamicPropertyRef{"blursize", &text->blurSize});
+        callback(LayerDynamicPropertyRef{
+            "dropshadowcolor", &text->dropShadowColor
+        });
+        callback(LayerDynamicPropertyRef{
+            "dropshadowoffset", &text->dropShadowOffset
+        });
+        callback(LayerDynamicPropertyRef{
+            "dropshadowopacity", &text->dropShadowOpacity
+        });
+        callback(LayerDynamicPropertyRef{
+            "dropshadowsize", &text->dropShadowSize
+        });
+        callback(LayerDynamicPropertyRef{
+            "outlinecolor", &text->outlineColor
+        });
+        callback(LayerDynamicPropertyRef{
+            "outlinethickness", &text->outlineThickness
+        });
     } else if (const auto* particle = std::get_if<ParticleObject>(&object.data)) {
         callback(LayerDynamicPropertyRef{
             "parallaxDepth", &particle->parallaxDepth
@@ -442,6 +490,35 @@ void forEachLayerDynamicProperty(
         });
     } else if (const auto* sound = std::get_if<SoundObject>(&object.data)) {
         callback(LayerDynamicPropertyRef{"volume", &sound->volume});
+    } else if (const auto* light = std::get_if<LightObject>(&object.data)) {
+        callback(LayerDynamicPropertyRef{"color", &light->color});
+        callback(LayerDynamicPropertyRef{"intensity", &light->intensity});
+        callback(LayerDynamicPropertyRef{"radius", &light->radius});
+        callback(LayerDynamicPropertyRef{"exponent", &light->exponent});
+        callback(LayerDynamicPropertyRef{"innercone", &light->innerCone});
+        callback(LayerDynamicPropertyRef{"outercone", &light->outerCone});
+        callback(LayerDynamicPropertyRef{"controlpoint", &light->controlPoint});
+        callback(LayerDynamicPropertyRef{"castshadow", &light->castShadow});
+        callback(LayerDynamicPropertyRef{"usecookie", &light->useCookie});
+        callback(LayerDynamicPropertyRef{
+            "castvolumetrics", &light->castVolumetrics
+        });
+        callback(LayerDynamicPropertyRef{"density", &light->density});
+        callback(LayerDynamicPropertyRef{
+            "volumetricsexponent", &light->volumetricsExponent
+        });
+        callback(LayerDynamicPropertyRef{
+            "lightsourcesize", &light->lightSourceSize
+        });
+        for (std::size_t index = 0;
+             index < light->cascadeDistances.size(); ++index) {
+            callback(LayerDynamicPropertyRef{
+                index == 0 ? "cascadedistance0"
+                    : index == 1 ? "cascadedistance1"
+                                 : "cascadedistance2",
+                &light->cascadeDistances[index],
+            });
+        }
     }
 }
 

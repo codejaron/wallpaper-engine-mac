@@ -77,6 +77,15 @@ typedef struct WESceneFrameInputs {
     double frame_time_seconds;
 } WESceneFrameInputs;
 
+// Renderer quality is an explicit frame-graph policy. Values mirror the
+// official quality threshold used for volumetric target allocation.
+typedef enum WESceneFrameRenderQuality {
+    WE_SCENE_FRAME_RENDER_POWER_SAVING = 1,
+    WE_SCENE_FRAME_RENDER_BALANCED = 2,
+    WE_SCENE_FRAME_RENDER_HIGH = 3,
+    WE_SCENE_FRAME_RENDER_ULTRA = 4,
+} WESceneFrameRenderQuality;
+
 // Borrowed fixed-size arrays used only for the duration of one render call.
 // Every pointer is required when this structure is supplied. Callers that do
 // not have a real capture frame must use the legacy render entry points so an
@@ -144,11 +153,12 @@ typedef enum WEScenePresentationScaling {
 } WEScenePresentationScaling;
 
 // High quality intentionally has no physical target and uses the existing
-// author-resolution entry points. These values describe the fixed-size
-// downscale policies applied against the supplied backing-pixel target.
+// author-resolution entry points. Ultra also preserves author resolution but
+// carries the official level-4 shader and shadow allocation policy.
 typedef enum WEScenePhysicalRenderQuality {
     WE_SCENE_PHYSICAL_RENDER_BALANCED = 0,
     WE_SCENE_PHYSICAL_RENDER_POWER_SAVING = 1,
+    WE_SCENE_PHYSICAL_RENDER_ULTRA = 2,
 } WEScenePhysicalRenderQuality;
 
 // A backing-pixel target independent from the presentation drawable. In span
@@ -361,6 +371,10 @@ typedef struct WESceneVector4 {
     double w;
 } WESceneVector4;
 
+typedef struct WESceneMatrix4x4 {
+    double values[16];
+} WESceneMatrix4x4;
+
 typedef struct WESceneObjectTransform {
     WESceneVector3 origin;
     WESceneVector3 scale;
@@ -417,6 +431,7 @@ typedef enum WESceneFrameGeometryKind {
     WE_SCENE_FRAME_GEOMETRY_IMAGE_SCENE = 2,
     WE_SCENE_FRAME_GEOMETRY_PASSTHROUGH_CAPTURE = 3,
     WE_SCENE_FRAME_GEOMETRY_PUPPET_MESH = 4,
+    WE_SCENE_FRAME_GEOMETRY_LIGHT_VOLUME = 5,
 } WESceneFrameGeometryKind;
 
 typedef enum WESceneFrameTexCoordKind {
@@ -428,6 +443,7 @@ typedef enum WESceneFrameBlendingMode {
     WE_SCENE_FRAME_BLENDING_NORMAL = 0,
     WE_SCENE_FRAME_BLENDING_TRANSLUCENT = 1,
     WE_SCENE_FRAME_BLENDING_ADDITIVE = 2,
+    WE_SCENE_FRAME_BLENDING_ALPHA_TO_COVERAGE = 3,
 } WESceneFrameBlendingMode;
 
 typedef enum WESceneFrameCullingMode {
@@ -501,6 +517,8 @@ typedef struct WESceneFramePlanInfo {
     size_t script_evaluation_count;
     WESceneFrameResourceInfo output;
     size_t particle_count;
+    int camera_orthographic;
+    double camera_perspective_override_field_of_view;
 } WESceneFramePlanInfo;
 
 typedef enum WESceneScriptEvaluationStatus {
@@ -535,6 +553,7 @@ typedef struct WESceneFrameImageInfo {
     WESceneFrameResourceInfo source;
     WESceneFrameResourceInfo composite_a;
     WESceneFrameResourceInfo composite_b;
+    int perspective;
 } WESceneFrameImageInfo;
 
 typedef struct WESceneFrameTextInfo {
@@ -563,6 +582,7 @@ typedef struct WESceneFrameTextInfo {
     int limit_width;
     int32_t max_rows;
     double max_width;
+    int perspective;
 } WESceneFrameTextInfo;
 
 typedef struct WESceneFrameParticleInfo {
@@ -717,11 +737,17 @@ typedef struct WESceneFrameOperationInfo {
     double clear_blue;
     double clear_alpha;
     size_t particle_index;
+    int clear_depth;
+    int has_light_index;
+    size_t light_index;
+    int has_alternate_view_projection;
+    WESceneMatrix4x4 alternate_view_projection;
 } WESceneFrameOperationInfo;
 
 typedef struct WESceneFrameTextureBindingInfo {
     int32_t slot;
     WESceneFrameResourceInfo resource;
+    int sample_depth;
 } WESceneFrameTextureBindingInfo;
 
 typedef struct WESceneFrameComboInfo {
@@ -1210,6 +1236,12 @@ WESceneFramePlanRef we_scene_frame_graph_plan_create(
 WESceneFramePlanRef we_scene_frame_graph_plan_create_with_inputs(
     WESceneFrameGraphRef graph,
     const WESceneFrameInputs* inputs,
+    WESceneRuntimeErrorRef* out_error
+);
+WESceneFramePlanRef we_scene_frame_graph_plan_create_with_inputs_and_render_quality(
+    WESceneFrameGraphRef graph,
+    const WESceneFrameInputs* inputs,
+    WESceneFrameRenderQuality render_quality,
     WESceneRuntimeErrorRef* out_error
 );
 void we_scene_frame_plan_destroy(WESceneFramePlanRef plan);

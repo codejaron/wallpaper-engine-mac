@@ -729,6 +729,10 @@ TranslatedMetalShaderPair::ValueType metalValueType(
         type.basetype == BaseType::Float) {
         return ValueType::float3x3;
     }
+    if (type.columns == 4 && type.vecsize == 3 &&
+        type.basetype == BaseType::Float) {
+        return ValueType::float4x3;
+    }
     if (type.columns == 4 && type.vecsize == 4 &&
         type.basetype == BaseType::Float) {
         return ValueType::float4x4;
@@ -1137,14 +1141,24 @@ TranslatedMetalStage crossCompileMetal(
             }
             const auto& type = compiler.get_type(resource.type_id);
             const auto& sampledType = compiler.get_type(type.image.type);
+            TranslatedMetalShaderPair::TextureDimension dimension =
+                TranslatedMetalShaderPair::TextureDimension::unsupported;
+            if (!type.image.arrayed && !type.image.ms && type.array.empty() &&
+                sampledType.basetype == spirv_cross::SPIRType::Float) {
+                if (type.image.dim == spv::Dim2D) {
+                    dimension = TranslatedMetalShaderPair::
+                        TextureDimension::texture2D;
+                } else if (type.image.dim == spv::Dim3D) {
+                    dimension = TranslatedMetalShaderPair::
+                        TextureDimension::texture3D;
+                }
+            }
             result.textures.push_back({
                 .name = reflectedResourceName(compiler, resource),
                 .textureIndex = textureIndex,
                 .samplerIndex = samplerIndex,
-                .supportedFloat2D = type.image.dim == spv::Dim2D &&
-                    !type.image.arrayed && !type.image.ms &&
-                    type.array.empty() &&
-                    sampledType.basetype == spirv_cross::SPIRType::Float,
+                .dimension = dimension,
+                .comparison = type.image.depth == 1,
             });
         }
         for (const auto& resource : resources.stage_inputs) {

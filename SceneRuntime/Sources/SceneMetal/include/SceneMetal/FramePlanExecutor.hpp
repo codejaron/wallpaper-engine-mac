@@ -50,11 +50,10 @@ struct MediaThumbnailRGBA8 final {
 
 enum class PresentationScaling { stretch, aspectFit, aspectFill, automatic };
 
-// The requested backing-pixel ceiling for an explicitly downscaled Scene
-// render. Balanced additionally applies the runtime's 1080p performance
-// ceiling; High is represented by no target so the author-resolution path
-// remains byte-for-byte unchanged.
-enum class PhysicalRenderQuality { balanced, powerSaving };
+// The requested physical-size policy for Scene rendering. Balanced applies
+// the runtime's 1080p performance ceiling; Ultra keeps author resolution while
+// selecting the official level-4 shader and shadow allocation contract.
+enum class PhysicalRenderQuality { balanced, powerSaving, ultra };
 
 struct PhysicalRenderTarget final {
     std::uint32_t backingWidth = 0;

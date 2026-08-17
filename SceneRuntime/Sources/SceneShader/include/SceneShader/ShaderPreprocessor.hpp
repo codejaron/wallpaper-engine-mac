@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -17,6 +18,9 @@ struct ShaderPreprocessOptions {
     std::map<std::string, int> combos;
     std::map<std::string, int> overrideCombos;
     std::map<std::string, std::string> constants;
+    // Texture-backed sampler combos are discovered from the pass texture map,
+    // before shader compilation, just like the official renderer.
+    std::set<int> textureSlots;
 };
 
 using ShaderParameterDefault = std::variant<
@@ -34,6 +38,7 @@ struct ShaderParameterMetadata {
     std::string type;
     std::string name;
     std::optional<std::string> material;
+    std::optional<std::string> combo;
     std::optional<ShaderParameterDefault> defaultValue;
     std::string json;
 };

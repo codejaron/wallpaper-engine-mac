@@ -252,6 +252,13 @@ void countProject(const SceneProject& project, Counter& counter) {
             counter.dynamic(text->alpha);
             counter.dynamic(text->padding);
             counter.dynamic(text->spacing);
+            counter.dynamic(text->blurSize);
+            counter.dynamic(text->dropShadowColor);
+            counter.dynamic(text->dropShadowOffset);
+            counter.dynamic(text->dropShadowOpacity);
+            counter.dynamic(text->dropShadowSize);
+            counter.dynamic(text->outlineColor);
+            counter.dynamic(text->outlineThickness);
         } else if (std::get_if<SoundObject>(&object.data) != nullptr) {
             ++counter.stats.sound_object_count;
             const auto& sound = std::get<SoundObject>(object.data);
@@ -414,6 +421,25 @@ void countProject(const SceneProject& project, Counter& counter) {
                         }
                     }, particleOperator);
                 }
+            }
+        } else if (const auto* light =
+                       std::get_if<we::scene::LightObject>(&object.data)) {
+            ++counter.stats.group_object_count;
+            counter.dynamic(light->color);
+            counter.dynamic(light->intensity);
+            counter.dynamic(light->radius);
+            counter.dynamic(light->exponent);
+            counter.dynamic(light->innerCone);
+            counter.dynamic(light->outerCone);
+            counter.dynamic(light->controlPoint);
+            counter.dynamic(light->castShadow);
+            counter.dynamic(light->useCookie);
+            counter.dynamic(light->castVolumetrics);
+            counter.dynamic(light->density);
+            counter.dynamic(light->volumetricsExponent);
+            counter.dynamic(light->lightSourceSize);
+            for (const DynamicValue& distance : light->cascadeDistances) {
+                counter.dynamic(distance);
             }
         } else {
             ++counter.stats.group_object_count;

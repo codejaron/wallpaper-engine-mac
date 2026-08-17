@@ -28,6 +28,132 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
     }
 
+    func testAuthoredSamplerTextureEnablesLinkedShaderCombo() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform sampler2D g_Texture1; // {"combo":"MASK"}
+            void main() {
+            #if MASK
+                gl_FragColor = texSample2D(g_Texture1, vec2(0.5, 0.5));
+            #else
+                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+            #endif
+            }
+            """,
+            includeSecondTexture: true
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255]),
+            "An authored g_TextureN provider must enable its sampler metadata combo before compilation"
+        )
+    }
+
+    func testExplicitSamplerComboOverridesTextureLinkedDiscovery() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform sampler2D g_Texture1; // {"combo":"MASK","default":"green"}
+            void main() {
+            #if MASK
+                gl_FragColor = texSample2D(g_Texture1, vec2(0.5, 0.5));
+            #else
+                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+            #endif
+            }
+            """,
+            baseCombos: ["MASK": 0],
+            includeSecondTexture: true
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 0, 0, 255]),
+            "An explicit pass combo must remain authoritative over sampler discovery"
+        )
+    }
+
+    func testMissingSamplerTextureLeavesLinkedComboDisabled() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform sampler2D g_Texture1; // {"combo":"MASK"}
+            void main() {
+            #if MASK
+                gl_FragColor = texSample2D(g_Texture1, vec2(0.5, 0.5));
+            #else
+                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+            #endif
+            }
+            """,
+            includeUnboundGreenTexture: true
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 0, 0, 255]),
+            "A shader texture default alone must not enable its sampler metadata combo"
+        )
+    }
+
+    func testEffectBindDoesNotEnableOrReuseAuthoredSamplerCombo() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform sampler2D g_Texture0; // {"combo":"BOUND_TEXTURE"}
+            void main() {
+            #if BOUND_TEXTURE
+                gl_FragColor = texSample2D(g_Texture0, vec2(0.5, 0.5));
+            #else
+                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+            #endif
+            }
+            """,
+            commandMode: .copy
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 0, 0, 255]),
+            "An effect bind may provide pixels at draw time but must not enable or reuse an authored-texture shader combo"
+        )
+    }
+
+    func testSampler3DLUTUsesARealVolumeTextureProvider() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform sampler3D g_Texture1;
+            void main() {
+                gl_FragColor = vec4(
+                    texSample3D(g_Texture1, vec3(0.25, 0.75, 0.25)),
+                    1.0
+                );
+            }
+            """,
+            secondTextureData: makeLUTTexture2x2x2(),
+            baseCombos: [:],
+            vertexSource: """
+            attribute vec3 a_Position;
+            void main() { gl_Position = vec4(a_Position, 1.0); }
+            """,
+            includeSecondTexture: true
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 0, 255, 255]),
+            "sampler3D must sample the blue voxel from the correctly repacked 2x2x2 LUT"
+        )
+    }
+
     func testSamplerMetadataDefaultBindsMissingFrameTextureSlot() throws {
         let loaded = try loadFixture(
             fragmentSource: """
@@ -344,25 +470,24 @@ final class FrameExecutorPixelTests: XCTestCase {
         )
     }
 
-    func testRuntimeSamplerDefaultIsNotRewrittenAsAnAssetTexture() throws {
+    func testRuntimeSamplerDefaultSnapshotsRenderDestination() throws {
         let loaded = try loadFixture(
             fragmentSource: """
             uniform sampler2D g_Texture1; // {"default":"_rt_FullFrameBuffer"}
             void main() {
-                gl_FragColor = texSample2D(g_Texture1, vec2(0.5, 0.5));
+                vec4 previous = texSample2D(g_Texture1, vec2(0.5, 0.5));
+                gl_FragColor = vec4(previous.rgb + vec3(1.0, 0.0, 0.0), 1.0);
             }
             """
         )
         defer { destroy(loaded) }
 
         try render(loaded.executor)
-        XCTAssertEqual(try readPixels(loaded.executor), repeatedPixel([0, 0, 0, 255]))
-        try assertSingleSkippedObjectIssue(
-            loaded.executor,
-            objectIndex: 0,
-            objectId: 1,
-            operationIndex: 0,
-            messageContains: ["g_Texture1", "render destination", "_rt_FullFrameBuffer"]
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 0, 0, 255]),
+            "A pass that samples its destination must read a pre-pass snapshot"
         )
     }
 
@@ -588,50 +713,324 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertTrue(containsOpaqueRedPixel(deformedPixels))
     }
 
-    func testPuppetMeshUsesTheFirstValidBlockWhenPayloadContainsAnotherBlock() throws {
-        // Linux stops at the first structurally valid MDLV block. Keep a
-        // second valid block in the payload to guard against accidentally
-        // rejecting multi-block assets as ambiguous.
-        var payload = makePuppetMesh(version: "MDLV0021")
-        payload.removeLast(4) // Remove the first block's MDLS terminator.
-        payload.append(makePuppetMesh(version: "MDLV0023"))
-
-        let loaded = try loadFixture(
+    func testPuppetBoneUniformMatchesSharedCPUSkinningPose() throws {
+        let animationLayer: [String: Any] = [
+            "additive": false,
+            "animation": 7,
+            "blend": 1.0,
+            "id": 11,
+            "name": "Translation",
+            "rate": 1.0,
+            "visible": true,
+        ]
+        let cpu = try loadFixture(
             fragmentSource: constantRedFragmentShader,
-            puppetData: payload
+            projectionWidth: 4,
+            projectionHeight: 2,
+            imageOrigin: "2 1 0",
+            imageSize: "2 2",
+            puppetData: makeAnimatedPuppetMesh(),
+            puppetAnimationLayer: animationLayer
+        )
+        defer { destroy(cpu) }
+        let gpu = try loadFixture(
+            fragmentSource: puppetSkinningFragmentShader,
+            vertexSource: puppetSkinningVertexShader,
+            projectionWidth: 4,
+            projectionHeight: 2,
+            imageOrigin: "2 1 0",
+            imageSize: "2 2",
+            puppetData: makeAnimatedPuppetMesh(),
+            puppetAnimationLayer: animationLayer
+        )
+        defer { destroy(gpu) }
+
+        try render(cpu.executor, timeSeconds: 0)
+        try render(gpu.executor, timeSeconds: 0)
+        let cpuInitial = try readPixels(cpu.executor)
+        let gpuInitial = try readPixels(gpu.executor)
+        XCTAssertEqual(gpuInitial, cpuInitial)
+
+        try render(cpu.executor, timeSeconds: 0.5)
+        try render(gpu.executor, timeSeconds: 0.5)
+        let cpuAnimated = try readPixels(cpu.executor)
+        let gpuAnimated = try readPixels(gpu.executor)
+        XCTAssertEqual(gpuAnimated, cpuAnimated)
+        XCTAssertNotEqual(gpuAnimated, gpuInitial)
+    }
+
+    func testPuppetBlendMapUsesSecondRowAndFourComponentTextureCoordinates() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            varying float v_ContractMatches;
+            void main() {
+                gl_FragColor = v_ContractMatches > 0.5
+                    ? vec4(0.0, 1.0, 0.0, 1.0)
+                    : vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            """,
+            vertexSource: """
+            attribute vec3 a_Position;
+            attribute vec4 a_TexCoordVec4;
+            attribute uvec4 a_BlendIndices;
+            uniform vec4 g_BlendMap[BLENDROWCOUNT];
+            #ifdef SKINNING_ALPHA
+            uniform float g_BonesAlpha[BONECOUNT];
+            #endif
+            uniform mat4 g_ModelViewProjectionMatrix;
+            varying float v_ContractMatches;
+            void main() {
+                float blend = g_BlendMap[1][0];
+                bool uvMatches = all(lessThan(
+                    abs(a_TexCoordVec4 - vec4(0.25, 0.5, 0.75, 1.0)),
+                    vec4(0.0001)));
+                v_ContractMatches = a_BlendIndices.x == 4u
+                    && abs(blend - 0.75) < 0.0001
+                    && uvMatches ? 1.0 : 0.0;
+                gl_Position = g_ModelViewProjectionMatrix
+                    * vec4(a_Position, 1.0);
+            }
+            """,
+            puppetData: makeBlendMapPuppetMesh(),
+            puppetAnimationLayer: [
+                "additive": false,
+                "animation": 17,
+                "blend": 1.0,
+                "id": 17,
+                "name": "BlendMap",
+                "rate": 1.0,
+                "visible": true,
+            ]
         )
         defer { destroy(loaded) }
 
-        try render(loaded.executor)
+        try render(loaded.executor, timeSeconds: 0.5)
+        try assertNoExecutorIssues(loaded.executor)
         let pixels = try readPixels(loaded.executor)
-        let redPixels = stride(from: 0, to: pixels.count, by: 4).filter {
-            pixels[$0] == 255 && pixels[$0 + 1] == 0 &&
+        XCTAssertTrue(stride(from: 0, to: pixels.count, by: 4).contains {
+            pixels[$0] == 0 && pixels[$0 + 1] == 255 &&
                 pixels[$0 + 2] == 0 && pixels[$0 + 3] == 255
-        }
-        XCTAssertGreaterThan(redPixels.count, 0)
-        XCTAssertLessThan(redPixels.count, 4)
+        })
+        XCTAssertFalse(containsOpaqueRedPixel(pixels))
+    }
+
+    func testPuppetBonesAlphaUsesAnimatedWeightedBoneValues() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            varying float v_ContractMatches;
+            void main() {
+                gl_FragColor = v_ContractMatches > 0.5
+                    ? vec4(0.0, 1.0, 0.0, 1.0)
+                    : vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            """,
+            vertexSource: """
+            attribute vec3 a_Position;
+            attribute vec2 a_TexCoord;
+            attribute uvec4 a_BlendIndices;
+            attribute vec4 a_BlendWeights;
+            uniform float g_BonesAlpha[BONECOUNT];
+            uniform mat4 g_ModelViewProjectionMatrix;
+            varying float v_ContractMatches;
+            void main() {
+                float alpha = g_BonesAlpha[a_BlendIndices.x]
+                        * a_BlendWeights.x
+                    + g_BonesAlpha[a_BlendIndices.y]
+                        * a_BlendWeights.y;
+                v_ContractMatches = abs(alpha - 0.55) < 0.0001
+                    ? 1.0 : 0.0;
+                gl_Position = g_ModelViewProjectionMatrix
+                    * vec4(a_Position, 1.0);
+            }
+            """,
+            puppetData: makeBonesAlphaPuppetMesh(),
+            puppetAnimationLayer: [
+                "additive": false,
+                "animation": 18,
+                "blend": 1.0,
+                "id": 18,
+                "name": "BonesAlpha",
+                "rate": 1.0,
+                "visible": true,
+            ]
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, timeSeconds: 0.5)
+        try assertNoExecutorIssues(loaded.executor)
+        let pixels = try readPixels(loaded.executor)
+        XCTAssertTrue(stride(from: 0, to: pixels.count, by: 4).contains {
+            pixels[$0] == 0 && pixels[$0 + 1] == 255 &&
+                pixels[$0 + 2] == 0 && pixels[$0 + 3] == 255
+        })
+        XCTAssertFalse(containsOpaqueRedPixel(pixels))
+    }
+
+    func testPuppetMorphUsesOfficialTextureOffsetsWeightsAndPositionW() throws {
+        let loaded = try loadFixture(
+            fragmentSource: constantRedFragmentShader,
+            vertexSource: """
+            #if MORPHING
+            attribute vec4 a_PositionVec4;
+            uniform sampler2D g_Texture5;
+            uniform vec4 g_Texture5Resolution;
+            uniform vec4 g_Texture5Texel;
+            uniform float g_Texture5MipMapInfo;
+            uniform vec4 g_Texture5Rotation;
+            uniform vec2 g_Texture5Translation;
+            uniform uint g_MorphOffsets[12];
+            uniform float g_MorphWeights[12];
+            #else
+            attribute vec3 a_Position;
+            #endif
+            #if SKINNING
+            attribute vec3 a_Normal;
+            attribute vec4 a_Tangent4;
+            attribute uvec4 a_BlendIndices;
+            attribute vec4 a_BlendWeights;
+            uniform mat4x3 g_Bones[BONECOUNT];
+            #endif
+            #if MORPHING_MODIFIERS
+            uniform mat4x3 g_MorphBoneTransform[11];
+            uniform vec3 g_MorphBoneRules[11];
+            #endif
+            attribute vec2 a_TexCoord;
+            uniform mat4 g_ModelViewProjectionMatrix;
+            varying vec2 v_TexCoord;
+            void main() {
+                v_TexCoord = a_TexCoord;
+            #if MORPHING
+                bool contractMatches = g_MorphOffsets[0] == 1u
+                    && g_MorphOffsets[1] == 0u
+                    && abs(g_MorphWeights[0] - 2.0) < 0.0001
+                    && all(lessThan(
+                        abs(g_Texture5Resolution - vec4(2.0)),
+                        vec4(0.0001)))
+                    && all(lessThan(
+                        abs(g_Texture5Texel - vec4(0.5, 0.5, 2.0, 2.0)),
+                        vec4(0.0001)))
+                    && abs(g_Texture5MipMapInfo) < 0.0001
+                    && all(lessThan(
+                        abs(g_Texture5Rotation
+                            - vec4(1.0, 0.0, 0.0, 1.0)),
+                        vec4(0.0001)))
+                    && all(lessThan(
+                        abs(g_Texture5Translation),
+                        vec2(0.0001)))
+                    && a_PositionVec4.w == 1.0;
+                vec3 preMorphPosition = a_PositionVec4.xyz;
+            #if SKINNING
+                mat4x3 skin =
+                    g_Bones[a_BlendIndices.x] * a_BlendWeights.x
+                    + g_Bones[a_BlendIndices.y] * a_BlendWeights.y
+                    + g_Bones[a_BlendIndices.z] * a_BlendWeights.z
+                    + g_Bones[a_BlendIndices.w] * a_BlendWeights.w;
+                preMorphPosition = skin * vec4(preMorphPosition, 1.0);
+            #endif
+            #if MORPHING_MODIFIERS
+                vec3 modifierLocal = g_MorphBoneTransform[0]
+                    * vec4(preMorphPosition, 1.0);
+                vec3 defaultLocal = g_MorphBoneTransform[10]
+                    * vec4(a_PositionVec4.xyz, 1.0);
+                contractMatches = contractMatches
+                    && all(lessThan(
+                        abs(modifierLocal - a_PositionVec4.xyz),
+                        vec3(0.0001)))
+                    && all(lessThan(
+                        abs(defaultLocal - a_PositionVec4.xyz),
+                        vec3(0.0001)))
+                    && all(lessThan(
+                        abs(g_MorphBoneRules[0] - vec3(1.0, -0.25, 0.75)),
+                        vec3(0.0001)))
+                    && all(lessThan(
+                        abs(g_MorphBoneRules[10] - vec3(0.0, -1.0, 0.0)),
+                        vec3(0.0001)));
+            #else
+                contractMatches = false;
+            #endif
+                uint morphMapIndex = CASTU(a_PositionVec4.w)
+                    + g_MorphOffsets[1];
+                vec2 inverseResolution = 1.0 / g_Texture5Resolution.xy;
+                vec2 morphUV = (vec2(
+                    CASTF(morphMapIndex % CASTU(g_Texture5Resolution.x)),
+                    CASTF(morphMapIndex / CASTU(g_Texture5Resolution.y)))
+                    + 0.5) * inverseResolution;
+                vec3 localPosition = a_PositionVec4.xyz
+                    + texSample2DLod(g_Texture5, morphUV, 0.0).xyz
+                        * g_MorphWeights[1] * g_MorphWeights[0];
+                if (!contractMatches) localPosition = vec3(1000.0);
+            #else
+                vec3 localPosition = a_Position;
+            #endif
+                gl_Position = g_ModelViewProjectionMatrix
+                    * vec4(localPosition, 1.0);
+            }
+            """,
+            projectionWidth: 4,
+            projectionHeight: 2,
+            imageOrigin: "2 1 0",
+            imageSize: "2 2",
+            puppetData: makeMorphingPuppetMesh(),
+            puppetAnimationLayer: [
+                "additive": false,
+                "animation": 9,
+                "blend": 1.0,
+                "id": 12,
+                "name": "Morph",
+                "rate": 1.0,
+                "visible": true,
+            ]
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor, timeSeconds: 0)
+        try assertNoExecutorIssues(loaded.executor)
+        let initialPixels = try readPixels(loaded.executor)
+        let initialBounds = try XCTUnwrap(
+            redPixelBounds(initialPixels, width: 4)
+        )
+
+        try render(loaded.executor, timeSeconds: 1)
+        try assertNoExecutorIssues(loaded.executor)
+        let morphedPixels = try readPixels(loaded.executor)
+        let morphedBounds = try XCTUnwrap(
+            redPixelBounds(morphedPixels, width: 4)
+        )
+
+        XCTAssertGreaterThan(morphedBounds.minX, initialBounds.minX)
+        XCTAssertGreaterThan(morphedBounds.maxX, initialBounds.maxX)
+        XCTAssertNotEqual(morphedPixels, initialPixels)
+    }
+
+    func testPuppetMeshRejectsAnUndeclaredTrailingModel() throws {
+        var payload = makePuppetMesh(version: "MDLV0021")
+        payload.append(makePuppetMesh(version: "MDLV0023"))
+        try assertPuppetModelLoadFails(
+            payload,
+            containing: "unsupported trailing section"
+        )
     }
 
     func testMalformedPuppetMeshesFailDuringModelLoading() throws {
         var truncated = makePuppetMesh()
         truncated.removeLast(7)
-        try assertPuppetModelLoadFails(truncated, containing: "mesh block")
+        try assertPuppetModelLoadFails(truncated, containing: "index")
 
         var badStride = makePuppetMesh()
-        replaceUInt32(79, at: 13, in: &badStride)
-        try assertPuppetModelLoadFails(badStride, containing: "mesh block")
+        replaceUInt32(143, at: 74, in: &badStride)
+        try assertPuppetModelLoadFails(badStride, containing: "vertex byte length")
 
         var badIndices = makePuppetMesh()
-        replaceUInt16(9, at: badIndices.count - 6, in: &badIndices)
+        replaceUInt16(9, at: 226, in: &badIndices)
         try assertPuppetModelLoadFails(badIndices, containing: "outside the mesh")
 
         var badIndexLength = makePuppetMesh()
-        replaceUInt32(4, at: 257, in: &badIndexLength)
-        try assertPuppetModelLoadFails(badIndexLength, containing: "mesh block")
+        replaceUInt32(4, at: 222, in: &badIndexLength)
+        try assertPuppetModelLoadFails(badIndexLength, containing: "triangle index")
 
         var nonFinite = makePuppetMesh()
-        replaceUInt32(0x7fc00000, at: 17, in: &nonFinite)
-        try assertPuppetModelLoadFails(nonFinite, containing: "non-finite")
+        replaceUInt32(0x7fc00000, at: 78, in: &nonFinite)
+        try assertPuppetModelLoadFails(nonFinite, containing: "numeric component")
 
         var unsupported = makePuppetMesh()
         unsupported.replaceSubrange(0..<8, with: Array("MDLV0099".utf8))
@@ -749,6 +1148,441 @@ final class FrameExecutorPixelTests: XCTestCase {
             try readPixels(loaded.executor),
             repeatedPixel([0, 255, 0, 255]),
             "The Linux common builtin contract must be populated before an image draw"
+        )
+    }
+
+    func testWallpaperEnginePointerStateBindsLeftButtonInZ() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform vec4 g_PointerState;
+            varying vec2 v_TexCoord;
+            void main() {
+                bool ok = abs(g_PointerState.x) < 0.0001
+                    && abs(g_PointerState.y) < 0.0001
+                    && abs(g_PointerState.z - 1.0) < 0.0001
+                    && abs(g_PointerState.w) < 0.0001;
+                gl_FragColor = ok ? vec4(0.0, 1.0, 0.0, 1.0)
+                                  : vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            """
+        )
+        defer { destroy(loaded) }
+
+        var error: WESceneRuntimeErrorRef?
+        XCTAssertEqual(
+            we_scene_frame_executor_set_pointer_state(
+                loaded.executor, 1, 1, &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertNil(error)
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255]),
+            "Wallpaper Engine's vec4 g_PointerState contract must expose the left-button state in Z"
+        )
+    }
+
+    func testOfficialLayerMatrixAndViewForwardUseSceneTransforms() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform mat4 g_ModelMatrix;
+            uniform mat4 g_LayerModelMatrix;
+            uniform vec3 g_ViewForward;
+            void main() {
+                bool ok = true;
+                for (int column = 0; column < 4; ++column) {
+                    ok = ok && all(lessThan(
+                        abs(g_LayerModelMatrix[column]
+                            - g_ModelMatrix[column]),
+                        vec4(0.0001)
+                    ));
+                }
+                ok = ok && all(lessThan(
+                    abs(g_ViewForward - vec3(0.0, 0.0, -1.0)),
+                    vec3(0.0001)
+                ));
+                gl_FragColor = ok ? vec4(0.0, 1.0, 0.0, 1.0)
+                                  : vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            """
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255])
+        )
+    }
+
+    func testEveryOfficialTextureTransformSlotHasAResourceProvider() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform vec4 g_Texture0Rotation;
+            uniform vec4 g_Texture1Rotation;
+            uniform vec4 g_Texture2Rotation;
+            uniform vec4 g_Texture3Rotation;
+            uniform vec4 g_Texture4Rotation;
+            uniform vec4 g_Texture5Rotation;
+            uniform vec4 g_Texture6Rotation;
+            uniform vec4 g_Texture7Rotation;
+            uniform vec4 g_Texture8Rotation;
+            uniform vec4 g_Texture9Rotation;
+            uniform vec2 g_Texture0Translation;
+            uniform vec2 g_Texture1Translation;
+            uniform vec2 g_Texture2Translation;
+            uniform vec2 g_Texture3Translation;
+            uniform vec2 g_Texture4Translation;
+            uniform vec2 g_Texture5Translation;
+            uniform vec2 g_Texture6Translation;
+            uniform vec2 g_Texture7Translation;
+            uniform vec2 g_Texture8Translation;
+            uniform vec2 g_Texture9Translation;
+            bool rotationIsIdentity(vec4 value) {
+                return all(lessThan(
+                    abs(value - vec4(1.0, 0.0, 0.0, 1.0)),
+                    vec4(0.0001)
+                ));
+            }
+            bool translationIsZero(vec2 value) {
+                return all(lessThan(abs(value), vec2(0.0001)));
+            }
+            void main() {
+                bool ok = rotationIsIdentity(g_Texture0Rotation)
+                    && rotationIsIdentity(g_Texture1Rotation)
+                    && rotationIsIdentity(g_Texture2Rotation)
+                    && rotationIsIdentity(g_Texture3Rotation)
+                    && rotationIsIdentity(g_Texture4Rotation)
+                    && rotationIsIdentity(g_Texture5Rotation)
+                    && rotationIsIdentity(g_Texture6Rotation)
+                    && rotationIsIdentity(g_Texture7Rotation)
+                    && rotationIsIdentity(g_Texture8Rotation)
+                    && rotationIsIdentity(g_Texture9Rotation)
+                    && translationIsZero(g_Texture0Translation)
+                    && translationIsZero(g_Texture1Translation)
+                    && translationIsZero(g_Texture2Translation)
+                    && translationIsZero(g_Texture3Translation)
+                    && translationIsZero(g_Texture4Translation)
+                    && translationIsZero(g_Texture5Translation)
+                    && translationIsZero(g_Texture6Translation)
+                    && translationIsZero(g_Texture7Translation)
+                    && translationIsZero(g_Texture8Translation)
+                    && translationIsZero(g_Texture9Translation);
+                gl_FragColor = ok ? vec4(0.0, 1.0, 0.0, 1.0)
+                                  : vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            """
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255])
+        )
+    }
+
+    func testOfficialAdvancedLightArraysUseSceneObjectData() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform vec4 g_LPoint_Color[LIGHTS_POINT];
+            uniform vec4 g_LPoint_Origin[LIGHTS_POINT];
+            uniform vec4 g_LSpot_Color[LIGHTS_SPOT];
+            uniform vec4 g_LSpot_Origin[LIGHTS_SPOT];
+            uniform vec4 g_LSpot_Direction[LIGHTS_SPOT];
+            uniform vec4 g_LSpot_Exponent[LIGHTS_SPOT];
+            uniform vec4 g_LTube_Color[LIGHTS_TUBE];
+            uniform vec4 g_LTube_OriginA[LIGHTS_TUBE];
+            uniform vec4 g_LTube_OriginB[LIGHTS_TUBE];
+            uniform vec4 g_LDirectional_Color[LIGHTS_DIRECTIONAL];
+            uniform vec4 g_LDirectional_Direction[LIGHTS_DIRECTIONAL];
+            bool closeEnough(float lhs, float rhs) {
+                return abs(lhs - rhs) < 0.0001;
+            }
+            void main() {
+                bool ok = all(lessThan(
+                        abs(g_LPoint_Color[0] - vec4(0.6, 1.2, 1.8, 77.0)),
+                        vec4(0.0001)))
+                    && all(lessThan(
+                        abs(g_LPoint_Origin[0].xyz - vec3(11.0, 22.0, 33.0)),
+                        vec3(0.0001)))
+                    && all(lessThan(
+                        abs(g_LSpot_Color[0] - vec4(0.2, 0.4, 0.6, 9.0)),
+                        vec4(0.0001)))
+                    && all(lessThan(
+                        abs(g_LSpot_Origin[0].xyz - vec3(1.0, 2.0, 3.0)),
+                        vec3(0.0001)))
+                    && closeEnough(g_LSpot_Origin[0].w, cos(radians(20.0)))
+                    && all(lessThan(
+                        abs(g_LSpot_Direction[0].xyz
+                            - vec3(0.6712122, 0.5653542, 0.4794255)),
+                        vec3(0.0001)))
+                    && closeEnough(g_LSpot_Direction[0].w, cos(radians(40.0)))
+                    && closeEnough(g_LSpot_Exponent[0].x, 4.0)
+                    && all(lessThan(
+                        abs(g_LTube_Color[0] - vec4(1.0, 2.0, 3.0, 11.0)),
+                        vec4(0.0001)))
+                    && all(lessThan(
+                        abs(g_LTube_OriginA[0].xyz - vec3(4.0, 5.0, 6.0)),
+                        vec3(0.0001)))
+                    && all(lessThan(
+                        abs(g_LTube_OriginB[0].xyz
+                            - vec3(1.4686728, 9.3829765, 18.976204)),
+                        vec3(0.0001)))
+                    && all(lessThan(
+                        abs(g_LDirectional_Color[0] - vec4(1.5, 1.0, 0.5, 1.0)),
+                        vec4(0.0001)))
+                    && all(lessThan(
+                        abs(g_LDirectional_Direction[0].xyz
+                            - vec3(-0.6712122, -0.5653542, -0.4794255)),
+                        vec3(0.0001)));
+                gl_FragColor = ok ? vec4(0.0, 1.0, 0.0, 1.0)
+                                  : vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            """,
+            sceneLights: [
+                [
+                    "color": "0.2 0.4 0.6", "id": 10,
+                    "intensity": 3.0, "light": "lpoint",
+                    "name": "Point", "origin": "11 22 33",
+                    "radius": 77.0, "visible": true,
+                ],
+                [
+                    "angles": "0.3 -0.5 0.7", "color": "0.1 0.2 0.3",
+                    "exponent": 4.0, "id": 11, "innercone": 20.0,
+                    "intensity": 2.0, "light": "lspot", "name": "Spot",
+                    "origin": "1 2 3", "outercone": 40.0,
+                    "radius": 9.0, "visible": true,
+                ],
+                [
+                    "angles": "0.3 -0.5 0.7", "color": "0.25 0.5 0.75",
+                    "controlpoint": "7 8 9",
+                    "id": 12, "intensity": 4.0, "light": "ltube",
+                    "name": "Tube", "origin": "4 5 6", "radius": 11.0,
+                    "visible": true,
+                ],
+                [
+                    "angles": "0.3 -0.5 0.7", "color": "0.3 0.2 0.1",
+                    "id": 13, "intensity": 5.0,
+                    "light": "ldirectional", "name": "Directional",
+                    "origin": "0 0 0", "visible": true,
+                ],
+            ]
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255])
+        )
+    }
+
+    func testOfficialLegacyLightArraysUseCapturedNeutralRig() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform vec4 g_LightsColorRadius[4];
+            uniform vec4 g_LightsColorPremultiplied[3];
+            uniform vec3 g_LightsPosition[4];
+            void main() {
+                bool ok = true;
+                for (int index = 0; index < 4; ++index) {
+                    ok = ok && all(lessThan(
+                        abs(g_LightsColorRadius[index]
+                            - vec4(0.0, 0.0, 0.0, 1.0)),
+                        vec4(0.0001)
+                    ));
+                    ok = ok && all(lessThan(
+                        abs(g_LightsPosition[index] - vec3(0.0, 100.0, 0.0)),
+                        vec3(0.0001)
+                    ));
+                }
+                for (int index = 0; index < 3; ++index) {
+                    ok = ok && all(lessThan(
+                        abs(g_LightsColorPremultiplied[index]),
+                        vec4(0.0001)
+                    ));
+                }
+                gl_FragColor = ok ? vec4(0.0, 1.0, 0.0, 1.0)
+                                  : vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            """,
+            sceneLights: [[
+                "color": "0.25 0.5 0.75", "id": 10,
+                "intensity": 4.0, "light": "lpoint", "name": "Point",
+                "origin": "11 22 33", "radius": 77.0, "visible": true,
+            ]]
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255]),
+            "Legacy light arrays must remain the captured official rig instead of aliasing modern scene lights"
+        )
+    }
+
+    func testOfficialAdvancedLightDefaultsMatchCapturedRendererValues() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform vec4 g_LPoint_Color[LIGHTS_POINT];
+            uniform vec4 g_LPoint_Origin[LIGHTS_POINT];
+            uniform vec4 g_LSpot_Color[LIGHTS_SPOT];
+            uniform vec4 g_LSpot_Origin[LIGHTS_SPOT];
+            uniform vec4 g_LSpot_Direction[LIGHTS_SPOT];
+            uniform vec4 g_LSpot_Exponent[LIGHTS_SPOT];
+            uniform vec4 g_LTube_Color[LIGHTS_TUBE];
+            uniform vec4 g_LTube_OriginA[LIGHTS_TUBE];
+            uniform vec4 g_LTube_OriginB[LIGHTS_TUBE];
+            void main() {
+                bool ok = all(lessThan(
+                        abs(g_LPoint_Color[0] - vec4(0.0, 0.0, 0.0, 1.0)),
+                        vec4(0.0001)))
+                    && all(lessThan(
+                        abs(g_LPoint_Origin[0].xyz - vec3(1.0, 2.0, 3.0)),
+                        vec3(0.0001)))
+                    && all(lessThan(
+                        abs(g_LSpot_Color[0] - vec4(1.0, 1.0, 1.0, 1.0)),
+                        vec4(0.0001)))
+                    && all(lessThan(
+                        abs(g_LSpot_Origin[0]
+                            - vec4(4.0, 5.0, 6.0, cos(radians(20.0)))),
+                        vec4(0.0001)))
+                    && all(lessThan(
+                        abs(g_LSpot_Direction[0]
+                            - vec4(1.0, 0.0, 0.0, cos(radians(30.0)))),
+                        vec4(0.0001)))
+                    && abs(g_LSpot_Exponent[0].x - 2.0) < 0.0001
+                    && all(lessThan(
+                        abs(g_LTube_Color[0] - vec4(1.0, 1.0, 1.0, 1.0)),
+                        vec4(0.0001)))
+                    && all(lessThan(
+                        abs(g_LTube_OriginA[0].xyz - vec3(7.0, 8.0, 9.0)),
+                        vec3(0.0001)))
+                    && all(lessThan(
+                        abs(g_LTube_OriginB[0].xyz - vec3(9.0, 8.0, 9.0)),
+                        vec3(0.0001)));
+                gl_FragColor = ok ? vec4(0.0, 1.0, 0.0, 1.0)
+                                  : vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            """,
+            sceneLights: [
+                [
+                    "id": 20, "light": "lpoint", "name": "Point defaults",
+                    "origin": "1 2 3", "visible": true,
+                ],
+                [
+                    "angles": "0 0 0", "color": "1 1 1", "id": 21,
+                    "intensity": 1.0, "light": "lspot",
+                    "name": "Spot defaults", "origin": "4 5 6",
+                    "visible": true,
+                ],
+                [
+                    "color": "1 1 1", "id": 22, "intensity": 1.0,
+                    "light": "ltube", "name": "Tube defaults",
+                    "origin": "7 8 9", "visible": true,
+                ],
+            ]
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255])
+        )
+    }
+
+    func testOfficialFogUniformsUseCapturedScenePacking() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            // [COMBO] {"combo":"FOG_DIST","default":0}
+            // [COMBO] {"combo":"FOG_HEIGHT","default":0}
+            uniform vec3 g_FogDistanceColor;
+            uniform vec4 g_FogDistanceParams;
+            uniform vec3 g_FogHeightColor;
+            uniform vec4 g_FogHeightParams;
+            void main() {
+            #if FOG_DIST && FOG_HEIGHT
+                bool ok = all(lessThan(
+                        abs(g_FogDistanceColor - vec3(0.1, 0.2, 0.3)),
+                        vec3(0.0001)))
+                    && all(lessThan(
+                        abs(g_FogDistanceParams - vec4(10.0, 100.0, 0.2, 0.6)),
+                        vec4(0.0001)))
+                    && all(lessThan(
+                        abs(g_FogHeightColor - vec3(0.4, 0.5, 0.6)),
+                        vec3(0.0001)))
+                    && all(lessThan(
+                        abs(g_FogHeightParams - vec4(20.0, -100.0, 0.3, 0.6)),
+                        vec4(0.0001)));
+                gl_FragColor = ok ? vec4(0.0, 1.0, 0.0, 1.0)
+                                  : vec4(1.0, 0.0, 0.0, 1.0);
+            #else
+                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+            #endif
+            }
+            """,
+            sceneGeneral: [
+                "fogdistance": true,
+                "fogdistancecolor": "0.1 0.2 0.3",
+                "fogdistanceend": 110.0,
+                "fogdistanceenddensity": 0.8,
+                "fogdistancestart": 10.0,
+                "fogdistancestartdensity": 0.2,
+                "fogheight": true,
+                "fogheightcolor": "0.4 0.5 0.6",
+                "fogheightend": -80.0,
+                "fogheightenddensity": 0.9,
+                "fogheightstart": 20.0,
+                "fogheightstartdensity": 0.3,
+            ]
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255])
+        )
+    }
+
+    func testWallpaperEngineTextureDerivedMetadataUsesRealTexture() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform vec4 g_Texture0Texel;
+            uniform float g_Texture0MipMapInfo;
+            varying vec2 v_TexCoord;
+            void main() {
+                bool ok = all(lessThan(
+                    abs(g_Texture0Texel - vec4(0.5, 0.5, 2.0, 2.0)),
+                    vec4(0.0001)
+                )) && abs(g_Texture0MipMapInfo) < 0.0001;
+                gl_FragColor = ok ? vec4(0.0, 1.0, 0.0, 1.0)
+                                  : vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            """
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        try assertNoExecutorIssues(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([0, 255, 0, 255]),
+            "g_TextureNTexel and g_TextureNMipMapInfo must be derived from the bound texture"
         )
     }
 
@@ -1886,7 +2720,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         XCTAssertEqual(try readPixels(loaded.executor), repeatedPixel([255, 0, 0, 255]))
     }
 
-    func testPerspectiveLayerUsesTheLinuxOrthographicFallback() throws {
+    func testPerspectiveLayerUsesTheDedicatedPerspectiveCamera() throws {
         let loaded = try loadFixture(
             fragmentSource: textureOnlyFragmentShader,
             perspective: true
@@ -1894,6 +2728,49 @@ final class FrameExecutorPixelTests: XCTestCase {
         defer { destroy(loaded) }
 
         try render(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 0, 0, 255])
+        )
+    }
+
+    func testPurePerspectiveSceneUsesDrawableProjectionAndWorldCoordinates() throws {
+        let loaded = try loadFixture(
+            fragmentSource: textureOnlyFragmentShader,
+            cameraCenter: "0 0 0",
+            cameraEye: "0 0 10",
+            imageOrigin: "0 0 0",
+            imageSize: "20 20",
+            nearPlane: 0.01,
+            sceneGeneral: [
+                "orthogonalprojection": NSNull(),
+                "fov": 60.0,
+                "nearz": 0.01,
+                "farz": 1000.0,
+            ]
+        )
+        defer { destroy(loaded) }
+
+        var inputs = WESceneFrameInputs(
+            pointer_x: 0.5,
+            pointer_y: 0.5,
+            time_seconds: 1.0,
+            frame_time_seconds: 1.0 / 60.0
+        )
+        var error: WESceneRuntimeErrorRef?
+        XCTAssertEqual(
+            we_scene_frame_executor_render_for_drawable(
+                loaded.executor,
+                &inputs,
+                2,
+                2,
+                WE_SCENE_PRESENTATION_STRETCH,
+                &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertNil(error)
         XCTAssertEqual(
             try readPixels(loaded.executor),
             repeatedPixel([255, 0, 0, 255])
@@ -1993,6 +2870,25 @@ final class FrameExecutorPixelTests: XCTestCase {
         try assertRenderFailsAndClears(
             loaded.executor,
             containing: "Frame render pass does not provide active shader uniform 'u_Unprovided'"
+        )
+    }
+
+    func testHDRParamsUseTheCapturedSDRPresentationContract() throws {
+        let loaded = try loadFixture(
+            fragmentSource: """
+            uniform vec2 g_HDRParams;
+            varying vec2 v_TexCoord;
+            void main() {
+                gl_FragColor = vec4(g_HDRParams.x, g_HDRParams.y, 0.0, 1.0);
+            }
+            """
+        )
+        defer { destroy(loaded) }
+
+        try render(loaded.executor)
+        XCTAssertEqual(
+            try readPixels(loaded.executor),
+            repeatedPixel([255, 255, 0, 255])
         )
     }
 
@@ -2940,6 +3836,51 @@ final class FrameExecutorPixelTests: XCTestCase {
         """
     }
 
+    private var puppetSkinningVertexShader: String {
+        """
+        attribute vec3 a_Position;
+        attribute vec2 a_TexCoord;
+        #if SKINNING
+        attribute vec3 a_Normal;
+        attribute vec4 a_Tangent4;
+        attribute uvec4 a_BlendIndices;
+        attribute vec4 a_BlendWeights;
+        uniform mat4x3 g_Bones[BONECOUNT];
+        #endif
+        uniform mat4 g_ModelViewProjectionMatrix;
+        varying vec2 v_TexCoord;
+        varying float v_PuppetBasis;
+        void main() {
+            v_TexCoord = a_TexCoord;
+            v_PuppetBasis = 0.0;
+            vec3 localPosition = a_Position;
+        #if SKINNING
+            mat4x3 skin =
+                g_Bones[a_BlendIndices.x] * a_BlendWeights.x
+                + g_Bones[a_BlendIndices.y] * a_BlendWeights.y
+                + g_Bones[a_BlendIndices.z] * a_BlendWeights.z
+                + g_Bones[a_BlendIndices.w] * a_BlendWeights.w;
+            localPosition = skin * vec4(localPosition, 1.0);
+            v_PuppetBasis = a_Normal.z * a_Tangent4.x;
+        #endif
+            gl_Position = g_ModelViewProjectionMatrix
+                * vec4(localPosition, 1.0);
+        }
+        """
+    }
+
+    private var puppetSkinningFragmentShader: String {
+        """
+        varying vec2 v_TexCoord;
+        varying float v_PuppetBasis;
+        void main() {
+            gl_FragColor = v_PuppetBasis > 0.99
+                ? vec4(1.0, 0.0, 0.0, 1.0)
+                : vec4(0.0, 1.0, 0.0, 1.0);
+        }
+        """
+    }
+
     private var animatedVertexShader: String {
         """
         attribute vec3 a_Position;
@@ -3001,7 +3942,10 @@ final class FrameExecutorPixelTests: XCTestCase {
         varying vec2 v_TexCoord;
         void main() {
             bool reset = all(lessThan(abs(g_Texture0Translation), vec2(0.0001)))
-                && all(lessThan(abs(g_Texture0Rotation), vec4(0.0001)));
+                && all(lessThan(
+                    abs(g_Texture0Rotation - vec4(1.0, 0.0, 0.0, 1.0)),
+                    vec4(0.0001)
+                ));
             gl_FragColor = reset ? vec4(0.0, 1.0, 0.0, 1.0)
                                  : vec4(1.0, 0.0, 0.0, 1.0);
         }
@@ -3042,6 +3986,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         """
         uniform vec2 g_PointerPosition;
         uniform vec2 g_PointerPositionLast;
+        uniform vec4 g_PointerState;
         varying vec2 v_TexCoord;
         void main() {
             gl_FragColor = vec4(
@@ -3080,6 +4025,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         uniform mat4 g_ViewProjectionMatrix;
         uniform vec2 g_PointerPosition;
         uniform vec2 g_PointerPositionLast;
+        uniform vec4 g_PointerState;
         uniform mat4 g_EffectTextureProjectionMatrix;
         uniform mat4 g_EffectTextureProjectionMatrixInverse;
         uniform vec2 g_TexelSize;
@@ -3129,6 +4075,7 @@ final class FrameExecutorPixelTests: XCTestCase {
                 && closeEnough(g_PointerPosition.y, 0.5)
                 && closeEnough(g_PointerPositionLast.x, 0.0)
                 && closeEnough(g_PointerPositionLast.y, 0.0)
+                && closeEnough(g_PointerState.z, 0.0)
                 && closeEnough(g_EffectTextureProjectionMatrix[0][0], 1.0)
                 && closeEnough(g_EffectTextureProjectionMatrixInverse[1][1], 1.0)
                 && closeEnough(g_TexelSize.x, 0.5)
@@ -3248,6 +4195,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         fragmentSource: String,
         commandMode: CommandMode? = nil,
         textureData: Data? = nil,
+        secondTextureData: Data? = nil,
         baseCombos: [String: Int] = [:],
         compositeTintColor: String? = nil,
         colorBlendMode: Int = 0,
@@ -3284,12 +4232,15 @@ final class FrameExecutorPixelTests: XCTestCase {
         textureAnimationScript: String? = nil,
         sceneTexturePropertyKey: String? = nil,
         hostTextureNames: [String] = [],
-        textureInProjectDirectory: Bool = false
+        textureInProjectDirectory: Bool = false,
+        sceneGeneral: [String: Any] = [:],
+        sceneLights: [[String: Any]] = []
     ) throws -> RuntimePipeline {
         let fixture = try makeFixture(
             fragmentSource: fragmentSource,
             commandMode: commandMode,
             textureData: textureData,
+            secondTextureData: secondTextureData,
             baseCombos: baseCombos,
             compositeTintColor: compositeTintColor,
             colorBlendMode: colorBlendMode,
@@ -3326,7 +4277,9 @@ final class FrameExecutorPixelTests: XCTestCase {
             textureAnimationScript: textureAnimationScript,
             sceneTexturePropertyKey: sceneTexturePropertyKey,
             hostTextureNames: hostTextureNames,
-            textureInProjectDirectory: textureInProjectDirectory
+            textureInProjectDirectory: textureInProjectDirectory,
+            sceneGeneral: sceneGeneral,
+            sceneLights: sceneLights
         )
         do {
             var error: WESceneRuntimeErrorRef?
@@ -4042,6 +4995,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         fragmentSource: String,
         commandMode: CommandMode? = nil,
         textureData: Data? = nil,
+        secondTextureData: Data? = nil,
         baseCombos: [String: Int] = [:],
         compositeTintColor: String? = nil,
         colorBlendMode: Int = 0,
@@ -4078,7 +5032,9 @@ final class FrameExecutorPixelTests: XCTestCase {
         textureAnimationScript: String? = nil,
         sceneTexturePropertyKey: String? = nil,
         hostTextureNames: [String] = [],
-        textureInProjectDirectory: Bool = false
+        textureInProjectDirectory: Bool = false,
+        sceneGeneral: [String: Any] = [:],
+        sceneLights: [[String: Any]] = []
     ) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -4417,6 +5373,9 @@ final class FrameExecutorPixelTests: XCTestCase {
                 ? ["auto": true]
                 : ["height": projectionHeight, "width": projectionWidth],
         ]
+        for (key, value) in sceneGeneral {
+            general[key] = value
+        }
         if parallax {
             general["cameraparallax"] = true
             general["cameraparallaxamount"] = 1.0
@@ -4436,6 +5395,7 @@ final class FrameExecutorPixelTests: XCTestCase {
             "up": resolvedCameraUp,
         ]
         var objects = [image]
+        objects.append(contentsOf: sceneLights)
         if includeHealthySecondImage {
             objects.append([
                 "id": 2,
@@ -4645,7 +5605,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         if includeSecondTexture || includeUnboundGreenTexture {
             entries.append((
                 "materials/green.tex",
-                makeRGBA8Texture2x2(pixel: [0, 255, 0, 255])
+                secondTextureData ?? makeRGBA8Texture2x2(pixel: [0, 255, 0, 255])
             ))
         }
         if let commandMode, commandMode != .proceduralClear {
@@ -4773,6 +5733,36 @@ final class FrameExecutorPixelTests: XCTestCase {
 
     private func json(_ object: Any) throws -> Data {
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    private func makeLUTTexture2x2x2() -> Data {
+        let red: [UInt8] = [255, 0, 0, 255]
+        let green: [UInt8] = [0, 255, 0, 255]
+        let blue: [UInt8] = [0, 0, 255, 255]
+        let yellow: [UInt8] = [255, 255, 0, 255]
+        let flatRows = red + red + green + green +
+            blue + blue + yellow + yellow
+        var result = Data()
+        appendMagic("TEXV0005", to: &result)
+        appendMagic("TEXI0001", to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(67, to: &result) // LUT, clamp, and nearest filtering.
+        appendUInt32(2, to: &result) // 3D slice width.
+        appendUInt32(2, to: &result) // 3D slice height.
+        appendUInt32(4, to: &result) // Two slices tiled horizontally.
+        appendUInt32(2, to: &result)
+        appendUInt32(0, to: &result)
+        appendMagic("TEXB0003", to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(UInt32.max, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(4, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(UInt32(flatRows.count), to: &result)
+        appendUInt32(UInt32(flatRows.count), to: &result)
+        result.append(contentsOf: flatRows)
+        return result
     }
 
     private func makeRGBA8Texture2x2(pixel: [UInt8]) -> Data {
@@ -4918,18 +5908,19 @@ final class FrameExecutorPixelTests: XCTestCase {
     }
 
     private func makePuppetMesh(version: String = "MDLV0021") -> Data {
-        let vertexStride: Int
-        let uvOffset: Int
+        let modelVersion: Int
         switch version {
         case "MDLV0013":
-            vertexStride = 52
-            uvOffset = 44
-        case "MDLV0021", "MDLV0023":
-            vertexStride = 80
-            uvOffset = 72
+            modelVersion = 13
+        case "MDLV0021":
+            modelVersion = 21
+        case "MDLV0023":
+            modelVersion = 23
         default:
             preconditionFailure("Unsupported synthetic puppet model version")
         }
+        let vertexFlags: UInt32 = 0x0000000f
+        let vertexStride = 48
         let vertices: [(Float, Float, Float, Float, Float)] = [
             (-1, 1, 0, 0, 0),
             (1, 1, 0, 1, 0),
@@ -4937,14 +5928,29 @@ final class FrameExecutorPixelTests: XCTestCase {
         ]
         var result = Data(version.utf8)
         result.append(0)
+        appendUInt32(vertexFlags, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(1, to: &result)
+        result.append(contentsOf: Array("materials/pixel.json".utf8))
+        result.append(0)
         appendUInt32(0, to: &result)
+        if modelVersion >= 17 {
+            for _ in 0..<6 { appendFloat32(0, to: &result) }
+        }
+        if modelVersion > 14 { appendUInt32(vertexFlags, to: &result) }
         appendUInt32(UInt32(vertices.count * vertexStride), to: &result)
         for (x, y, z, u, v) in vertices {
             let start = result.count
             appendFloat32(x, to: &result)
             appendFloat32(y, to: &result)
             appendFloat32(z, to: &result)
-            result.append(Data(repeating: 0, count: uvOffset - 12))
+            appendFloat32(0, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(1, to: &result)
+            appendFloat32(1, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(1, to: &result)
             appendFloat32(u, to: &result)
             appendFloat32(v, to: &result)
             precondition(result.count - start == vertexStride)
@@ -4953,7 +5959,184 @@ final class FrameExecutorPixelTests: XCTestCase {
         appendUInt16(0, to: &result)
         appendUInt16(1, to: &result)
         appendUInt16(2, to: &result)
-        result.append(contentsOf: Array("MDLS".utf8))
+        if modelVersion >= 21 {
+            result.append(0)
+            result.append(0)
+            if modelVersion > 21 { appendUInt32(0, to: &result) }
+        }
+        return result
+    }
+
+    private func makeBlendMapPuppetMesh() -> Data {
+        let vertexFlags: UInt32 = 0x00800021
+        let vertexStride = 44
+        let positions: [(Float, Float)] = [(-1, 1), (1, 1), (-1, -1)]
+        var result = Data("MDLV0021".utf8)
+        result.append(0)
+        appendUInt32(vertexFlags, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(1, to: &result)
+        result.append(contentsOf: Array("materials/pixel.json".utf8))
+        result.append(0)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        for _ in 0..<6 { appendFloat32(0, to: &result) }
+        appendUInt32(vertexFlags, to: &result)
+        appendUInt32(UInt32(positions.count * vertexStride), to: &result)
+        for (x, y) in positions {
+            let start = result.count
+            appendFloat32(x, to: &result)
+            appendFloat32(y, to: &result)
+            appendFloat32(0, to: &result)
+            appendUInt32(4, to: &result)
+            for _ in 0..<3 { appendUInt32(0, to: &result) }
+            appendFloat32(0.25, to: &result)
+            appendFloat32(0.5, to: &result)
+            appendFloat32(0.75, to: &result)
+            appendFloat32(1, to: &result)
+            precondition(result.count - start == vertexStride)
+        }
+        appendUInt32(6, to: &result)
+        appendUInt16(0, to: &result)
+        appendUInt16(1, to: &result)
+        appendUInt16(2, to: &result)
+        result.append(0)
+        result.append(0)
+
+        appendMagic("MDLA0006", to: &result)
+        let animationEndField = result.count
+        appendUInt32(0, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(17, to: &result)
+        appendUInt32(0, to: &result)
+        result.append(contentsOf: Array("BlendMap".utf8))
+        result.append(0)
+        result.append(contentsOf: Array("loop".utf8))
+        result.append(0)
+        appendFloat32(1, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(5, to: &result)
+        for curve in 0..<5 {
+            appendUInt32(UInt32(100 + curve), to: &result)
+            appendUInt32(8, to: &result)
+            if curve == 4 {
+                appendFloat32(0.5, to: &result)
+                appendFloat32(1, to: &result)
+            } else {
+                appendFloat32(0, to: &result)
+                appendFloat32(0, to: &result)
+            }
+        }
+        result.append(0)
+        result.append(0)
+        for _ in 0..<6 { appendFloat32(0, to: &result) }
+        result.append(0)
+        appendUInt32(0, to: &result)
+        replaceUInt32(UInt32(result.count), at: animationEndField, in: &result)
+        return result
+    }
+
+    private func makeBonesAlphaPuppetMesh() -> Data {
+        let vertexFlags: UInt32 = 0x01800009
+        let vertexStride = 52
+        let positions: [(Float, Float, Float, Float)] = [
+            (-1, 1, 0, 0),
+            (1, 1, 1, 0),
+            (-1, -1, 0, 1),
+        ]
+        var result = Data("MDLV0021".utf8)
+        result.append(0)
+        appendUInt32(vertexFlags, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(1, to: &result)
+        result.append(contentsOf: Array("materials/pixel.json".utf8))
+        result.append(0)
+        appendUInt32(4, to: &result)
+        for _ in 0..<6 { appendFloat32(0, to: &result) }
+        appendUInt32(vertexFlags, to: &result)
+        appendUInt32(UInt32(positions.count * vertexStride), to: &result)
+        for (x, y, u, v) in positions {
+            let start = result.count
+            appendFloat32(x, to: &result)
+            appendFloat32(y, to: &result)
+            appendFloat32(0, to: &result)
+            appendUInt32(0, to: &result)
+            appendUInt32(1, to: &result)
+            appendUInt32(0, to: &result)
+            appendUInt32(0, to: &result)
+            appendFloat32(0.25, to: &result)
+            appendFloat32(0.75, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(u, to: &result)
+            appendFloat32(v, to: &result)
+            precondition(result.count - start == vertexStride)
+        }
+        appendUInt32(6, to: &result)
+        appendUInt16(0, to: &result)
+        appendUInt16(1, to: &result)
+        appendUInt16(2, to: &result)
+        result.append(0)
+        result.append(0)
+
+        appendMagic("MDLS0003", to: &result)
+        let skeletonEndField = result.count
+        appendUInt32(0, to: &result)
+        appendUInt16(2, to: &result)
+        appendUInt16(0, to: &result)
+        let identity: [Float] = [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+        ]
+        for _ in 0..<2 {
+            result.append(0)
+            appendUInt32(0, to: &result)
+            appendUInt32(UInt32.max, to: &result)
+            appendUInt32(64, to: &result)
+            for component in identity { appendFloat32(component, to: &result) }
+            result.append(0)
+        }
+
+        let animationOffset = result.count
+        replaceUInt32(UInt32(animationOffset), at: skeletonEndField, in: &result)
+        appendMagic("MDLA0006", to: &result)
+        let animationEndField = result.count
+        appendUInt32(0, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(18, to: &result)
+        appendUInt32(0, to: &result)
+        result.append(contentsOf: Array("BonesAlpha".utf8))
+        result.append(0)
+        result.append(contentsOf: Array("loop".utf8))
+        result.append(0)
+        appendFloat32(1, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(2, to: &result)
+        for _ in 0..<2 {
+            appendUInt32(0, to: &result)
+            appendUInt32(72, to: &result)
+            appendPuppetTransform(translationX: 0, to: &result)
+            appendPuppetTransform(translationX: 0, to: &result)
+        }
+        appendUInt32(0, to: &result)
+        result.append(1)
+        let alphaSamples: [(Float, Float)] = [(0.2, 0.6), (0.8, 0.4)]
+        for (index, samples) in alphaSamples.enumerated() {
+            appendUInt32(UInt32(200 + index), to: &result)
+            appendUInt32(8, to: &result)
+            appendFloat32(samples.0, to: &result)
+            appendFloat32(samples.1, to: &result)
+        }
+        result.append(0)
+        for _ in 0..<6 { appendFloat32(0, to: &result) }
+        result.append(0)
+        appendUInt32(0, to: &result)
+        replaceUInt32(UInt32(result.count), at: animationEndField, in: &result)
         return result
     }
 
@@ -4963,16 +6146,30 @@ final class FrameExecutorPixelTests: XCTestCase {
             (1, 1, 0, 1, 0),
             (-1, -1, 0, 0, 1),
         ]
+        let vertexFlags: UInt32 = 0x0180000f
         var result = Data("MDLV0021".utf8)
         result.append(0)
+        appendUInt32(vertexFlags, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(1, to: &result)
+        result.append(contentsOf: Array("materials/pixel.json".utf8))
+        result.append(0)
         appendUInt32(0, to: &result)
+        for _ in 0..<6 { appendFloat32(0, to: &result) }
+        appendUInt32(vertexFlags, to: &result)
         appendUInt32(UInt32(vertices.count * 80), to: &result)
         for (x, y, z, u, v) in vertices {
             let start = result.count
             appendFloat32(x, to: &result)
             appendFloat32(y, to: &result)
             appendFloat32(z, to: &result)
-            result.append(Data(repeating: 0, count: 28))
+            appendFloat32(0, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(1, to: &result)
+            appendFloat32(1, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(1, to: &result)
             for _ in 0..<4 { appendUInt32(0, to: &result) }
             appendFloat32(1, to: &result)
             for _ in 0..<3 { appendFloat32(0, to: &result) }
@@ -4984,13 +6181,16 @@ final class FrameExecutorPixelTests: XCTestCase {
         appendUInt16(0, to: &result)
         appendUInt16(1, to: &result)
         appendUInt16(2, to: &result)
+        result.append(0)
+        result.append(0)
 
         appendMagic("MDLS0003", to: &result)
-        let animationOffsetField = result.count
+        let skeletonEndField = result.count
         appendUInt32(0, to: &result)
-        appendUInt32(1, to: &result)
+        appendUInt16(1, to: &result)
+        appendUInt16(0, to: &result)
         result.append(0)
-        appendUInt32(1, to: &result)
+        appendUInt32(0, to: &result)
         appendUInt32(UInt32.max, to: &result)
         appendUInt32(64, to: &result)
         let identity: [Float] = [
@@ -5003,7 +6203,7 @@ final class FrameExecutorPixelTests: XCTestCase {
         result.append(0)
 
         let animationOffset = result.count
-        replaceUInt32(UInt32(animationOffset), at: animationOffsetField, in: &result)
+        replaceUInt32(UInt32(animationOffset), at: skeletonEndField, in: &result)
         appendMagic("MDLA0006", to: &result)
         let animationEndField = result.count
         appendUInt32(0, to: &result)
@@ -5022,8 +6222,140 @@ final class FrameExecutorPixelTests: XCTestCase {
         appendUInt32(72, to: &result)
         appendPuppetTransform(translationX: 0, to: &result)
         appendPuppetTransform(translationX: 1, to: &result)
-        result.append(Data(repeating: 0, count: 36))
-        replaceUInt32(UInt32(result.count - 1), at: animationEndField, in: &result)
+        appendUInt32(0, to: &result)
+        result.append(0)
+        result.append(0)
+        for _ in 0..<6 { appendFloat32(0, to: &result) }
+        result.append(0)
+        appendUInt32(0, to: &result)
+        replaceUInt32(UInt32(result.count), at: animationEndField, in: &result)
+        return result
+    }
+
+    private func makeMorphingPuppetMesh() -> Data {
+        let vertices: [(Float, Float, Float, Float, Float, Float)] = [
+            (-1, 1, 0, 1, 0, 0),
+            (1, 1, 0, 1, 1, 0),
+            (-1, -1, 0, 1, 0, 1),
+        ]
+        let vertexFlags: UInt32 = 0x0181000e
+        let vertexStride = 84
+        var result = Data("MDLV0023".utf8)
+        result.append(0)
+        appendUInt32(vertexFlags, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(1, to: &result)
+        result.append(contentsOf: Array("materials/pixel.json".utf8))
+        result.append(0)
+        appendUInt32(0x3000, to: &result)
+        for _ in 0..<6 { appendFloat32(0, to: &result) }
+        appendUInt32(vertexFlags, to: &result)
+        appendUInt32(UInt32(vertices.count * vertexStride), to: &result)
+        for (x, y, z, morphMapIndex, u, v) in vertices {
+            let start = result.count
+            appendFloat32(x, to: &result)
+            appendFloat32(y, to: &result)
+            appendFloat32(z, to: &result)
+            appendFloat32(morphMapIndex, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(1, to: &result)
+            appendFloat32(1, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(1, to: &result)
+            for _ in 0..<4 { appendUInt32(0, to: &result) }
+            appendFloat32(1, to: &result)
+            for _ in 0..<3 { appendFloat32(0, to: &result) }
+            appendFloat32(u, to: &result)
+            appendFloat32(v, to: &result)
+            precondition(result.count - start == vertexStride)
+        }
+        appendUInt32(6, to: &result)
+        appendUInt16(0, to: &result)
+        appendUInt16(1, to: &result)
+        appendUInt16(2, to: &result)
+        result.append(0)
+        result.append(0)
+        appendUInt32(0, to: &result)
+
+        appendMagic("MDLS0003", to: &result)
+        let skeletonEndField = result.count
+        appendUInt32(0, to: &result)
+        appendUInt16(1, to: &result)
+        appendUInt16(0, to: &result)
+        result.append(0)
+        appendUInt32(0, to: &result)
+        appendUInt32(UInt32.max, to: &result)
+        appendUInt32(64, to: &result)
+        let identity: [Float] = [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+        ]
+        for component in identity { appendFloat32(component, to: &result) }
+        result.append(0)
+
+        let animationOffset = result.count
+        replaceUInt32(UInt32(animationOffset), at: skeletonEndField, in: &result)
+        appendMagic("MDLA0006", to: &result)
+        let animationEndField = result.count
+        appendUInt32(0, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(9, to: &result)
+        appendUInt32(0, to: &result)
+        result.append(contentsOf: Array("Morph".utf8))
+        result.append(0)
+        result.append(contentsOf: Array("single".utf8))
+        result.append(0)
+        appendFloat32(1, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(72, to: &result)
+        appendPuppetTransform(translationX: 0, to: &result)
+        appendPuppetTransform(translationX: 1, to: &result)
+        appendUInt32(0, to: &result)
+        result.append(0)
+        result.append(1)
+        appendUInt32(1, to: &result)
+        appendFloat32(2, to: &result)
+        appendUInt16(1, to: &result)
+        appendUInt16(0, to: &result)
+        appendUInt32(8, to: &result)
+        appendFloat32(0, to: &result)
+        appendFloat32(1, to: &result)
+        for _ in 0..<6 { appendFloat32(0, to: &result) }
+        result.append(0)
+        appendUInt32(0, to: &result)
+        replaceUInt32(UInt32(result.count), at: animationEndField, in: &result)
+
+        appendMagic("MDMP0001", to: &result)
+        let morphEndField = result.count
+        appendUInt32(0, to: &result)
+        appendUInt16(1, to: &result)
+        appendFloat32(2, to: &result)
+        appendUInt16(3, to: &result)
+        appendUInt16(0, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(0, to: &result)
+        result.append(contentsOf: Array("Translate X".utf8))
+        result.append(0)
+        appendUInt32(18, to: &result)
+        for vertexIndex in 0..<3 {
+            appendUInt16(vertexIndex == 1 ? 16_384 : 0, to: &result)
+            appendUInt16(0, to: &result)
+            appendUInt16(0, to: &result)
+        }
+        appendUInt32(6, to: &result)
+        for _ in 0..<3 { appendUInt16(UInt16.max >> 1, to: &result) }
+        appendUInt32(0, to: &result)
+        appendUInt32(2, to: &result)
+        appendFloat32(-0.25, to: &result)
+        appendFloat32(0.75, to: &result)
+        replaceUInt32(UInt32(result.count), at: morphEndField, in: &result)
         return result
     }
 

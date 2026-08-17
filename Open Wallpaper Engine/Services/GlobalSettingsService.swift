@@ -13,7 +13,7 @@ import ServiceManagement
 
 enum GSSceneRenderQuality: String, CaseIterable, Identifiable, Codable {
     var id: Self { self }
-    case high, balanced, powerSaving
+    case ultra, high, balanced, powerSaving
 }
 
 enum GSAntiAliasingQuality: String, CaseIterable, Identifiable, Codable {

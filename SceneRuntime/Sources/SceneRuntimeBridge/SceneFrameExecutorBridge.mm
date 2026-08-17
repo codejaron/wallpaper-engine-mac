@@ -99,6 +99,8 @@ std::optional<metal::PhysicalRenderQuality> physicalRenderQuality(
             return metal::PhysicalRenderQuality::balanced;
         case WE_SCENE_PHYSICAL_RENDER_POWER_SAVING:
             return metal::PhysicalRenderQuality::powerSaving;
+        case WE_SCENE_PHYSICAL_RENDER_ULTRA:
+            return metal::PhysicalRenderQuality::ultra;
     }
     return std::nullopt;
 }

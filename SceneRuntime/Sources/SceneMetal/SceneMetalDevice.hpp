@@ -43,6 +43,8 @@ enum class PixelFormat {
     r8,
     rg16f,
     r16f,
+    rgba16snorm,
+    depth32f,
 };
 
 enum class TextureWrap {
@@ -60,8 +62,11 @@ struct TextureResource final {
     MetalObject texture;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    std::uint32_t depth = 1;
     std::uint32_t mipmapCount = 1;
     PixelFormat format = PixelFormat::rgba8;
+    TranslatedMetalShaderPair::TextureDimension dimension =
+        TranslatedMetalShaderPair::TextureDimension::texture2D;
     TextureWrap wrap = TextureWrap::clampToEdge;
     TextureFilter filter = TextureFilter::linear;
 
@@ -73,6 +78,11 @@ struct TextureResource final {
 struct FramebufferResource final {
     TextureResource colorTexture;
     MetalObject depthTexture;
+    // The depth attachment is also retained as a shader-readable texture.
+    // Keep the attachment handle separate because render-pass setup only
+    // needs the native object while comparison samplers need dimensions and
+    // an explicit depth format.
+    TextureResource depthSampleTexture;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     PixelFormat format = PixelFormat::rgba8;
@@ -137,6 +147,7 @@ enum class VertexFormat {
     float2,
     float3,
     float4,
+    uint4,
 };
 
 struct VertexAttributeLayout final {
@@ -158,10 +169,13 @@ enum class BlendMode {
 
 struct RenderState final {
     BlendMode blending = BlendMode::replace;
+    bool alphaToCoverage = false;
     bool cullBackFaces = false;
     bool depthTest = false;
+    bool depthCompareGreater = false;
     bool depthWrite = false;
     bool depthClamp = false;
+    bool writeColor = true;
     bool writeAlpha = true;
     bool alphaSourceOne = false;
 };
@@ -176,6 +190,8 @@ struct UniformBytesBinding final {
 struct TextureStageBinding final {
     const TextureResource* texture = nullptr;
     std::optional<TextureFilter> filterOverride;
+    bool comparison = false;
+    bool comparisonGreater = false;
     std::optional<std::uint32_t> vertexTextureIndex;
     std::optional<std::uint32_t> vertexSamplerIndex;
     std::optional<std::uint32_t> fragmentTextureIndex;
@@ -193,6 +209,21 @@ struct DrawRequest final {
     std::size_t indexBufferOffset = 0;
     std::vector<UniformBytesBinding> uniforms;
     std::vector<TextureStageBinding> textures;
+    struct Region final {
+        std::uint32_t x = 0;
+        std::uint32_t y = 0;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+    };
+    std::optional<Region> viewport;
+    std::optional<Region> scissor;
+    // Shadow caster shaders use gl_InstanceID to select one of the six point
+    // faces (or the three directional cascades) from the viewport matrix
+    // array. Ordinary image draws keep the default of one instance.
+    std::uint32_t instanceCount = 1;
+    float depthBias = 0.0F;
+    float depthSlopeScale = 0.0F;
+    float depthBiasClamp = 0.0F;
 };
 
 class Device final {
@@ -251,12 +282,18 @@ public:
             std::uint32_t height,
             std::span<const std::uint8_t> pixels
         );
+        [[nodiscard]] TextureResource uploadRGBA16SnormTexture(
+            std::uint32_t width,
+            std::uint32_t height,
+            std::span<const std::uint16_t> pixels
+        );
         void destroyTexture(TextureResource& texture) noexcept;
 
         void clear(
             FramebufferResource& framebuffer,
             std::array<float, 4> color,
-            bool clearDepth
+            bool clearDepth,
+            float depthValue = 1.0F
         );
         void copy(
             const TextureResource& source,

@@ -196,9 +196,279 @@ private:
     std::vector<std::string> stack_;
 };
 
+constexpr int maximumLightingV1LightCount = 4;
+
+int lightingComboValue(
+    const std::map<std::string, int>& combos,
+    std::string_view name
+) {
+    const auto found = combos.find(std::string(name));
+    return found == combos.end() ? 0 : found->second;
+}
+
+int lightingV1LightCount(
+    const std::map<std::string, int>& combos,
+    std::string_view name,
+    std::string_view sourceName
+) {
+    const int value = lightingComboValue(combos, name);
+    if (value < 0 || value > maximumLightingV1LightCount) {
+        preprocessError(
+            sourceName,
+            "LightingV1 combo '" + std::string(name) +
+                "' must be between 0 and " +
+                std::to_string(maximumLightingV1LightCount)
+        );
+    }
+    return value;
+}
+
+std::string lightingV1Module(
+    const std::map<std::string, int>& combos,
+    std::string_view sourceName
+) {
+    if (lightingComboValue(combos, "LIGHTING") == 0) return {};
+
+    const int point = lightingV1LightCount(
+        combos, "LIGHTS_POINT", sourceName
+    );
+    const int spot = lightingV1LightCount(
+        combos, "LIGHTS_SPOT", sourceName
+    );
+    const int tube = lightingV1LightCount(
+        combos, "LIGHTS_TUBE", sourceName
+    );
+    const int directional = lightingV1LightCount(
+        combos, "LIGHTS_DIRECTIONAL", sourceName
+    );
+    const int pointShadow = lightingV1LightCount(
+        combos, "LIGHTS_POINT_SHADOW", sourceName
+    );
+    const int spotShadowCookie = lightingV1LightCount(
+        combos, "LIGHTS_SPOT_SHADOW_COOKIE", sourceName
+    );
+    const int spotCookie = lightingV1LightCount(
+        combos, "LIGHTS_SPOT_COOKIE", sourceName
+    );
+    const int spotShadow = lightingV1LightCount(
+        combos, "LIGHTS_SPOT_SHADOW", sourceName
+    );
+    const int directionalShadow = lightingV1LightCount(
+        combos, "LIGHTS_DIRECTIONAL_SHADOW", sourceName
+    );
+    const int spotFeatureCount =
+        spotShadowCookie + spotCookie + spotShadow;
+    if (pointShadow > point || spotFeatureCount > spot ||
+        directionalShadow > directional) {
+        preprocessError(
+            sourceName,
+            "LightingV1 shadow/cookie counts exceed their light totals"
+        );
+    }
+    // The official generator advances the directional projection base by one
+    // while consuming three consecutive cascades. Its ABI therefore only
+    // permits one shadow-casting directional light.
+    if (directionalShadow > 1) {
+        preprocessError(
+            sourceName,
+            "LightingV1 supports at most one shadow-casting directional light"
+        );
+    }
+
+    std::ostringstream result;
+    const auto uniformArray = [&result](
+        std::string_view type,
+        std::string_view name,
+        int count
+    ) {
+        if (count == 0) return;
+        result << "uniform " << type << ' ' << name << '[' << count
+               << "];\n";
+    };
+    uniformArray("vec4", "g_LPoint_Color", point);
+    uniformArray("vec4", "g_LPoint_Origin", point);
+    uniformArray("vec4", "g_LSpot_Color", spot);
+    uniformArray("vec4", "g_LSpot_Origin", spot);
+    uniformArray("vec4", "g_LSpot_Direction", spot);
+    uniformArray("vec4", "g_LSpot_Exponent", spot);
+    uniformArray("vec4", "g_LTube_Color", tube);
+    uniformArray("vec4", "g_LTube_OriginA", tube);
+    uniformArray("vec4", "g_LTube_OriginB", tube);
+    uniformArray("vec4", "g_LDirectional_Color", directional);
+    uniformArray("vec4", "g_LDirectional_Direction", directional);
+    uniformArray(
+        "mat4", "g_LFeature_ShadowProjection",
+        spotFeatureCount + directionalShadow * 3
+    );
+    uniformArray(
+        "vec4", "g_LFeature_ShadowProjectionTransform",
+        spotFeatureCount + directionalShadow * 3
+    );
+    uniformArray(
+        "vec4", "g_LFeature_ShadowPointProjection", pointShadow
+    );
+    uniformArray(
+        "vec4", "g_LFeature_ShadowPointProjectionTransform", pointShadow
+    );
+
+    result <<
+        "vec3 PerformLighting_V1(vec3 worldPos, vec3 color, vec3 normal, "
+        "vec3 viewVector, vec3 specularTint, vec3 ambient, float roughness, "
+        "float metallic)\n"
+        "{\n"
+        "\tvec3 light = CAST3(0.0);\n";
+    const auto lightBlock = [&result](int index, std::string_view body) {
+        result << "\t{\n\t\tconst uint i = " << index << "u;\n"
+               << body << "\t}\n";
+    };
+    for (int index = 0; index < pointShadow; ++index) {
+        lightBlock(
+            index,
+            "\t\tvec3 lightDelta = g_LPoint_Origin[i].xyz - worldPos;\n"
+            "\t\tvec4 projectedCoords = CalculateProjectedCoordsPoint("
+            "worldPos, g_LPoint_Origin[i].xyz, "
+            "g_LFeature_ShadowPointProjection[i], "
+            "g_LFeature_ShadowPointProjectionTransform[i]);\n"
+            "\t\tfloat shadowFactor = PerformPointShadowMapping("
+            "projectedCoords);\n"
+            "\t\tlight += ComputePBRLightShadow(normal, lightDelta, "
+            "viewVector, color, g_LPoint_Color[i].rgb, "
+            "g_LPoint_Color[i].w, g_LPoint_Origin[i].w, specularTint, "
+            "ambient, roughness, metallic, shadowFactor);\n"
+        );
+    }
+    for (int index = pointShadow; index < point; ++index) {
+        lightBlock(
+            index,
+            "\t\tvec3 lightDelta = g_LPoint_Origin[i].xyz - worldPos;\n"
+            "\t\tlight += ComputePBRLightShadow(normal, lightDelta, "
+            "viewVector, color, g_LPoint_Color[i].rgb, "
+            "g_LPoint_Color[i].w, g_LPoint_Origin[i].w, specularTint, "
+            "ambient, roughness, metallic, 1.0);\n"
+        );
+    }
+    for (int index = 0; index < spotShadowCookie; ++index) {
+        lightBlock(
+            index,
+            "\t\tvec3 lightDelta = g_LSpot_Origin[i].xyz - worldPos;\n"
+            "\t\tvec3 projectedCoords = CalculateProjectedCoords("
+            "worldPos, g_LFeature_ShadowProjection[i]);\n"
+            "\t\tfloat shadowFactor = PerformShadowMapping("
+            "projectedCoords, g_LFeature_ShadowProjectionTransform[i]);\n"
+            "\t\tvec3 cookieColor = texSample2D(COOKIE_SAMPLER, "
+            "projectedCoords.xy).rgb;\n"
+            "\t\tlight += ComputePBRLightShadow(normal, lightDelta, "
+            "viewVector, color, g_LSpot_Color[i].rgb * cookieColor, "
+            "g_LSpot_Color[i].w, g_LSpot_Exponent[i].x, specularTint, "
+            "ambient, roughness, metallic, shadowFactor);\n"
+        );
+    }
+    for (int index = spotShadowCookie;
+         index < spotShadowCookie + spotCookie; ++index) {
+        lightBlock(
+            index,
+            "\t\tvec3 lightDelta = g_LSpot_Origin[i].xyz - worldPos;\n"
+            "\t\tvec3 projectedCoords = CalculateProjectedCoords("
+            "worldPos, g_LFeature_ShadowProjection[i]);\n"
+            "\t\tvec3 cookieColor = texSample2D(COOKIE_SAMPLER, "
+            "projectedCoords.xy).rgb;\n"
+            "\t\tlight += ComputePBRLightShadow(normal, lightDelta, "
+            "viewVector, color, g_LSpot_Color[i].rgb * cookieColor, "
+            "g_LSpot_Color[i].w, g_LSpot_Exponent[i].x, specularTint, "
+            "ambient, roughness, metallic, 1.0);\n"
+        );
+    }
+    for (int index = spotShadowCookie + spotCookie;
+         index < spotFeatureCount; ++index) {
+        lightBlock(
+            index,
+            "\t\tvec3 lightDelta = g_LSpot_Origin[i].xyz - worldPos;\n"
+            "\t\tfloat spotCookie = -dot(normalize(lightDelta), "
+            "g_LSpot_Direction[i].xyz);\n"
+            "\t\tspotCookie = smoothstep(g_LSpot_Direction[i].w, "
+            "g_LSpot_Origin[i].w, spotCookie);\n"
+            "\t\tvec3 projectedCoords = CalculateProjectedCoords("
+            "worldPos, g_LFeature_ShadowProjection[i]);\n"
+            "\t\tfloat shadowFactor = PerformShadowMapping("
+            "projectedCoords, g_LFeature_ShadowProjectionTransform[i]);\n"
+            "\t\tlight += ComputePBRLightShadow(normal, lightDelta, "
+            "viewVector, color, g_LSpot_Color[i].rgb * spotCookie, "
+            "g_LSpot_Color[i].w, g_LSpot_Exponent[i].x, specularTint, "
+            "ambient, roughness, metallic, shadowFactor);\n"
+        );
+    }
+    for (int index = spotFeatureCount; index < spot; ++index) {
+        lightBlock(
+            index,
+            "\t\tvec3 lightDelta = g_LSpot_Origin[i].xyz - worldPos;\n"
+            "\t\tfloat spotCookie = -dot(normalize(lightDelta), "
+            "g_LSpot_Direction[i].xyz);\n"
+            "\t\tspotCookie = smoothstep(g_LSpot_Direction[i].w, "
+            "g_LSpot_Origin[i].w, spotCookie);\n"
+            "\t\tlight += ComputePBRLightShadow(normal, lightDelta, "
+            "viewVector, color, g_LSpot_Color[i].rgb * spotCookie, "
+            "g_LSpot_Color[i].w, g_LSpot_Exponent[i].x, specularTint, "
+            "ambient, roughness, metallic, 1.0);\n"
+        );
+    }
+    for (int index = 0; index < tube; ++index) {
+        lightBlock(
+            index,
+            "\t\tvec3 lightDelta = PointSegmentDelta(worldPos, "
+            "g_LTube_OriginA[i].xyz, g_LTube_OriginB[i].xyz);\n"
+            "\t\tlight += ComputePBRLightShadow(normal, lightDelta, "
+            "viewVector, color, g_LTube_Color[i].rgb, "
+            "g_LTube_Color[i].w, g_LTube_OriginA[i].w, specularTint, "
+            "ambient, roughness, metallic, 1.0);\n"
+        );
+    }
+    for (int index = 0; index < directionalShadow; ++index) {
+        const int projection = spotFeatureCount + index;
+        result << "\t{\n\t\tconst uint i = " << index << "u;\n"
+               << "\t\tvec4 projectedCoords1 = "
+                  "CalculateProjectedCoordsCascades(worldPos, "
+                  "g_LFeature_ShadowProjection[" << projection << "]);\n"
+               << "\t\tvec4 projectedCoords2 = "
+                  "CalculateProjectedCoordsCascades(worldPos, "
+                  "g_LFeature_ShadowProjection[" << projection + 1 << "]);\n"
+               << "\t\tvec4 projectedCoords3 = "
+                  "CalculateProjectedCoordsCascades(worldPos, "
+                  "g_LFeature_ShadowProjection[" << projection + 2 << "]);\n"
+               << "\t\tvec3 projectedCoords = mix(projectedCoords1.xyz, "
+                  "projectedCoords2.xyz, projectedCoords1.w);\n"
+               << "\t\tprojectedCoords = mix(projectedCoords, "
+                  "projectedCoords3.xyz, projectedCoords2.w);\n"
+               << "\t\tvec4 atlasTransform = mix("
+                  "g_LFeature_ShadowProjectionTransform[" << projection
+               << "], g_LFeature_ShadowProjectionTransform[" << projection + 1
+               << "], projectedCoords1.w);\n"
+               << "\t\tatlasTransform = mix(atlasTransform, "
+                  "g_LFeature_ShadowProjectionTransform[" << projection + 2
+               << "], projectedCoords2.w);\n"
+               << "\t\tfloat shadowFactor = max(projectedCoords3.w, "
+                  "PerformShadowMapping(projectedCoords, atlasTransform));\n"
+               << "\t\tlight += ComputePBRLightShadowInfinite(normal, "
+                  "g_LDirectional_Direction[i].xyz, viewVector, color, "
+                  "g_LDirectional_Color[i].rgb, specularTint, ambient, "
+                  "roughness, metallic, shadowFactor);\n\t}\n";
+    }
+    for (int index = directionalShadow; index < directional; ++index) {
+        lightBlock(
+            index,
+            "\t\tlight += ComputePBRLightShadowInfinite(normal, "
+            "g_LDirectional_Direction[i].xyz, viewVector, color, "
+            "g_LDirectional_Color[i].rgb, specularTint, ambient, "
+            "roughness, metallic, 1.0);\n"
+        );
+    }
+    result << "\treturn light;\n}\n";
+    return result.str();
+}
+
 std::string processRequires(
     std::string source,
-    std::string_view sourceName
+    std::string_view sourceName,
+    const std::map<std::string, int>& combos
 ) {
     std::istringstream lines(source);
     std::string result;
@@ -222,13 +492,9 @@ std::string processRequires(
                 "Unsupported #require module '" + module + "'"
             );
         }
-        result += "// begin generated module LightingV1\n"
-                  "vec3 PerformLighting_V1(vec3 worldPos, vec3 albedo, vec3 normal, vec3 viewDir,\n"
-                  "    vec3 specularTint, vec3 baseReflectance, float roughness, float metallic)\n"
-                  "{\n"
-                  "    return vec3(0.0);\n"
-                  "}\n"
-                  "// end generated module LightingV1\n";
+        result += "// begin generated module LightingV1\n";
+        result += lightingV1Module(combos, sourceName);
+        result += "// end generated module LightingV1\n";
         result += "// #require LightingV1\n";
     }
     return result;
@@ -495,6 +761,17 @@ std::vector<ShaderParameterMetadata> parseParameters(
                 }
                 parameter.material = material->get<std::string>();
             }
+            if (const auto combo = metadata.find("combo");
+                combo != metadata.end()) {
+                if (!combo->is_string()) {
+                    preprocessError(
+                        sourceName,
+                        "Uniform metadata combo for '" + parameter.name +
+                            "' must be a string"
+                    );
+                }
+                parameter.combo = combo->get<std::string>();
+            }
             if (const auto defaultValue = metadata.find("default");
                 defaultValue != metadata.end()) {
                 parameter.defaultValue = parseParameterDefault(
@@ -518,6 +795,96 @@ std::vector<ShaderParameterMetadata> parseParameters(
     return result;
 }
 
+bool samplerParameterType(std::string_view type) {
+    return type.starts_with("sampler") || type.starts_with("isampler") ||
+        type.starts_with("usampler");
+}
+
+std::optional<int> samplerTextureSlot(std::string_view name) {
+    constexpr std::string_view prefix = "g_Texture";
+    if (!name.starts_with(prefix) || name.size() == prefix.size()) {
+        return std::nullopt;
+    }
+    int slot = 0;
+    for (const char digit : name.substr(prefix.size())) {
+        if (digit < '0' || digit > '9') return std::nullopt;
+        slot = slot * 10 + (digit - '0');
+        if (slot >= 32) return std::nullopt;
+    }
+    return slot;
+}
+
+void applyTextureLinkedCombos(
+    const std::vector<ShaderParameterMetadata>& parameters,
+    const ShaderPreprocessOptions& options,
+    std::map<std::string, int>& combos
+) {
+    for (const ShaderParameterMetadata& parameter : parameters) {
+        if (!parameter.combo || !samplerParameterType(parameter.type)) {
+            continue;
+        }
+        const std::optional<int> slot = samplerTextureSlot(parameter.name);
+        if (!slot) continue;
+
+        // Explicit material and renderer overrides are authoritative. A
+        // sampler-linked combo is the discovered/default layer beneath them.
+        const bool explicitlyConfigured =
+            options.overrideCombos.contains(*parameter.combo) ||
+            options.combos.contains(*parameter.combo);
+        if (options.textureSlots.contains(*slot)) {
+            if (!explicitlyConfigured) {
+                combos.insert_or_assign(*parameter.combo, 1);
+            }
+            continue;
+        }
+
+        // A few stock shaders use require/requireany with an integer default
+        // to select a sampler-backed variant even when no explicit texture
+        // slot exists. Preserve that small part of the official discovery
+        // contract without treating texture-name defaults as combo values.
+        if (explicitlyConfigured || parameter.json.empty()) continue;
+        const nlohmann::json metadata = nlohmann::json::parse(parameter.json);
+        const auto require = metadata.find("require");
+        if (require == metadata.end() || !require->is_object()) continue;
+        const bool requireAny = metadata.value("requireany", false);
+        bool required = false;
+        if (requireAny) {
+            // This mirrors the upstream renderer's discovery rule: a
+            // require-any sampler is discovered when one condition is not
+            // currently satisfied.
+            for (const auto& [name, value] : require->items()) {
+                const auto found = combos.find(name);
+                if (found == combos.end() ||
+                    options.overrideCombos.contains(name) ||
+                    found->second != value.get<int>()) {
+                    required = true;
+                    break;
+                }
+            }
+        } else {
+            required = true;
+            for (const auto& [name, value] : require->items()) {
+                const auto found = combos.find(name);
+                if ((found != combos.end() ||
+                     options.overrideCombos.contains(name)) &&
+                    found != combos.end() && found->second == value.get<int>()) {
+                    required = false;
+                    break;
+                }
+            }
+        }
+        if (!required) continue;
+        const auto defaultValue = metadata.find("default");
+        if (defaultValue != metadata.end() &&
+            defaultValue->is_number_integer()) {
+            combos.insert_or_assign(
+                *parameter.combo,
+                defaultValue->get<int>()
+            );
+        }
+    }
+}
+
 std::string compatibilityHeader(
     bool fragment,
     const std::map<std::string, int>& combos,
@@ -531,6 +898,8 @@ std::string compatibilityHeader(
               "#define max(x, y) max(y, x)\n"
               "#define lerp mix\n"
               "#define frac fract\n"
+              "#define CASTF(x) (float(x))\n"
+              "#define CASTU(x) (uint(x))\n"
               "#define CAST2(x) (vec2(x))\n"
               "#define CAST3(x) (vec3(x))\n"
               "#define CAST4(x) (vec4(x))\n"
@@ -542,13 +911,26 @@ std::string compatibilityHeader(
               "#define int3 ivec3\n"
               "#define int4 ivec4\n"
               "#define saturate(x) (clamp(x, 0.0, 1.0))\n"
+              // Wallpaper Engine's shader ABI uses distinct sampler names for
+              // depth comparison and integer-addressed render targets. Keep
+              // those names in the source so metadata/reflection can retain
+              // their contract, then lower them to core GLSL 3.30 types.
+              "#define sampler2DComparison sampler2DShadow\n"
+              "#define sampler2DBackBuffer sampler2D\n"
               "#define texSample2D texture\n"
               "#define texSample2DLod textureLod\n"
+              // Wallpaper Engine's 3D LUT intrinsic returns RGB rather than
+              // the four-component storage texel returned by GLSL texture().
+              "#define texSample3D(sampler, coordinate) texture((sampler), (coordinate)).rgb\n"
+              "#define texSample2DCompare(sampler, coordinate, compare) (vec4(texture((sampler), vec3((coordinate), (compare)))))\n"
+              "#define texSample2DBackBuffer(sampler, coordinate, resolution) texelFetch((sampler), ivec2((coordinate) * (resolution)), 0)\n"
+              "#define texLoad2D(sampler, coordinate, resolution) texelFetch((sampler), ivec2((coordinate) * (resolution)), 0)\n"
               "#define log10(x) (log2(x) * 0.301029995663981)\n"
               "#define atan2 atan\n"
               "#define fmod(x, y) ((x)-(y)*trunc((x)/(y)))\n"
               "#define ddx dFdx\n"
               "#define ddy(x) dFdy(-(x))\n"
+              "#define clip(x) if ((x) < 0.0) discard\n"
               "#define GLSL 1\n";
     if (fragment) {
         result += "out vec4 out_FragColor;\n#define varying in\n";
@@ -572,9 +954,11 @@ PreprocessedShader makeShader(
     std::string name,
     const ShaderPreprocessOptions& options
 ) {
-    source = removeVersionDirectives(processRequires(std::move(source), name));
     std::map<std::string, int> combos;
     parseCombos(source, options, combos);
+    source = removeVersionDirectives(
+        processRequires(std::move(source), name, combos)
+    );
     PreprocessedShader result;
     result.name = std::move(name);
     result.combos = combos;
@@ -659,6 +1043,18 @@ PreprocessedShaderPair ShaderPreprocessor::preprocessSources(
     parseCombos(expandedFragment, options, linkedCombos);
     ShaderPreprocessOptions linkedOptions = options;
     linkedOptions.combos = std::move(linkedCombos);
+    std::vector<ShaderParameterMetadata> linkedParameters = parseParameters(
+        expandedVertex, vertexName
+    );
+    std::vector<ShaderParameterMetadata> fragmentParameters = parseParameters(
+        expandedFragment, fragmentName
+    );
+    linkedParameters.insert(
+        linkedParameters.end(), fragmentParameters.begin(), fragmentParameters.end()
+    );
+    applyTextureLinkedCombos(
+        linkedParameters, options, linkedOptions.combos
+    );
 
     PreprocessedShaderPair result {
         makeShader(

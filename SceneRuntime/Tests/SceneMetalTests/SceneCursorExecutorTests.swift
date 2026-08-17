@@ -11,6 +11,7 @@ final class SceneCursorExecutorTests: XCTestCase {
         let script: String
         var angles: String? = nil
         var alignment: String? = nil
+        var perspective = false
     }
 
     private struct Pipeline {
@@ -297,6 +298,34 @@ final class SceneCursorExecutorTests: XCTestCase {
         )
     }
 
+    func testPerspectiveLayerDepthUsesTheRenderedRayPlaneIntersection() throws {
+        let loaded = try makePipeline(
+            width: 100,
+            height: 100,
+            layers: [Layer(
+                id: 1,
+                origin: "50 50 500",
+                size: "20 20",
+                solid: true,
+                script: Self.eventScript,
+                perspective: true
+            )]
+        )
+        defer { destroy(loaded) }
+
+        _ = try render(
+            loaded, x: 0.65, y: 0.5, active: false, leftDown: false, time: 1
+        )
+        let hit = try render(
+            loaded, x: 0.65, y: 0.5, active: true, leftDown: false, time: 2
+        )
+        XCTAssertEqual(
+            red(hit, x: 50, y: 50, width: 100),
+            1,
+            "A Z=500 perspective layer is visibly twice its authored size and must receive the matching cursor enter"
+        )
+    }
+
     func testLayerCrossingOrdersLeaveEnterMove() throws {
         let loaded = try makePipeline(
             width: 8,
@@ -473,6 +502,7 @@ final class SceneCursorExecutorTests: XCTestCase {
                 "image": "models/cursor.json",
                 "name": "Cursor layer \(layer.id)",
                 "origin": layer.origin,
+                "perspective": layer.perspective,
                 "size": layer.size,
                 "solid": layer.solid,
                 "visible": true,

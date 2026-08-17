@@ -1168,7 +1168,7 @@ final class ParticleExecutorTests: XCTestCase {
         )
     }
 
-    func testPerspectiveParticleRejectsInvalidSignedClippingPlanes() throws {
+    func testPerspectiveParticleUsesOrthographicReverseZClippingPlanes() throws {
         let invalidPlanes: [(near: Double, far: Double)] = [
             (-0.01, 1_000),
             (0, -1),
@@ -1187,24 +1187,14 @@ final class ParticleExecutorTests: XCTestCase {
             )
             defer { destroy(loaded) }
 
-            var inputs = WESceneFrameInputs(
-                pointer_x: 0.5,
-                pointer_y: 0.5,
-                time_seconds: 1,
-                frame_time_seconds: 1.0 / 120.0
+            try render(loaded.executor, time: 1, delta: 1.0 / 120.0)
+            let pixels = try readPixels(loaded.executor)
+            XCTAssertTrue(
+                stride(from: 0, to: pixels.count, by: 4)
+                    .contains { offset in
+                        return pixels[offset + 3] > 0
+                    }
             )
-            var error: WESceneRuntimeErrorRef?
-            XCTAssertEqual(
-                we_scene_frame_executor_render(loaded.executor, &inputs, &error),
-                0,
-                "Expected near=\(planes.near), far=\(planes.far) to fail"
-            )
-            XCTAssertEqual(
-                we_scene_runtime_error_code(error),
-                WE_SCENE_RUNTIME_ERROR_METAL_RESOURCE_VALIDATION
-            )
-            XCTAssertTrue(errorMessage(error).contains("perspective clipping planes"))
-            we_scene_runtime_error_destroy(error)
         }
     }
 
@@ -2000,7 +1990,10 @@ final class ParticleExecutorTests: XCTestCase {
         uniform vec4 g_Texture0Rotation;
         void main() {
             bool reset = all(lessThan(abs(g_Texture0Translation), vec2(0.0001)))
-                && all(lessThan(abs(g_Texture0Rotation), vec4(0.0001)));
+                && all(lessThan(
+                    abs(g_Texture0Rotation - vec4(1.0, 0.0, 0.0, 1.0)),
+                    vec4(0.0001)
+                ));
             gl_FragColor = reset
                 ? vec4(0.0, 1.0, 0.0, 1.0)
                 : vec4(1.0, 0.0, 0.0, 1.0);

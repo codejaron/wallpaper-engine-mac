@@ -237,9 +237,9 @@ struct ProjectProperty {
     std::optional<bool> fraction;
 };
 
-enum class BlendingMode { normal, translucent, additive };
+enum class BlendingMode { normal, translucent, additive, alphaToCoverage };
 enum class CullingMode { normal, disabled };
-enum class DepthMode { disabled, enabled };
+enum class DepthMode { disabled, enabled, greater };
 enum class EffectCommand { copy, swap };
 
 struct TextureSlot {
@@ -390,6 +390,9 @@ struct ImageObject {
     DynamicValue brightness;
     DynamicValue colorBlendMode;
     std::string horizontalAlignment = "center";
+    // PKGV0019+: image layers participate in the scene shadow-caster set
+    // independently from whether any light currently requests shadows.
+    bool castShadow = false;
     bool copyBackground = false;
     bool perspective = false;
     bool ledSource = false;
@@ -397,6 +400,34 @@ struct ImageObject {
     TextureSlots instanceUserTextures;
     std::vector<ImageEffect> effects;
     std::vector<PuppetAnimationLayer> animationLayers;
+};
+
+enum class LightType {
+    point,
+    spot,
+    tube,
+    directional,
+};
+
+struct LightObject {
+    LightType type = LightType::point;
+    DynamicValue color;
+    DynamicValue intensity;
+    DynamicValue radius;
+    DynamicValue exponent;
+    DynamicValue innerCone;
+    DynamicValue outerCone;
+    DynamicValue controlPoint;
+    DynamicValue castShadow;
+    // Optional cookie asset name. The official runtime resolves this under
+    // cookie/ and falls back to cookie/flashlight1 when it is absent.
+    DynamicValue cookie;
+    DynamicValue useCookie;
+    DynamicValue castVolumetrics;
+    DynamicValue density;
+    DynamicValue volumetricsExponent;
+    DynamicValue lightSourceSize;
+    std::array<DynamicValue, 3> cascadeDistances;
 };
 
 struct TextObject {
@@ -423,6 +454,19 @@ struct TextObject {
     bool limitWidth = false;
     int maxRows = 0;
     DynamicValue maxWidth;
+    // Official font material controls. They are pass-local inputs for the
+    // font shader, not common layer color/alpha state.
+    bool msdf = false;
+    bool blur = false;
+    DynamicValue blurSize;
+    bool dropShadow = false;
+    DynamicValue dropShadowColor;
+    DynamicValue dropShadowOffset;
+    DynamicValue dropShadowOpacity;
+    DynamicValue dropShadowSize;
+    bool outline = false;
+    DynamicValue outlineColor;
+    DynamicValue outlineThickness;
 };
 
 enum class SoundPlaybackMode {
@@ -787,6 +831,7 @@ using SceneObjectData =
     std::variant<
         GroupObject,
         ImageObject,
+        LightObject,
         TextObject,
         SoundObject,
         ParticleObject
@@ -809,7 +854,9 @@ struct SceneCamera {
     DynamicValue nearPlane;
     DynamicValue farPlane;
     DynamicValue fieldOfView;
+    DynamicValue perspectiveOverrideFieldOfView;
     bool preview = false;
+    bool orthographic = true;
     bool projectionAuto = false;
     int projectionWidth = 0;
     int projectionHeight = 0;
@@ -819,6 +866,17 @@ struct Scene {
     std::string assetPath;
     SceneCamera camera;
     std::map<std::string, DynamicValue> generalValues;
+    struct LightConfiguration {
+        std::optional<std::size_t> point;
+        std::optional<std::size_t> pointShadow;
+        std::optional<std::size_t> spot;
+        std::optional<std::size_t> spotCookie;
+        std::optional<std::size_t> spotShadow;
+        std::optional<std::size_t> spotShadowCookie;
+        std::optional<std::size_t> tube;
+        std::optional<std::size_t> directional;
+        std::optional<std::size_t> directionalShadow;
+    } lightConfiguration;
     std::vector<SceneObject> objects;
     // Compatibility resources synthesized by linux-wallpaperengine for the
     // camera bloom post-process. The JSON wrappers are virtual upstream; the

@@ -82,6 +82,7 @@ struct PerformancePage: SettingsPage {
                     "Scene render quality",
                     selection: $viewModel.settings.sceneRenderQuality
                 ) {
+                    Text("Ultra").tag(GSSceneRenderQuality.ultra)
                     Text("High Quality").tag(GSSceneRenderQuality.high)
                     Text("Balanced").tag(GSSceneRenderQuality.balanced)
                     Text("Power Saving").tag(GSSceneRenderQuality.powerSaving)

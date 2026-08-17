@@ -4,6 +4,38 @@ import SceneRuntimeBridge
 import XCTest
 
 final class SceneRuntimeBridgeTests: XCTestCase {
+    func testPuppetBoneMatrixArrayTranslatesToMetal() throws {
+        let translated = try translateShaderSources(
+            vertex: """
+            #version 330
+            uniform mat4x3 g_Bones[2];
+            attribute vec3 a_Position;
+            attribute uvec4 a_BlendIndices;
+            attribute vec4 a_BlendWeights;
+            void main() {
+                mat4x3 skin = g_Bones[a_BlendIndices.x] * a_BlendWeights.x
+                    + g_Bones[a_BlendIndices.y] * a_BlendWeights.y;
+                vec3 position = skin * vec4(a_Position, 1.0);
+                gl_Position = vec4(position, 1.0);
+            }
+            """,
+            fragment: """
+            #version 330
+            void main() { gl_FragColor = vec4(1.0); }
+            """
+        )
+        XCTAssertTrue(
+            translated.vertex.contains(
+                "constant spvUnsafeArray<float4x3, 2>& g_Bones"
+            ),
+            translated.vertex
+        )
+        XCTAssertTrue(
+            translated.vertex.contains("uint4 a_BlendIndices"),
+            translated.vertex
+        )
+    }
+
     func testWallpaperEngineShaderForkTranslatesRelaxedGLSL() throws {
         let vertex = """
         #version 330
@@ -658,6 +690,140 @@ final class SceneRuntimeBridgeTests: XCTestCase {
                 )
             }
         }
+    }
+
+    func testLightingV1GeneratesOfficialArraysAndCompilesAllUnshadowedLights() throws {
+        guard let assetsPath = ProcessInfo.processInfo.environment["WE_ASSETS_DIR"],
+              !assetsPath.isEmpty else {
+            throw XCTSkip("WE_ASSETS_DIR is required for the shader contract")
+        }
+        let fixtureRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let packageURL = fixtureRoot.appendingPathComponent("scene.pkg")
+        try FileManager.default.createDirectory(
+            at: fixtureRoot,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: fixtureRoot) }
+
+        let vertex = """
+        attribute vec3 a_Position;
+        void main() { gl_Position = vec4(a_Position, 1.0); }
+        """
+        let fragment = """
+        // [COMBO] {"combo":"LIGHTING","default":1}
+        // [COMBO] {"combo":"LIGHTS_POINT","default":2}
+        // [COMBO] {"combo":"LIGHTS_SPOT","default":1}
+        // [COMBO] {"combo":"LIGHTS_TUBE","default":1}
+        // [COMBO] {"combo":"LIGHTS_DIRECTIONAL","default":1}
+        #include "common_pbr_2.h"
+        #require LightingV1
+        void main() {
+            vec3 light = PerformLighting_V1(
+                vec3(0.0), vec3(0.5), vec3(0.0, 0.0, 1.0),
+                vec3(0.0, 0.0, 1.0), vec3(1.0), vec3(0.04),
+                0.5, 0.0
+            );
+            gl_FragColor = vec4(light, 1.0);
+        }
+        """
+        try makePackage([
+            ("shaders/lighting-v1-test.vert", Data(vertex.utf8)),
+            ("shaders/lighting-v1-test.frag", Data(fragment.utf8)),
+        ]).write(to: packageURL)
+        let runtime = try createRuntime(
+            assets: URL(fileURLWithPath: assetsPath, isDirectory: true),
+            package: packageURL
+        )
+        defer { we_scene_runtime_destroy(runtime) }
+
+        let translation = try translateShaderFiles(
+            runtime,
+            vertex: "shaders/lighting-v1-test.vert",
+            fragment: "shaders/lighting-v1-test.frag"
+        )
+        defer { we_scene_shader_translation_destroy(translation) }
+        let preprocessed = runtimeString(
+            we_scene_shader_translation_preprocessed_fragment_source(translation)
+        )
+        XCTAssertTrue(preprocessed.contains("uniform vec4 g_LPoint_Color[2];"), preprocessed)
+        XCTAssertTrue(preprocessed.contains("uniform vec4 g_LSpot_Exponent[1];"), preprocessed)
+        XCTAssertTrue(preprocessed.contains("uniform vec4 g_LTube_OriginB[1];"), preprocessed)
+        XCTAssertTrue(preprocessed.contains("uniform vec4 g_LDirectional_Direction[1];"), preprocessed)
+        XCTAssertTrue(preprocessed.contains("const uint i = 1u;"), preprocessed)
+        XCTAssertTrue(preprocessed.contains("ComputePBRLightShadowInfinite"), preprocessed)
+        XCTAssertFalse(preprocessed.contains("return vec3(0.0)"), preprocessed)
+
+        let metal = runtimeString(
+            we_scene_shader_translation_fragment_source(translation)
+        )
+        for uniform in [
+            "g_LPoint_Color", "g_LPoint_Origin",
+            "g_LSpot_Color", "g_LSpot_Origin", "g_LSpot_Direction",
+            "g_LSpot_Exponent", "g_LTube_Color", "g_LTube_OriginA",
+            "g_LTube_OriginB", "g_LDirectional_Color",
+            "g_LDirectional_Direction",
+        ] {
+            XCTAssertTrue(metal.contains(uniform), "Missing reflected \(uniform):\n\(metal)")
+        }
+    }
+
+    func testLightingV1ExpandsShadowCombosWithTypedProviders() throws {
+        guard let assetsPath = ProcessInfo.processInfo.environment["WE_ASSETS_DIR"],
+              !assetsPath.isEmpty else {
+            throw XCTSkip("WE_ASSETS_DIR is required for the shader contract")
+        }
+        let fixtureRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let packageURL = fixtureRoot.appendingPathComponent("scene.pkg")
+        try FileManager.default.createDirectory(
+            at: fixtureRoot,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: fixtureRoot) }
+        try makePackage([
+            (
+                "shaders/lighting-v1-shadow.vert",
+                Data("void main() { gl_Position = vec4(0.0); }".utf8)
+            ),
+            (
+                "shaders/lighting-v1-shadow.frag",
+                Data("""
+                // [COMBO] {"combo":"LIGHTING","default":1}
+                // [COMBO] {"combo":"LIGHTS_POINT","default":1}
+                // [COMBO] {"combo":"LIGHTS_POINT_SHADOW","default":1}
+                #define SHADOW_ATLAS_SAMPLER g_Texture0
+                #define SHADOW_ATLAS_TEXEL g_Texture0Texel
+                uniform sampler2DComparison g_Texture0; // {"hidden":true}
+                uniform vec4 g_Texture0Texel;
+                #include "common_pbr_2.h"
+                #require LightingV1
+                void main() { gl_FragColor = vec4(1.0); }
+                """.utf8)
+            ),
+        ]).write(to: packageURL)
+        let runtime = try createRuntime(
+            assets: URL(fileURLWithPath: assetsPath, isDirectory: true),
+            package: packageURL
+        )
+        defer { we_scene_runtime_destroy(runtime) }
+
+        var error: WESceneRuntimeErrorRef?
+        let translation = "shaders/lighting-v1-shadow.vert".withCString { vertex in
+            "shaders/lighting-v1-shadow.frag".withCString { fragment in
+                we_scene_runtime_shader_translate_files(
+                    runtime, vertex, fragment, &error
+                )
+            }
+        }
+        XCTAssertNotNil(translation, errorMessage(error))
+        XCTAssertNil(error)
+        let preprocessed = runtimeString(
+            we_scene_shader_translation_fragment_source(translation)
+        )
+        XCTAssertTrue(preprocessed.contains("g_LFeature_ShadowPointProjection"))
+        XCTAssertTrue(preprocessed.contains("PerformPointShadowMapping"))
+        we_scene_shader_translation_destroy(translation)
     }
 
     func testOfficialShaderMetadataExposesMaterialAndTypedDefaults() throws {

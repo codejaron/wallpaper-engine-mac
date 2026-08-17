@@ -52,6 +52,8 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
 
     private func makePuppetMesh(version: String = "MDLV0021") -> Data {
         precondition(version == "MDLV0021" || version == "MDLV0023")
+        let vertexFlags: UInt32 = 0x0000000f
+        let vertexStride = 48
         let vertices: [(Float, Float, Float, Float, Float)] = [
             (-200, 100, 0, 0, 0),
             (200, 100, 0, 1, 0),
@@ -59,23 +61,38 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         ]
         var result = Data(version.utf8)
         result.append(0)
+        appendUInt32(vertexFlags, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(1, to: &result)
+        result.append(contentsOf: Array("materials/main.json".utf8))
+        result.append(0)
         appendUInt32(0, to: &result)
-        appendUInt32(UInt32(vertices.count * 80), to: &result)
+        for _ in 0..<6 { appendFloat32(0, to: &result) }
+        appendUInt32(vertexFlags, to: &result)
+        appendUInt32(UInt32(vertices.count * vertexStride), to: &result)
         for (x, y, z, u, v) in vertices {
             let start = result.count
             appendFloat32(x, to: &result)
             appendFloat32(y, to: &result)
             appendFloat32(z, to: &result)
-            result.append(Data(repeating: 0, count: 60))
+            appendFloat32(0, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(1, to: &result)
+            appendFloat32(1, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(0, to: &result)
+            appendFloat32(1, to: &result)
             appendFloat32(u, to: &result)
             appendFloat32(v, to: &result)
-            precondition(result.count - start == 80)
+            precondition(result.count - start == vertexStride)
         }
         appendUInt32(6, to: &result)
         appendUInt16(0, to: &result)
         appendUInt16(1, to: &result)
         appendUInt16(2, to: &result)
-        result.append(contentsOf: Array("MDLS".utf8))
+        result.append(0)
+        result.append(0)
+        if version == "MDLV0023" { appendUInt32(0, to: &result) }
         return result
     }
 
@@ -1033,6 +1050,32 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         guard let plan = we_scene_frame_graph_plan_create_with_inputs(
             graph, &inputs, &error
         ) else {
+            let message = errorMessage(error)
+            we_scene_runtime_error_destroy(error)
+            throw TestFailure.plan(message)
+        }
+        return plan
+    }
+
+    private func createPlan(
+        _ graph: WESceneFrameGraphRef,
+        renderQuality: WESceneFrameRenderQuality
+    ) throws -> WESceneFramePlanRef {
+        var error: WESceneRuntimeErrorRef?
+        var inputs = WESceneFrameInputs(
+            pointer_x: 0.25,
+            pointer_y: 0.75,
+            time_seconds: 0,
+            frame_time_seconds: 0
+        )
+        guard let plan =
+            we_scene_frame_graph_plan_create_with_inputs_and_render_quality(
+                graph,
+                &inputs,
+                renderQuality,
+                &error
+            )
+        else {
             let message = errorMessage(error)
             we_scene_runtime_error_destroy(error)
             throw TestFailure.plan(message)
@@ -2009,7 +2052,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         let perspectiveIssues = try issues(plan).filter {
             $0.code == WE_SCENE_FRAME_ISSUE_PERSPECTIVE_PROJECTION_UNAVAILABLE
         }
-        XCTAssertEqual(Set(perspectiveIssues.map(\.object_id)), Set([8, -1]))
+        XCTAssertTrue(perspectiveIssues.isEmpty)
     }
 
     func testArbitraryDynamicLayerConfigurationFailsExplicitly() throws {
@@ -2608,7 +2651,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(info.clear_red, 0.1, accuracy: 1e-6)
         XCTAssertEqual(info.clear_alpha, 1, accuracy: 1e-6)
         XCTAssertEqual(info.is_executable, 1)
-        XCTAssertEqual(info.framebuffer_count, 9)
+        XCTAssertEqual(info.framebuffer_count, 12)
         XCTAssertEqual(info.operation_count, 5)
 
         let operations = try operations(plan)
@@ -2626,7 +2669,10 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(string(operations[0].input.id), "materials/base.tex")
         XCTAssertTrue(string(operations[0].destination.id).hasSuffix("_a"))
         XCTAssertEqual(try textures(plan, operation: 0)[1], "materials/base-user.tex")
-        XCTAssertEqual(try combos(plan, operation: 0), ["BASE": 2])
+        XCTAssertEqual(
+            try combos(plan, operation: 0),
+            ["BASE": 2, "SCENE_ORTHO": 1]
+        )
 
         XCTAssertEqual(string(operations[1].shader), "effect-a")
         XCTAssertEqual(
@@ -2851,7 +2897,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         })
     }
 
-    func testPerspectiveImageWarnsAndUsesTheLinuxOrthographicFallback() throws {
+    func testPerspectiveImageUsesTheDedicatedPerspectiveCamera() throws {
         var documents = syntheticDocuments()
         var scene = documents["scene.json"] as! [String: Any]
         var camera = scene["camera"] as! [String: Any]
@@ -2877,22 +2923,24 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
 
         let info = try planInfo(plan)
         XCTAssertEqual(info.camera_field_of_view, 65, accuracy: 1e-6)
+        XCTAssertEqual(info.camera_orthographic, 1)
+        XCTAssertEqual(
+            info.camera_perspective_override_field_of_view,
+            95,
+            accuracy: 1e-6
+        )
         XCTAssertEqual(info.is_executable, 1)
         XCTAssertEqual(info.image_count, 1)
         XCTAssertEqual(info.operation_count, 5)
-        XCTAssertEqual(info.issue_count, 1)
-        let issue = try XCTUnwrap(try issues(plan).first)
-        XCTAssertEqual(
-            issue.code,
-            WE_SCENE_FRAME_ISSUE_PERSPECTIVE_PROJECTION_UNAVAILABLE
-        )
-        XCTAssertEqual(issue.object_id, 7)
-        XCTAssertEqual(issue.severity, WE_SCENE_FRAME_ISSUE_WARNING)
-        XCTAssertEqual(string(issue.json_pointer), "/objects/0/perspective")
-        XCTAssertTrue(string(issue.message).contains("Perspective"))
+        XCTAssertEqual(info.issue_count, 0)
+        XCTAssertEqual(try XCTUnwrap(try images(plan).first).perspective, 1)
+        let renderIndex = try XCTUnwrap(try operations(plan).firstIndex {
+            $0.kind == WE_SCENE_FRAME_OPERATION_RENDER
+        })
+        XCTAssertEqual(try combos(plan, operation: renderIndex)["SCENE_ORTHO"], 0)
     }
 
-    func testPerspectiveTextWarnsAndUsesTheLinuxOrthographicFallback() throws {
+    func testPerspectiveTextUsesTheDedicatedPerspectiveCamera() throws {
         var documents = syntheticDocuments()
         var scene = documents["scene.json"] as! [String: Any]
         var objects = scene["objects"] as! [[String: Any]]
@@ -2921,20 +2969,15 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         let info = try planInfo(plan)
         XCTAssertEqual(info.is_executable, 1)
         XCTAssertEqual(info.text_count, 1)
+        XCTAssertEqual(try XCTUnwrap(try texts(plan).first).perspective, 1)
         XCTAssertTrue(try operations(plan).contains { $0.object_id == 8 })
-        let issue = try XCTUnwrap(try issues(plan).first {
+        XCTAssertFalse(try issues(plan).contains {
             $0.object_id == 8 &&
                 string($0.json_pointer) == "/objects/1/perspective"
         })
-        XCTAssertEqual(
-            issue.code,
-            WE_SCENE_FRAME_ISSUE_PERSPECTIVE_PROJECTION_UNAVAILABLE
-        )
-        XCTAssertEqual(issue.severity, WE_SCENE_FRAME_ISSUE_WARNING)
-        XCTAssertTrue(string(issue.message).contains("Perspective"))
     }
 
-    func testPerspectiveWarningDoesNotBlockRenderableSibling() throws {
+    func testPerspectiveLayerDoesNotBlockRenderableSibling() throws {
         var documents = syntheticDocuments()
         var scene = documents["scene.json"] as! [String: Any]
         var objects = scene["objects"] as! [[String: Any]]
@@ -2966,14 +3009,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         let scheduledObjectIds = Set(try operations(plan).map(\.object_id))
         XCTAssertTrue(scheduledObjectIds.contains(7))
         XCTAssertTrue(scheduledObjectIds.contains(8))
-        let issue = try XCTUnwrap(try issues(plan).first {
-            $0.object_id == 8
-        })
-        XCTAssertEqual(
-            issue.code,
-            WE_SCENE_FRAME_ISSUE_PERSPECTIVE_PROJECTION_UNAVAILABLE
-        )
-        XCTAssertEqual(issue.severity, WE_SCENE_FRAME_ISSUE_WARNING)
+        XCTAssertFalse(try issues(plan).contains { $0.object_id == 8 })
     }
 
     func testAuthoredFOVMetadataDoesNotEnablePerspectiveProjection() throws {
@@ -3004,6 +3040,10 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(info.camera_field_of_view, 65, accuracy: 1e-6)
         XCTAssertEqual(info.is_executable, 1)
         XCTAssertEqual(info.issue_count, 0)
+        let renderIndex = try XCTUnwrap(try operations(plan).firstIndex {
+            $0.kind == WE_SCENE_FRAME_OPERATION_RENDER
+        })
+        XCTAssertEqual(try combos(plan, operation: renderIndex)["SCENE_ORTHO"], 1)
     }
 
     func testImageWithoutPrimaryTextureUsesTheLinuxTransparentSource() throws {
@@ -3014,7 +3054,7 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
 
         let info = try planInfo(plan)
         XCTAssertEqual(info.is_executable, 1)
-        XCTAssertEqual(info.framebuffer_count, 10)
+        XCTAssertEqual(info.framebuffer_count, 13)
         XCTAssertEqual(info.image_count, 1)
         XCTAssertEqual(info.operation_count, 6)
         XCTAssertEqual(info.issue_count, 1)
@@ -3429,8 +3469,8 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(disabledFramebuffers["_rt_8FrameBuffer"]?.height, 1)
         XCTAssertEqual(disabledFramebuffers["_rt_Bloom"]?.width, 2)
         XCTAssertEqual(disabledFramebuffers["_rt_Bloom"]?.height, 1)
-        XCTAssertEqual(disabledFramebuffers["_rt_shadowAtlas"]?.width, 16)
-        XCTAssertEqual(disabledFramebuffers["_rt_shadowAtlas"]?.height, 8)
+        XCTAssertEqual(disabledFramebuffers["_rt_shadowAtlas"]?.width, 2)
+        XCTAssertEqual(disabledFramebuffers["_rt_shadowAtlas"]?.height, 2)
 
         try setBoolean(loaded.model, key: "bloom_enabled", value: true)
         let enabled = try createPlan(loaded.frameGraph)
@@ -3754,6 +3794,62 @@ final class SceneFrameGraphBridgeTests: XCTestCase {
         XCTAssertEqual(byName["quarterA"]?.height, 1)
         XCTAssertEqual(byName["quarterB"]?.width, 1)
         XCTAssertEqual(byName["quarterB"]?.height, 1)
+    }
+
+    func testVolumetricFramebufferQualityMatchesOfficialResolutionPolicy() throws {
+        let loaded = try loadSynthetic()
+        defer { destroy(loaded) }
+
+        func namedFramebuffers(
+            _ plan: WESceneFramePlanRef
+        ) throws -> [String: WESceneFramebufferInfo] {
+            Dictionary(uniqueKeysWithValues: try framebuffers(plan).map {
+                (string($0.resource.logical_name), $0)
+            })
+        }
+
+        let high = try createPlan(
+            loaded.frameGraph,
+            renderQuality: WE_SCENE_FRAME_RENDER_HIGH
+        )
+        defer { we_scene_frame_plan_destroy(high) }
+        let highBuffers = try namedFramebuffers(high)
+        XCTAssertEqual(highBuffers["_rt_volumetricsBack"]?.width, 400)
+        XCTAssertEqual(highBuffers["_rt_volumetricsBack"]?.height, 200)
+        XCTAssertEqual(highBuffers["_rt_volumetricsSingle"]?.width, 100)
+        XCTAssertEqual(highBuffers["_rt_volumetricsSingle"]?.height, 50)
+        XCTAssertEqual(highBuffers["_rt_volumetricsLightBuffer"]?.width, 100)
+        XCTAssertEqual(highBuffers["_rt_volumetricsLightBuffer"]?.height, 50)
+        XCTAssertNil(highBuffers["_rt_volumetricsLightBufferB"])
+
+        let ultra = try createPlan(
+            loaded.frameGraph,
+            renderQuality: WE_SCENE_FRAME_RENDER_ULTRA
+        )
+        defer { we_scene_frame_plan_destroy(ultra) }
+        let ultraBuffers = try namedFramebuffers(ultra)
+        XCTAssertEqual(ultraBuffers["_rt_volumetricsBack"]?.width, 400)
+        XCTAssertEqual(ultraBuffers["_rt_volumetricsBack"]?.height, 200)
+        XCTAssertEqual(ultraBuffers["_rt_volumetricsSingle"]?.width, 100)
+        XCTAssertEqual(ultraBuffers["_rt_volumetricsSingle"]?.height, 50)
+        XCTAssertEqual(ultraBuffers["_rt_volumetricsLightBuffer"]?.width, 100)
+        XCTAssertEqual(ultraBuffers["_rt_volumetricsLightBuffer"]?.height, 50)
+        XCTAssertNil(ultraBuffers["_rt_volumetricsLightBufferB"])
+
+        let balanced = try createPlan(
+            loaded.frameGraph,
+            renderQuality: WE_SCENE_FRAME_RENDER_BALANCED
+        )
+        defer { we_scene_frame_plan_destroy(balanced) }
+        let balancedBuffers = try namedFramebuffers(balanced)
+        XCTAssertEqual(balancedBuffers["_rt_volumetricsBack"]?.width, 400)
+        XCTAssertEqual(balancedBuffers["_rt_volumetricsBack"]?.height, 200)
+        XCTAssertEqual(balancedBuffers["_rt_volumetricsSingle"]?.width, 50)
+        XCTAssertEqual(balancedBuffers["_rt_volumetricsSingle"]?.height, 25)
+        XCTAssertEqual(balancedBuffers["_rt_volumetricsLightBuffer"]?.width, 50)
+        XCTAssertEqual(balancedBuffers["_rt_volumetricsLightBuffer"]?.height, 25)
+        XCTAssertEqual(balancedBuffers["_rt_volumetricsLightBufferB"]?.width, 50)
+        XCTAssertEqual(balancedBuffers["_rt_volumetricsLightBufferB"]?.height, 25)
     }
 
     func testLinuxRuntimeFramebuffersRemainValidForOnePixelScenes() throws {

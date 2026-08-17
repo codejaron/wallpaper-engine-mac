@@ -87,6 +87,323 @@ constexpr int wallpaperTextureSlotCount = 8;
 constexpr int linuxBloomLegacyObjectId = -1;
 constexpr int bloomRuntimeObjectId = std::numeric_limits<int>::min();
 
+using FrameMatrix = std::array<double, 16>;
+
+FrameMatrix frameIdentityMatrix() {
+    return {1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0};
+}
+
+FrameMatrix frameMatrixMultiply(
+    const FrameMatrix& lhs,
+    const FrameMatrix& rhs
+) {
+    FrameMatrix result{};
+    for (std::size_t column = 0; column < 4; ++column) {
+        for (std::size_t row = 0; row < 4; ++row) {
+            for (std::size_t index = 0; index < 4; ++index) {
+                result[column * 4 + row] +=
+                    lhs[index * 4 + row] * rhs[column * 4 + index];
+            }
+        }
+    }
+    return result;
+}
+
+FrameMatrix frameTranslation(double x, double y, double z) {
+    FrameMatrix result = frameIdentityMatrix();
+    result[12] = x;
+    result[13] = y;
+    result[14] = z;
+    return result;
+}
+
+FrameMatrix frameRotationX(double radians) {
+    FrameMatrix result = frameIdentityMatrix();
+    result[5] = std::cos(radians);
+    result[6] = std::sin(radians);
+    result[9] = -std::sin(radians);
+    result[10] = std::cos(radians);
+    return result;
+}
+
+FrameMatrix frameRotationY(double radians) {
+    FrameMatrix result = frameIdentityMatrix();
+    result[0] = std::cos(radians);
+    result[2] = -std::sin(radians);
+    result[8] = std::sin(radians);
+    result[10] = std::cos(radians);
+    return result;
+}
+
+FrameMatrix frameRotationZ(double radians) {
+    FrameMatrix result = frameIdentityMatrix();
+    result[0] = std::cos(radians);
+    result[1] = std::sin(radians);
+    result[4] = -std::sin(radians);
+    result[5] = std::cos(radians);
+    return result;
+}
+
+FrameMatrix frameOrthographic(
+    double left,
+    double right,
+    double bottom,
+    double top,
+    double nearPlane,
+    double farPlane
+) {
+    if (!std::isfinite(left) || !std::isfinite(right) ||
+        !std::isfinite(bottom) || !std::isfinite(top) ||
+        !std::isfinite(nearPlane) || !std::isfinite(farPlane) ||
+        left == right || bottom == top || nearPlane == farPlane) {
+        throw std::invalid_argument(
+            "Scene camera has a degenerate orthographic projection"
+        );
+    }
+    FrameMatrix result{};
+    result[0] = 2.0 / (right - left);
+    result[5] = 2.0 / (top - bottom);
+    result[10] = -1.0 / (farPlane - nearPlane);
+    result[12] = -(right + left) / (right - left);
+    result[13] = -(top + bottom) / (top - bottom);
+    result[14] = -nearPlane / (farPlane - nearPlane);
+    result[15] = 1.0;
+    return result;
+}
+
+FrameMatrix framePerspective(
+    double fieldOfViewRadians,
+    double aspect,
+    double nearPlane,
+    double farPlane
+) {
+    if (!std::isfinite(fieldOfViewRadians) ||
+        !std::isfinite(aspect) || !std::isfinite(nearPlane) ||
+        !std::isfinite(farPlane) || fieldOfViewRadians <= 0.0 ||
+        fieldOfViewRadians >= 3.14159265358979323846264338327950288 ||
+        aspect <= 0.0 || nearPlane == 0.0 || farPlane == nearPlane) {
+        throw std::invalid_argument(
+            "Scene perspective projection is degenerate"
+        );
+    }
+    const double tangent = std::tan(fieldOfViewRadians * 0.5);
+    if (!std::isfinite(tangent) || tangent <= 0.0) {
+        throw std::invalid_argument(
+            "Scene perspective field of view is invalid"
+        );
+    }
+    FrameMatrix result{};
+    result[0] = 1.0 / (aspect * tangent);
+    result[5] = 1.0 / tangent;
+    result[10] = -farPlane / (farPlane - nearPlane);
+    result[11] = -1.0;
+    result[14] = -(nearPlane * farPlane) / (farPlane - nearPlane);
+    return result;
+}
+
+Vector3 frameSubtract(Vector3 lhs, Vector3 rhs) {
+    return {lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z};
+}
+
+double frameDot(Vector3 lhs, Vector3 rhs) {
+    return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;
+}
+
+Vector3 frameCross(Vector3 lhs, Vector3 rhs) {
+    return {
+        lhs.y * rhs.z - lhs.z * rhs.y,
+        lhs.z * rhs.x - lhs.x * rhs.z,
+        lhs.x * rhs.y - lhs.y * rhs.x,
+    };
+}
+
+Vector3 frameNormalized(Vector3 value) {
+    const double length = std::sqrt(frameDot(value, value));
+    if (!std::isfinite(length) ||
+        length <= std::numeric_limits<double>::epsilon()) {
+        throw std::invalid_argument(
+            "Scene camera contains a zero-length direction"
+        );
+    }
+    return {value.x / length, value.y / length, value.z / length};
+}
+
+FrameMatrix frameLightVolumeTransform(const FrameLightDescriptor& light) {
+    return frameMatrixMultiply(
+        frameTranslation(
+            light.worldTransform.origin.x,
+            light.worldTransform.origin.y,
+            light.worldTransform.origin.z
+        ),
+        frameMatrixMultiply(
+            frameRotationZ(light.worldTransform.angles.z),
+            frameMatrixMultiply(
+                frameRotationY(light.worldTransform.angles.y),
+                frameRotationX(light.worldTransform.angles.x)
+            )
+        )
+    );
+}
+
+Vector3 frameLightForward(const FrameLightDescriptor& light) {
+    const FrameMatrix transform = frameLightVolumeTransform(light);
+    return {transform[0], transform[1], transform[2]};
+}
+
+bool frameCameraInsideLightVolume(
+    const FrameCameraDescriptor& camera,
+    const FrameLightDescriptor& light
+) {
+    const Vector3 delta = frameSubtract(
+        camera.eye,
+        Vector3{
+            light.worldTransform.origin.x,
+            light.worldTransform.origin.y,
+            light.worldTransform.origin.z,
+        }
+    );
+    const double radius = light.radius;
+    const double distanceSquared = frameDot(delta, delta);
+    if (!std::isfinite(radius) || radius <= 0.0 ||
+        !std::isfinite(distanceSquared) ||
+        distanceSquared > radius * radius) {
+        return false;
+    }
+    if (light.type == FrameLightType::point || distanceSquared <= 1e-18) {
+        return true;
+    }
+    const Vector3 direction = frameNormalized(delta);
+    const Vector3 forward = frameNormalized(frameLightForward(light));
+    const double cosine = frameDot(direction, forward);
+    const double outerRadians = light.outerCone *
+        3.14159265358979323846264338327950288 / 180.0;
+    return std::isfinite(cosine) && std::isfinite(outerRadians) &&
+        cosine >= std::cos(outerRadians);
+}
+
+FrameMatrix frameLookAt(const FrameCameraDescriptor& camera) {
+    const Vector3 forward = frameNormalized(
+        frameSubtract(camera.center, camera.eye)
+    );
+    const Vector3 side = frameNormalized(frameCross(forward, camera.up));
+    const Vector3 up = frameCross(side, forward);
+    FrameMatrix result = frameIdentityMatrix();
+    result[0] = side.x;
+    result[4] = side.y;
+    result[8] = side.z;
+    result[1] = up.x;
+    result[5] = up.y;
+    result[9] = up.z;
+    result[2] = -forward.x;
+    result[6] = -forward.y;
+    result[10] = -forward.z;
+    result[12] = -frameDot(side, camera.eye);
+    result[13] = -frameDot(up, camera.eye);
+    result[14] = frameDot(forward, camera.eye);
+    return result;
+}
+
+FrameMatrix frameMatrixInverse(const FrameMatrix& matrix) {
+    std::array<std::array<double, 8>, 4> augmented{};
+    for (std::size_t row = 0; row < 4; ++row) {
+        for (std::size_t column = 0; column < 4; ++column) {
+            augmented[row][column] = matrix[column * 4 + row];
+        }
+        augmented[row][row + 4] = 1.0;
+    }
+
+    for (std::size_t column = 0; column < 4; ++column) {
+        std::size_t pivot = column;
+        for (std::size_t row = column + 1; row < 4; ++row) {
+            if (std::abs(augmented[row][column]) >
+                std::abs(augmented[pivot][column])) {
+                pivot = row;
+            }
+        }
+        const double divisor = augmented[pivot][column];
+        if (!std::isfinite(divisor) ||
+            std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
+            throw std::invalid_argument(
+                "Scene camera view-projection matrix is singular"
+            );
+        }
+        if (pivot != column) {
+            std::swap(augmented[pivot], augmented[column]);
+        }
+        for (double& value : augmented[column]) value /= divisor;
+        for (std::size_t row = 0; row < 4; ++row) {
+            if (row == column) continue;
+            const double factor = augmented[row][column];
+            for (std::size_t index = 0; index < 8; ++index) {
+                augmented[row][index] -= factor * augmented[column][index];
+            }
+        }
+    }
+
+    FrameMatrix result{};
+    for (std::size_t row = 0; row < 4; ++row) {
+        for (std::size_t column = 0; column < 4; ++column) {
+            const double value = augmented[row][column + 4];
+            if (!std::isfinite(value)) {
+                throw std::invalid_argument(
+                    "Scene camera inverse view-projection matrix is non-finite"
+                );
+            }
+            result[column * 4 + row] = value;
+        }
+    }
+    return result;
+}
+
+FrameMatrix frameSceneViewProjection(
+    const FrameCameraDescriptor& camera,
+    double width,
+    double height
+) {
+    if (!camera.orthographic) {
+        const double fieldOfView = camera.perspectiveOverrideFieldOfView > 0.0
+            ? camera.perspectiveOverrideFieldOfView
+            : camera.fieldOfView;
+        if (!std::isfinite(fieldOfView) || fieldOfView <= 0.0 ||
+            fieldOfView >= 180.0 || !std::isfinite(camera.nearPlane) ||
+            !std::isfinite(camera.farPlane) || camera.nearPlane <= 0.0 ||
+            camera.farPlane <= camera.nearPlane) {
+            throw std::invalid_argument(
+                "Scene camera has an invalid perspective projection"
+            );
+        }
+        constexpr double degreesToRadians =
+            3.14159265358979323846264338327950288 / 180.0;
+        return frameMatrixMultiply(
+            framePerspective(
+                fieldOfView * degreesToRadians,
+                width / height,
+                camera.nearPlane,
+                camera.farPlane
+            ),
+            frameLookAt(camera)
+        );
+    }
+    const FrameMatrix projection = frameOrthographic(
+        -width * 0.5,
+        width * 0.5,
+        -height * 0.5,
+        height * 0.5,
+        camera.nearPlane,
+        camera.farPlane
+    );
+    return frameMatrixMultiply(
+        frameMatrixMultiply(
+            projection,
+            frameTranslation(camera.eye.x, camera.eye.y, camera.eye.z)
+        ),
+        frameLookAt(camera)
+    );
+}
+
 FramePlanIssueSeverity defaultIssueSeverity(FramePlanIssueCode code) noexcept {
     switch (code) {
         case FramePlanIssueCode::soundRuntimeUnavailable:
@@ -533,12 +850,14 @@ public:
         const SceneGraphSnapshot& graphSnapshot,
         FrameProjectionSize projectionSize,
         const SceneFrameInputs& inputs,
+        FrameRenderQuality renderQuality,
         SceneGraph::EvaluationFrame* evaluationFrame = nullptr,
         const std::map<std::string, EvaluatedValue>* scriptedValues = nullptr,
         const std::vector<int>* cursorInteractiveLayerIds = nullptr
     )
         : model_(std::move(model)), graphSnapshot_(graphSnapshot),
           projectionSize_(projectionSize), inputs_(inputs),
+          renderQuality_(renderQuality),
           evaluationFrame_(evaluationFrame), scriptedValues_(scriptedValues),
           cursorInteractiveLayerIds_(cursorInteractiveLayerIds) {
         if (!model_) {
@@ -559,27 +878,68 @@ public:
         plan_.modelRevision = graphSnapshot_.modelRevision;
         plan_.width = projectionSize_.width;
         plan_.height = projectionSize_.height;
+        plan_.renderQuality = renderQuality_;
         plan_.camera = snapshotCamera(scene.camera);
         plan_.parallax = snapshotParallax(scene);
-        const auto generalColor = [&](std::string_view key) {
+        const auto generalDynamic = [&](std::string_view key)
+            -> const DynamicValue& {
             const auto value = scene.generalValues.find(std::string(key));
             if (value == scene.generalValues.end()) {
                 frameError(
                     *model_, SceneModelErrorCode::missingField,
                     "/general/" + std::string(key),
-                    "Scene general color is required"
+                    "Scene general value is required"
                 );
             }
+            return value->second;
+        };
+        const auto generalColor = [&](std::string_view key) {
             return colorValue(
                 *model_,
                 evaluate(
-                    value->second, "/general/" + std::string(key), std::nullopt
+                    generalDynamic(key),
+                    "/general/" + std::string(key),
+                    std::nullopt
                 ),
                 "/general/" + std::string(key)
             );
         };
+        const auto generalNumber = [&](std::string_view key) {
+            const std::string pointer = "/general/" + std::string(key);
+            return numberValue(
+                *model_,
+                evaluate(generalDynamic(key), pointer, std::nullopt),
+                pointer,
+                "Scene general number"
+            );
+        };
+        const auto generalBoolean = [&](std::string_view key) {
+            const std::string pointer = "/general/" + std::string(key);
+            return booleanValue(
+                *model_,
+                evaluate(generalDynamic(key), pointer, std::nullopt),
+                pointer,
+                "Scene general boolean"
+            );
+        };
         plan_.ambientColor = generalColor("ambientcolor");
         plan_.skylightColor = generalColor("skylightcolor");
+        plan_.distanceFog = {
+            .enabled = generalBoolean("fogdistance"),
+            .color = generalColor("fogdistancecolor"),
+            .start = generalNumber("fogdistancestart"),
+            .end = generalNumber("fogdistanceend"),
+            .startDensity = generalNumber("fogdistancestartdensity"),
+            .endDensity = generalNumber("fogdistanceenddensity"),
+        };
+        plan_.heightFog = {
+            .enabled = generalBoolean("fogheight"),
+            .color = generalColor("fogheightcolor"),
+            .start = generalNumber("fogheightstart"),
+            .end = generalNumber("fogheightend"),
+            .startDensity = generalNumber("fogheightstartdensity"),
+            .endDensity = generalNumber("fogheightenddensity"),
+        };
         plan_.output = {
             .kind = FrameResourceKind::framebuffer,
             .id = "scene:_rt_FullFrameBuffer",
@@ -620,17 +980,75 @@ public:
         registerSceneFramebuffer("_rt_4FrameBuffer", plan_.width / 4, plan_.height / 4);
         registerSceneFramebuffer("_rt_8FrameBuffer", plan_.width / 8, plan_.height / 8);
         registerSceneFramebuffer("_rt_Bloom", plan_.width / 8, plan_.height / 8);
-        const FrameResourceRef shadowAtlas = registerSceneFramebuffer(
-            "_rt_shadowAtlas", plan_.width, plan_.height
+        // Shadow comparison samples outside an entry must receive the border
+        // value instead of repeating a neighboring light's depth tile.
+        const FramebufferDescriptor shadowAtlasDescriptor = createFramebuffer(
+            "scene:_rt_shadowAtlas",
+            "_rt_shadowAtlas",
+            FramebufferFormat::rgba8,
+            plan_.width,
+            plan_.height,
+            1.0,
+            true,
+            FramebufferWrapMode::clampToBorder
         );
         sceneFramebuffers_.emplace(
-            "_alias_lightCookie",
-            FrameResourceRef{
-                .kind = FrameResourceKind::framebuffer,
-                .id = shadowAtlas.id,
-                .logicalName = "_alias_lightCookie",
-            }
+            "_rt_shadowAtlas", shadowAtlasDescriptor.resource
         );
+        // Volumetric materials use these runtime targets as pass-local
+        // providers. Keep them in the frame arena even when no light is
+        // active so a later scripted visibility change does not alter the
+        // resource namespace halfway through a frame.
+        const auto registerVolumetricFramebuffer = [this](
+            std::string logicalName,
+            FramebufferFormat format,
+            std::uint32_t width,
+            std::uint32_t height
+        ) {
+            const FramebufferDescriptor descriptor = createFramebuffer(
+                "scene:" + logicalName,
+                logicalName,
+                format,
+                std::max<std::uint32_t>(1, width),
+                std::max<std::uint32_t>(1, height),
+                1.0,
+                true
+            );
+            sceneFramebuffers_.emplace(logicalName, descriptor.resource);
+            return descriptor.resource;
+        };
+        registerVolumetricFramebuffer(
+            "_rt_volumetricsBack", FramebufferFormat::r16f,
+            plan_.width, plan_.height
+        );
+        const bool lowQuality = static_cast<std::uint8_t>(renderQuality_) < 3;
+        const std::uint32_t lightBufferDivisor = lowQuality ? 8 : 4;
+        // The official volumetric ray-limit buffer is quarter resolution for
+        // quality 3+ and eighth resolution below that threshold.  It is
+        // integer-addressed by texLoad2D, so both the allocation and the
+        // shader's Resolution uniform must describe the same reduced target.
+        registerVolumetricFramebuffer(
+            "_rt_volumetricsSingle", FramebufferFormat::r16f,
+            plan_.width / lightBufferDivisor,
+            plan_.height / lightBufferDivisor
+        );
+        registerVolumetricFramebuffer(
+            "_rt_volumetricsLightBuffer", FramebufferFormat::rgba8,
+            plan_.width / lightBufferDivisor,
+            plan_.height / lightBufferDivisor
+        );
+        if (lowQuality) {
+            registerVolumetricFramebuffer(
+                "_rt_volumetricsLightBufferB", FramebufferFormat::rgba8,
+                plan_.width / 8,
+                plan_.height / 8
+            );
+        }
+        // The official cookie sampler is a real asset texture, not the
+        // shadow depth atlas. The default is resolved again in planLightObjects
+        // when a visible light selects an authored cookie.
+        plan_.lightCookie = frameAssetTextureResource("cookie/flashlight1");
+        sceneFramebuffers_.emplace("_alias_lightCookie", plan_.lightCookie);
 
         const auto clear = scene.generalValues.find("clearcolor");
         if (clear == scene.generalValues.end()) {
@@ -648,9 +1066,12 @@ public:
         plan_.clearColor.alpha = 1.0;
 
         collectUnsupportedObjects();
+        planLightObjects();
         collectDependencyObjectIds();
         registerImageCompositeResources();
         planRenderableObjects();
+        planShadowCasters();
+        planVolumetricObjects();
         planBloomObject();
         planSoundObjects();
         finalizeScriptLayerStates();
@@ -1011,6 +1432,17 @@ private:
             *model_, evaluate(camera.fieldOfView, "/camera/fov", std::nullopt),
             "/camera/fov", "Camera field of view"
         );
+        result.perspectiveOverrideFieldOfView = numberValue(
+            *model_,
+            evaluate(
+                camera.perspectiveOverrideFieldOfView,
+                "/general/perspectiveoverridefov",
+                std::nullopt
+            ),
+            "/general/perspectiveoverridefov",
+            "Perspective override field of view"
+        );
+        result.orthographic = camera.orthographic;
         result.orthogonalProjectionAuto = camera.projectionAuto;
         result.orthogonalProjectionWidth = plan_.width;
         result.orthogonalProjectionHeight = plan_.height;
@@ -1179,21 +1611,6 @@ private:
     void collectUnsupportedObjects() {
         const auto& objects = model_->project().scene.objects;
         for (const SceneGraphNodeSnapshot& node : graphSnapshot_.nodes) {
-            const SceneObject& object = objects.at(node.objectIndex);
-            bool perspective = false;
-            if (const auto* image = std::get_if<ImageObject>(&object.data)) {
-                perspective = image->perspective;
-            } else if (const auto* text = std::get_if<TextObject>(&object.data)) {
-                perspective = text->perspective;
-            }
-            if (perspective) {
-                addIssue(
-                    FramePlanIssueCode::perspectiveProjectionUnavailable,
-                    node.id,
-                    objectPointer(node.objectIndex, "perspective"),
-                    "Perspective projection is not implemented for this layer; the Linux runtime ignores this flag"
-                );
-            }
             for (const auto* value : {&node.origin, &node.scale, &node.angles, &node.visible}) {
                 if (value->source == DynamicValueSource::scriptInitial ||
                     value->source == DynamicValueSource::scriptUnavailable) {
@@ -1215,6 +1632,390 @@ private:
                     break;
                 }
             }
+        }
+    }
+
+    void planLightObjects() {
+        const Scene& scene = model_->project().scene;
+        FrameLightConfiguration actual;
+        const auto increment = [&actual](LightType type) -> std::size_t& {
+            switch (type) {
+                case LightType::point: return actual.point;
+                case LightType::spot: return actual.spot;
+                case LightType::tube: return actual.tube;
+                case LightType::directional: return actual.directional;
+            }
+            std::terminate();
+        };
+        for (const SceneObject& object : scene.objects) {
+            if (const auto* light = std::get_if<LightObject>(&object.data)) {
+                ++increment(light->type);
+            }
+        }
+
+        const auto configured = [&](std::optional<std::size_t> authored,
+                                    std::size_t discovered,
+                                    std::string_view name) {
+            const std::size_t result = authored.value_or(discovered);
+            if (result < discovered) {
+                frameError(
+                    *model_, SceneModelErrorCode::invalidValue,
+                    "/general/lightconfig/" + std::string(name),
+                    "Scene light configuration reserves " +
+                        std::to_string(result) + " " + std::string(name) +
+                        " slots but the scene contains " +
+                        std::to_string(discovered) + " objects"
+                );
+            }
+            return result;
+        };
+        plan_.lightConfiguration = {
+            .point = configured(
+                scene.lightConfiguration.point, actual.point, "point"
+            ),
+            .spot = configured(
+                scene.lightConfiguration.spot, actual.spot, "spot"
+            ),
+            .tube = configured(
+                scene.lightConfiguration.tube, actual.tube, "tube"
+            ),
+            .directional = configured(
+                scene.lightConfiguration.directional,
+                actual.directional,
+                "directional"
+            ),
+        };
+        const std::size_t slotCount = plan_.lightConfiguration.point +
+            plan_.lightConfiguration.spot + plan_.lightConfiguration.tube +
+            plan_.lightConfiguration.directional;
+        if (slotCount > 4) {
+            frameError(
+                *model_, SceneModelErrorCode::invalidValue,
+                "/general/lightconfig",
+                "Wallpaper Engine scenes support at most four configured lights"
+            );
+        }
+
+        for (const std::size_t nodeIndex : graphSnapshot_.renderOrder) {
+            const SceneGraphNodeSnapshot& node = graphSnapshot_.nodes.at(nodeIndex);
+            const SceneObject& object = scene.objects.at(node.objectIndex);
+            const auto* light = std::get_if<LightObject>(&object.data);
+            if (light == nullptr) continue;
+            const std::string base = objectPointer(node.objectIndex);
+            const auto scalar = [&](const DynamicValue& value,
+                                    std::string_view field) {
+                const std::string pointer = base + '/' + std::string(field);
+                return numberValue(
+                    *model_, evaluate(value, pointer, node.id), pointer,
+                    "Light " + std::string(field)
+                );
+            };
+            const auto flag = [&](const DynamicValue& value,
+                                  std::string_view field) {
+                const std::string pointer = base + '/' + std::string(field);
+                return booleanValue(
+                    *model_, evaluate(value, pointer, node.id), pointer,
+                    "Light " + std::string(field)
+                );
+            };
+            const std::string colorPointer = base + "/color";
+            const std::string controlPointer = base + "/controlpoint";
+            FrameLightDescriptor descriptor{
+                .objectIndex = node.objectIndex,
+                .objectId = node.id,
+                .visible = node.isVisible,
+                .worldTransform = node.worldTransform,
+                .color = colorValue(
+                    *model_,
+                    evaluate(light->color, colorPointer, node.id),
+                    colorPointer
+                ),
+                .intensity = scalar(light->intensity, "intensity"),
+                .radius = scalar(light->radius, "radius"),
+                .exponent = scalar(light->exponent, "exponent"),
+                .innerCone = scalar(light->innerCone, "innercone"),
+                .outerCone = scalar(light->outerCone, "outercone"),
+                .controlPoint = vector3Value(
+                    *model_,
+                    evaluate(light->controlPoint, controlPointer, node.id),
+                    controlPointer,
+                    "Light control point"
+                ),
+                .castShadow = flag(light->castShadow, "castshadow"),
+                .cookie = textValue(
+                    light->cookie,
+                    base + "/cookie",
+                    node.id,
+                    "Light cookie"
+                ),
+                .useCookie = flag(light->useCookie, "usecookie"),
+                .castVolumetrics = flag(
+                    light->castVolumetrics, "castvolumetrics"
+                ),
+                .density = scalar(light->density, "density"),
+                .volumetricsExponent = scalar(
+                    light->volumetricsExponent, "volumetricsexponent"
+                ),
+                .lightSourceSize = scalar(
+                    light->lightSourceSize, "lightsourcesize"
+                ),
+            };
+            for (std::size_t index = 0;
+                 index < descriptor.cascadeDistances.size(); ++index) {
+                descriptor.cascadeDistances[index] = scalar(
+                    light->cascadeDistances[index],
+                    "cascadedistance" + std::to_string(index)
+                );
+            }
+            switch (light->type) {
+                case LightType::point:
+                    descriptor.type = FrameLightType::point;
+                    break;
+                case LightType::spot:
+                    descriptor.type = FrameLightType::spot;
+                    break;
+                case LightType::tube:
+                    descriptor.type = FrameLightType::tube;
+                    break;
+                case LightType::directional:
+                    descriptor.type = FrameLightType::directional;
+                    break;
+            }
+            if (descriptor.intensity < 0.0 || descriptor.radius < 0.0) {
+                frameError(
+                    *model_, SceneModelErrorCode::invalidValue, base,
+                    "Light intensity and radius must not be negative"
+                );
+            }
+            if (descriptor.type == FrameLightType::spot &&
+                (descriptor.innerCone < 0.0 || descriptor.outerCone < 0.0 ||
+                 descriptor.innerCone > descriptor.outerCone ||
+                 descriptor.outerCone > 180.0)) {
+                frameError(
+                    *model_, SceneModelErrorCode::invalidValue, base,
+                    "Spot light cones must satisfy 0 <= innercone <= outercone <= 180 degrees"
+                );
+            }
+            plan_.lights.push_back(std::move(descriptor));
+        }
+
+        FrameLightConfiguration classified;
+        for (const FrameLightDescriptor& light : plan_.lights) {
+            if (!light.visible) continue;
+            switch (light.type) {
+                case FrameLightType::point:
+                    classified.pointShadow += light.castShadow ? 1U : 0U;
+                    break;
+                case FrameLightType::spot:
+                    if (light.castShadow && light.useCookie) {
+                        ++classified.spotShadowCookie;
+                    } else if (light.castShadow) {
+                        ++classified.spotShadow;
+                    } else if (light.useCookie) {
+                        ++classified.spotCookie;
+                    }
+                    break;
+                case FrameLightType::directional:
+                    classified.directionalShadow += light.castShadow ? 1U : 0U;
+                    break;
+                case FrameLightType::tube:
+                    break;
+            }
+        }
+        plan_.lightConfiguration.pointShadow = configured(
+            scene.lightConfiguration.pointShadow,
+            classified.pointShadow,
+            "pointshadow"
+        );
+        plan_.lightConfiguration.spotCookie = configured(
+            scene.lightConfiguration.spotCookie,
+            classified.spotCookie,
+            "spotcookie"
+        );
+        plan_.lightConfiguration.spotShadow = configured(
+            scene.lightConfiguration.spotShadow,
+            classified.spotShadow,
+            "spotshadow"
+        );
+        plan_.lightConfiguration.spotShadowCookie = configured(
+            scene.lightConfiguration.spotShadowCookie,
+            classified.spotShadowCookie,
+            "spotshadowcookie"
+        );
+        plan_.lightConfiguration.directionalShadow = configured(
+            scene.lightConfiguration.directionalShadow,
+            classified.directionalShadow,
+            "directionalshadow"
+        );
+        if (plan_.lightConfiguration.pointShadow >
+                plan_.lightConfiguration.point ||
+            plan_.lightConfiguration.spotCookie +
+                    plan_.lightConfiguration.spotShadow +
+                    plan_.lightConfiguration.spotShadowCookie >
+                plan_.lightConfiguration.spot ||
+            plan_.lightConfiguration.directionalShadow >
+                plan_.lightConfiguration.directional) {
+            frameError(
+                *model_, SceneModelErrorCode::invalidValue,
+                "/general/lightconfig",
+                "Scene light feature counts exceed their configured light totals"
+            );
+        }
+        const std::uint32_t shadowResolution = [&] {
+            switch (renderQuality_) {
+                case FrameRenderQuality::powerSaving:
+                case FrameRenderQuality::balanced:
+                    return 256U;
+                case FrameRenderQuality::high:
+                    return 512U;
+                case FrameRenderQuality::ultra:
+                    return 1024U;
+            }
+            std::terminate();
+        }();
+        if (plan_.lightConfiguration.directionalShadow > 1) {
+            frameError(
+                *model_, SceneModelErrorCode::invalidValue,
+                "/general/lightconfig",
+                "Wallpaper Engine supports at most one shadow-casting directional light"
+            );
+        }
+        plan_.shadowAtlasResolution = shadowResolution;
+        const auto featureRank = [](const FrameLightDescriptor& light) {
+            switch (light.type) {
+                case FrameLightType::point:
+                    return light.castShadow ? 0 : 1;
+                case FrameLightType::spot:
+                    if (light.castShadow && light.useCookie) return 0;
+                    if (light.useCookie) return 1;
+                    if (light.castShadow) return 2;
+                    return 3;
+                case FrameLightType::directional:
+                    return light.castShadow ? 0 : 1;
+                case FrameLightType::tube:
+                    return 0;
+            }
+            std::terminate();
+        };
+        std::vector<std::size_t> orderedShadowLights;
+        for (std::size_t index = 0; index < plan_.lights.size(); ++index) {
+            const FrameLightDescriptor& light = plan_.lights[index];
+            if (light.visible && light.castShadow &&
+                light.type != FrameLightType::tube) {
+                orderedShadowLights.push_back(index);
+            }
+        }
+        std::stable_sort(
+            orderedShadowLights.begin(), orderedShadowLights.end(),
+            [&](std::size_t lhs, std::size_t rhs) {
+                const FrameLightDescriptor& left = plan_.lights[lhs];
+                const FrameLightDescriptor& right = plan_.lights[rhs];
+                if (left.type != right.type) {
+                    return static_cast<int>(left.type) <
+                        static_cast<int>(right.type);
+                }
+                return featureRank(left) < featureRank(right);
+            }
+        );
+        struct FreeShadowRect final {
+            std::uint32_t left = 0;
+            std::uint32_t right = 0;
+            std::uint32_t top = 0;
+            std::uint32_t bottom = 0;
+        };
+        std::vector<FreeShadowRect> freeRects{{
+            .left = 0, .right = 0x2000U, .top = 0, .bottom = 0x2000U,
+        }};
+        std::uint32_t atlasWidth = 0;
+        std::uint32_t atlasHeight = 0;
+        for (const std::size_t lightIndex : orderedShadowLights) {
+            const FrameLightDescriptor& light = plan_.lights[lightIndex];
+            const std::size_t entryCount =
+                light.type == FrameLightType::directional ? 3U : 1U;
+            for (std::size_t cascade = 0; cascade < entryCount; ++cascade) {
+                const auto available = std::find_if(
+                    freeRects.begin(), freeRects.end(),
+                    [&](const FreeShadowRect& rect) {
+                        return shadowResolution <= rect.right - rect.left &&
+                            shadowResolution <= rect.bottom - rect.top;
+                    }
+                );
+                if (available == freeRects.end()) {
+                    frameError(
+                        *model_, SceneModelErrorCode::invalidValue,
+                        "/general/lightconfig",
+                        "Shadow atlas exceeds Wallpaper Engine's 8192x8192 allocator boundary"
+                    );
+                }
+                const std::uint32_t x = available->left;
+                const std::uint32_t y = available->top;
+                const std::uint32_t newLeft = x + shadowResolution;
+                const std::uint32_t newTop = y + shadowResolution;
+                const std::uint32_t oldBottom = available->bottom;
+                available->left = newLeft;
+                if (newTop < oldBottom) {
+                    freeRects.push_back({
+                        .left = x,
+                        .right = newLeft,
+                        .top = newTop,
+                        .bottom = oldBottom,
+                    });
+                }
+                plan_.shadowAtlasEntries.push_back({
+                    .lightIndex = lightIndex,
+                    .cascade = cascade,
+                    .x = x,
+                    .y = y,
+                    .size = shadowResolution,
+                });
+                atlasWidth = std::max(atlasWidth, newLeft);
+                atlasHeight = std::max(atlasHeight, newTop);
+            }
+        }
+        plan_.shadowAtlasWidth = std::max<std::uint32_t>(2U, atlasWidth);
+        plan_.shadowAtlasHeight = std::max<std::uint32_t>(2U, atlasHeight);
+        resizeSceneFramebuffer(
+            "_rt_shadowAtlas",
+            plan_.shadowAtlasWidth,
+            plan_.shadowAtlasHeight
+        );
+
+        // Wallpaper Engine exposes one 2D cookie sampler to the generated
+        // lighting module. Select the first visible cookie light in scene
+        // order, matching the renderer's single provider contract. The
+        // reverse-engineered loader resolves missing/unknown authored names
+        // to cookie/flashlight1, so keep that behavior while still failing
+        // explicitly if the official fallback asset itself is unavailable.
+        const FrameResourceRef defaultCookie =
+            frameAssetTextureResource("cookie/flashlight1");
+        const AssetResolver& resolver = model_->runtime()->assetResolver();
+        for (const FrameLightDescriptor& light : plan_.lights) {
+            if (!light.visible || !light.useCookie) continue;
+            std::string cookiePath = light.cookie;
+            if (cookiePath.empty()) {
+                cookiePath = "cookie/flashlight1";
+            } else if (!cookiePath.starts_with("cookie/") &&
+                       !cookiePath.starts_with("materials/")) {
+                cookiePath = "cookie/" + cookiePath;
+            }
+            FrameResourceRef selected = frameAssetTextureResource(cookiePath);
+            if (!resolver.contains(selected.logicalName)) {
+                selected = defaultCookie;
+            }
+            if (!resolver.contains(selected.logicalName)) {
+                addIssue(
+                    FramePlanIssueCode::objectPlanningFailed,
+                    light.objectId,
+                    objectPointer(light.objectIndex, "cookie"),
+                    "Light cookie provider is unavailable: '" +
+                        selected.logicalName + "'",
+                    FramePlanIssueSeverity::frameFatal
+                );
+                break;
+            }
+            plan_.lightCookie = selected;
+            sceneFramebuffers_.at("_alias_lightCookie") = selected;
+            break;
         }
     }
 
@@ -1463,6 +2264,33 @@ private:
         return descriptor;
     }
 
+    void resizeSceneFramebuffer(
+        std::string_view logicalName,
+        std::uint32_t width,
+        std::uint32_t height
+    ) {
+        const auto resource = sceneFramebuffers_.find(std::string(logicalName));
+        if (resource == sceneFramebuffers_.end()) {
+            throw std::logic_error(
+                "Scene framebuffer alias is not registered: " +
+                std::string(logicalName)
+            );
+        }
+        bool found = false;
+        for (FramebufferDescriptor& descriptor : plan_.framebuffers) {
+            if (descriptor.resource.id != resource->second.id) continue;
+            descriptor.width = std::max<std::uint32_t>(1, width);
+            descriptor.height = std::max<std::uint32_t>(1, height);
+            found = true;
+        }
+        if (!found) {
+            throw std::logic_error(
+                "Scene framebuffer descriptor is not present: " +
+                std::string(logicalName)
+            );
+        }
+    }
+
     void registerImageCompositeResources() {
         const auto& objects = model_->project().scene.objects;
         for (const SceneObject& object : objects) {
@@ -1643,8 +2471,10 @@ private:
                 .objectId = node.id,
                 .visible = node.isVisible,
                 .solid = objects.at(objectIndex).base.solid,
+                .castShadow = image->castShadow,
                 .passthrough = image->model && image->model->passthrough,
                 .fullscreen = image->model && image->model->fullscreen,
+                .perspective = image->perspective,
                 .size = size,
                 .worldTransform = worldTransform,
                 .source = resolvedSource,
@@ -1733,6 +2563,87 @@ private:
                 *model_, evaluate(text->maxWidth, base + "/maxwidth", node.id),
                 base + "/maxwidth", "Text maximum width"
             );
+            const double blurSize = numberValue(
+                *model_, evaluate(text->blurSize, base + "/blursize", node.id),
+                base + "/blursize", "Text blur size"
+            );
+            const FrameColor dropShadowColor = colorValue(
+                *model_,
+                evaluate(
+                    text->dropShadowColor,
+                    base + "/dropshadowcolor",
+                    node.id
+                ),
+                base + "/dropshadowcolor"
+            );
+            const FrameVector2 dropShadowOffset = vector2Value(
+                *model_,
+                evaluate(
+                    text->dropShadowOffset,
+                    base + "/dropshadowoffset",
+                    node.id
+                ),
+                base + "/dropshadowoffset",
+                "Text drop-shadow offset"
+            );
+            const double dropShadowOpacity = numberValue(
+                *model_,
+                evaluate(
+                    text->dropShadowOpacity,
+                    base + "/dropshadowopacity",
+                    node.id
+                ),
+                base + "/dropshadowopacity",
+                "Text drop-shadow opacity"
+            );
+            const double dropShadowSize = numberValue(
+                *model_,
+                evaluate(
+                    text->dropShadowSize,
+                    base + "/dropshadowsize",
+                    node.id
+                ),
+                base + "/dropshadowsize",
+                "Text drop-shadow size"
+            );
+            const FrameColor outlineColor = colorValue(
+                *model_,
+                evaluate(
+                    text->outlineColor,
+                    base + "/outlinecolor",
+                    node.id
+                ),
+                base + "/outlinecolor"
+            );
+            const double outlineThickness = numberValue(
+                *model_,
+                evaluate(
+                    text->outlineThickness,
+                    base + "/outlinethickness",
+                    node.id
+                ),
+                base + "/outlinethickness",
+                "Text outline thickness"
+            );
+            const auto validateTextEffectScalar = [&] (
+                double value,
+                std::string_view name
+            ) {
+                if (std::isfinite(value) && value >= 0.0) return;
+                frameError(
+                    *model_, SceneModelErrorCode::invalidValue,
+                    base + '/' + std::string(name),
+                    "Text effect size and opacity must be finite and non-negative"
+                );
+            };
+            validateTextEffectScalar(
+                dropShadowOpacity, "dropshadowopacity"
+            );
+            validateTextEffectScalar(dropShadowSize, "dropshadowsize");
+            validateTextEffectScalar(blurSize, "blursize");
+            validateTextEffectScalar(
+                outlineThickness, "outlinethickness"
+            );
             if (text->limitRows && text->maxRows <= 0) {
                 frameError(
                     *model_, SceneModelErrorCode::invalidValue,
@@ -1753,6 +2664,7 @@ private:
                 .objectIndex = objectIndex,
                 .objectId = node.id,
                 .visible = node.isVisible,
+                .perspective = text->perspective,
                 .text = textValue(text->text, base + "/text", node.id, "Text content"),
                 .font = text->font,
                 .pointSize = pointSize,
@@ -1772,6 +2684,17 @@ private:
                 .limitWidth = text->limitWidth,
                 .maxRows = text->maxRows,
                 .maxWidth = maxWidth,
+                .msdf = text->msdf,
+                .blur = text->blur,
+                .blurSize = blurSize,
+                .dropShadow = text->dropShadow,
+                .dropShadowColor = dropShadowColor,
+                .dropShadowOffset = dropShadowOffset,
+                .dropShadowOpacity = dropShadowOpacity,
+                .dropShadowSize = dropShadowSize,
+                .outline = text->outline,
+                .outlineColor = outlineColor,
+                .outlineThickness = outlineThickness,
             });
             return descriptorIndex;
     }
@@ -1876,6 +2799,7 @@ private:
         effectImage.brightness = dynamicLiteral(RuntimeValue::floating(1.0));
         effectImage.colorBlendMode = dynamicLiteral(RuntimeValue::integer(0));
         effectImage.horizontalAlignment = "center";
+        effectImage.perspective = text->perspective;
         effectImage.effects = text->effects;
 
         const std::size_t imageIndex = plan_.images.size();
@@ -1886,6 +2810,7 @@ private:
             .solid = false,
             .passthrough = false,
             .fullscreen = false,
+            .perspective = text->perspective,
             .size = {layerWidth, layerHeight},
             .worldTransform = node.worldTransform,
             .source = source.resource,
@@ -3741,6 +4666,17 @@ private:
 
     [[nodiscard]] ComboMap resolveCombos(const PendingRender& pending) const {
         ComboMap result = pending.material.combos;
+        if (pending.origin.imageIndex < plan_.images.size()) {
+            const FrameImageDescriptor& image = plan_.images.at(
+                pending.origin.imageIndex
+            );
+            // The official image parser selects this variant from the layer's
+            // authored perspective flag, independently of the scene camera.
+            result.insert_or_assign("SCENE_ORTHO", image.perspective ? 0 : 1);
+        }
+        if (pending.material.blending == BlendingMode::alphaToCoverage) {
+            result.insert_or_assign("ALPHATOCOVERAGE", 1);
+        }
         if (pending.overridePass != nullptr) {
             for (const auto& [name, value] : pending.overridePass->combos) {
                 result.insert_or_assign(name, value);
@@ -3862,6 +4798,946 @@ private:
                 }
             );
         }
+    }
+
+    // Shadow rendering is a graph concern, not a shader-name concern. The
+    // authored image material supplies the real texture/alpha/morph bindings;
+    // only the vertex/fragment pair and depth target change for the caster.
+    // Build these passes after normal image scheduling so every caster can
+    // clone a fully resolved base material operation.
+    void planShadowCasters() {
+        const FrameResourceRef atlas = sceneFramebuffers_.at(
+            "_rt_shadowAtlas"
+        );
+        if (plan_.shadowAtlasResolution == 0 ||
+            plan_.lightConfiguration.pointShadow == 0 &&
+                plan_.lightConfiguration.spotShadow == 0 &&
+                plan_.lightConfiguration.spotShadowCookie == 0 &&
+                plan_.lightConfiguration.directionalShadow == 0) {
+            return;
+        }
+
+        const auto featureRank = [](const FrameLightDescriptor& light) {
+            switch (light.type) {
+                case FrameLightType::point:
+                    return light.castShadow ? 0 : 1;
+                case FrameLightType::spot:
+                    if (light.castShadow && light.useCookie) return 0;
+                    if (light.useCookie) return 1;
+                    if (light.castShadow) return 2;
+                    return 3;
+                case FrameLightType::directional:
+                    return light.castShadow ? 0 : 1;
+                case FrameLightType::tube:
+                    return 0;
+            }
+            std::terminate();
+        };
+        std::vector<const FrameLightDescriptor*> shadowLights;
+        for (const FrameLightDescriptor& light : plan_.lights) {
+            if (!light.visible || !light.castShadow ||
+                light.type == FrameLightType::tube) {
+                continue;
+            }
+            shadowLights.push_back(&light);
+        }
+        std::stable_sort(
+            shadowLights.begin(), shadowLights.end(),
+            [&](const FrameLightDescriptor* lhs,
+                const FrameLightDescriptor* rhs) {
+                if (lhs->type != rhs->type) {
+                    return static_cast<int>(lhs->type) <
+                        static_cast<int>(rhs->type);
+                }
+                return featureRank(*lhs) < featureRank(*rhs);
+            }
+        );
+        if (shadowLights.empty()) return;
+
+        const auto lightProjections = [&] (
+            const FrameLightDescriptor& light,
+            const std::vector<const FrameShadowAtlasEntry*>& atlasEntries
+        ) {
+            struct Entry final {
+                FrameMatrix matrix;
+                FrameRenderRegion region;
+            };
+            std::vector<Entry> result;
+            const double degreesToRadians =
+                3.14159265358979323846264338327950288 / 180.0;
+            const double radius = std::max(light.radius, 0.02);
+            const double nearPlane = std::max(radius * 0.001, 0.01);
+            const double farPlane = std::max(radius, nearPlane + 0.01);
+            const FrameMatrix orientation = frameLightVolumeTransform(light);
+            const Vector3 origin{
+                light.worldTransform.origin.x,
+                light.worldTransform.origin.y,
+                light.worldTransform.origin.z,
+            };
+            const Vector3 forward{orientation[0], orientation[1], orientation[2]};
+            const Vector3 up{orientation[4], orientation[5], orientation[6]};
+            if (atlasEntries.empty()) {
+                throw std::logic_error(
+                    "Shadow light has no allocated atlas entry"
+                );
+            }
+            const std::uint32_t size = atlasEntries.front()->size;
+            if (light.type == FrameLightType::point) {
+                const FrameMatrix projection = framePerspective(
+                    90.0 * degreesToRadians, 1.0, farPlane, nearPlane
+                );
+                static constexpr std::array<Vector3, 6> directions{{
+                    {1.0, 0.0, 0.0}, {-1.0, 0.0, 0.0},
+                    {0.0, 1.0, 0.0}, {0.0, -1.0, 0.0},
+                    {0.0, 0.0, 1.0}, {0.0, 0.0, -1.0},
+                }};
+                static constexpr std::array<Vector3, 6> ups{{
+                    {0.0, 1.0, 0.0}, {0.0, 1.0, 0.0},
+                    {0.0, 0.0, 1.0}, {0.0, 0.0, -1.0},
+                    {0.0, 1.0, 0.0}, {0.0, 1.0, 0.0},
+                }};
+                const std::uint32_t cellWidth = size / 2U;
+                const std::uint32_t cellHeight = size / 3U;
+                for (std::size_t face = 0; face < directions.size(); ++face) {
+                    const FrameCameraDescriptor camera{
+                        .center = {
+                            origin.x + directions[face].x,
+                            origin.y + directions[face].y,
+                            origin.z + directions[face].z,
+                        },
+                        .eye = origin,
+                        .up = ups[face],
+                    };
+                    const std::uint32_t column = static_cast<std::uint32_t>(face % 2U);
+                    const std::uint32_t row = static_cast<std::uint32_t>(face / 2U);
+                    result.push_back({
+                        .matrix = frameMatrixMultiply(
+                            projection, frameLookAt(camera)
+                        ),
+                        .region = {
+                            .x = atlasEntries.front()->x + column * cellWidth,
+                            .y = atlasEntries.front()->y + row * cellHeight,
+                            .width = cellWidth,
+                            .height = cellHeight,
+                        },
+                    });
+                }
+                return result;
+            }
+            if (light.type == FrameLightType::spot) {
+                const double fieldOfView = std::clamp(
+                    light.outerCone * 2.0, 0.01, 179.0
+                );
+                const FrameCameraDescriptor camera{
+                    .center = {
+                        origin.x + forward.x,
+                        origin.y + forward.y,
+                        origin.z + forward.z,
+                    },
+                    .eye = origin,
+                    .up = up,
+                };
+                FrameMatrix matrix = frameMatrixMultiply(
+                        framePerspective(
+                            fieldOfView * degreesToRadians,
+                            1.0,
+                            farPlane,
+                            nearPlane
+                        ),
+                        frameLookAt(camera)
+                    );
+                matrix[14] -= 0.000500000024;
+                result.push_back({
+                    .matrix = matrix,
+                    .region = {
+                        .x = atlasEntries.front()->x,
+                        .y = atlasEntries.front()->y,
+                        .width = size,
+                        .height = size,
+                    },
+                });
+                return result;
+            }
+
+            const double defaultExtent = std::max(
+                static_cast<double>(plan_.camera.orthogonalProjectionWidth),
+                static_cast<double>(plan_.camera.orthogonalProjectionHeight)
+            ) * 0.5;
+            if (atlasEntries.size() != 3U) {
+                throw std::logic_error(
+                    "Directional shadow light must own three atlas entries"
+                );
+            }
+            for (std::size_t cascade = 0; cascade < 3; ++cascade) {
+                const double authoredDistance = light.cascadeDistances[cascade];
+                const double extent = authoredDistance > 0.0
+                    ? authoredDistance
+                    : defaultExtent * static_cast<double>(cascade + 1) / 3.0;
+                const Vector3 center{
+                    plan_.camera.center.x,
+                    plan_.camera.center.y,
+                    plan_.camera.center.z,
+                };
+                const FrameCameraDescriptor camera{
+                    .center = {center.x, center.y, center.z},
+                    .eye = {
+                        center.x - forward.x * extent * 2.0,
+                        center.y - forward.y * extent * 2.0,
+                        center.z - forward.z * extent * 2.0,
+                    },
+                    .up = up,
+                };
+                FrameMatrix matrix = frameMatrixMultiply(
+                        frameOrthographic(
+                            -extent, extent, -extent, extent,
+                            -extent * 4.0, extent * 4.0
+                        ),
+                        frameLookAt(camera)
+                    );
+                matrix[14] -= 0.000500000024;
+                result.push_back({
+                    .matrix = matrix,
+                    .region = {
+                        .x = atlasEntries[cascade]->x,
+                        .y = atlasEntries[cascade]->y,
+                        .width = atlasEntries[cascade]->size,
+                        .height = atlasEntries[cascade]->size,
+                    },
+                });
+            }
+            return result;
+        };
+
+        const auto& resolver = model_->runtime()->assetResolver();
+        const auto casterName = [&](const FrameRenderPass& source) {
+            std::string result = "shadowcaster";
+            if (!resolver.contains(source.fragmentShaderPath)) {
+                return result;
+            }
+            const std::string sourceText = resolver.readString(
+                source.fragmentShaderPath
+            );
+            const std::string marker = "[PASS] shadow";
+            const std::size_t markerPosition = sourceText.find(marker);
+            if (markerPosition == std::string::npos) return result;
+            std::size_t begin = markerPosition + marker.size();
+            while (begin < sourceText.size() &&
+                   std::isspace(static_cast<unsigned char>(sourceText[begin]))) {
+                ++begin;
+            }
+            std::size_t end = begin;
+            while (end < sourceText.size() &&
+                   !std::isspace(static_cast<unsigned char>(sourceText[end]))) {
+                ++end;
+            }
+            if (end > begin) result = sourceText.substr(begin, end - begin);
+            return result;
+        };
+        const auto shaderPath = [&](std::string_view sourcePath,
+                                    std::string_view shaderName,
+                                    std::string_view extension) {
+            const std::size_t slash = sourcePath.rfind('/');
+            const std::string prefix = slash == std::string_view::npos
+                ? std::string()
+                : std::string(sourcePath.substr(0, slash + 1));
+            std::string candidate = prefix + std::string(shaderName) +
+                std::string(extension);
+            if (resolver.contains(candidate)) return candidate;
+            candidate = "shaders/" + std::string(shaderName) +
+                std::string(extension);
+            if (resolver.contains(candidate)) return candidate;
+            return std::string();
+        };
+
+        std::map<std::size_t, std::vector<FrameRenderPass>> casterOperations;
+        for (const FrameLightDescriptor* light : shadowLights) {
+            const std::size_t lightIndex = static_cast<std::size_t>(
+                light - plan_.lights.data()
+            );
+            std::vector<const FrameShadowAtlasEntry*> atlasEntries;
+            for (const FrameShadowAtlasEntry& entry :
+                 plan_.shadowAtlasEntries) {
+                if (entry.lightIndex == lightIndex) {
+                    atlasEntries.push_back(&entry);
+                }
+            }
+            std::ranges::sort(
+                atlasEntries,
+                [](const FrameShadowAtlasEntry* lhs,
+                   const FrameShadowAtlasEntry* rhs) {
+                    return lhs->cascade < rhs->cascade;
+                }
+            );
+            const auto projections = lightProjections(*light, atlasEntries);
+            for (std::size_t imageIndex = 0;
+                 imageIndex < plan_.images.size(); ++imageIndex) {
+                const FrameImageDescriptor& image = plan_.images[imageIndex];
+                if (!image.visible || !image.castShadow) continue;
+                const FrameRenderPass* sourcePass = nullptr;
+                for (const FrameOperation& operation : plan_.operations) {
+                    const auto* pass = std::get_if<FrameRenderPass>(&operation);
+                    if (pass == nullptr || pass->origin.imageIndex != imageIndex ||
+                        pass->origin.effectIndex || pass->origin.effectPassIndex) {
+                        continue;
+                    }
+                    sourcePass = pass;
+                    break;
+                }
+                if (sourcePass == nullptr) {
+                    addIssue(
+                        FramePlanIssueCode::objectPlanningFailed,
+                        image.objectId,
+                        objectPointer(image.objectIndex, "castshadow"),
+                        "Image requests shadow casting but has no base material draw",
+                        FramePlanIssueSeverity::warning
+                    );
+                    continue;
+                }
+                const std::string name = casterName(*sourcePass);
+                const std::string vertex = shaderPath(
+                    sourcePass->vertexShaderPath, name, ".vert"
+                );
+                const std::string fragment = shaderPath(
+                    sourcePass->fragmentShaderPath, name, ".frag"
+                );
+                if (vertex.empty() || fragment.empty()) {
+                    addIssue(
+                        FramePlanIssueCode::objectPlanningFailed,
+                        image.objectId,
+                        objectPointer(image.objectIndex, "castshadow"),
+                        "Shadow caster shader pair is unavailable: " + name,
+                        FramePlanIssueSeverity::warning
+                    );
+                    continue;
+                }
+                for (const auto& projection : projections) {
+                    FrameRenderPass caster = *sourcePass;
+                    caster.origin.materialPassIndex =
+                        std::numeric_limits<std::size_t>::max() -
+                        casterOperations[imageIndex].size();
+                    caster.shader = name;
+                    caster.vertexShaderPath = vertex;
+                    caster.fragmentShaderPath = fragment;
+                    // The official shadow variant keeps alpha-to-coverage so
+                    // foliage and other cutout materials still reject their
+                    // transparent texels in the depth pass.
+                    const bool alphaToCoverage = sourcePass->blending ==
+                        BlendingMode::alphaToCoverage;
+                    caster.blending = alphaToCoverage
+                        ? BlendingMode::alphaToCoverage
+                        : BlendingMode::normal;
+                    caster.culling = CullingMode::disabled;
+                    caster.depthTest = DepthMode::greater;
+                    caster.depthWrite = DepthMode::greater;
+                    caster.geometry = image.puppetMesh
+                        ? FrameGeometryKind::puppetMesh
+                        : FrameGeometryKind::imageScene;
+                    caster.textureCoordinates = FrameTexCoordKind::image;
+                    caster.input = image.source;
+                    caster.previousInput.reset();
+                    caster.destination = atlas;
+                    // SceneObjectParsers constructs shadow_material from the
+                    // first two texture slots and only the skinning/morph
+                    // combos. Carrying the full authored material here makes
+                    // unrelated active uniforms part of a depth-only shader
+                    // contract and is not equivalent to the official path.
+                    std::map<int, FrameTextureBinding> shadowTextures;
+                    for (const int slot : {0, 1}) {
+                        const auto texture = sourcePass->textures.find(slot);
+                        if (texture != sourcePass->textures.end()) {
+                            shadowTextures.emplace(slot, texture->second);
+                        }
+                    }
+                    caster.textures = std::move(shadowTextures);
+                    static constexpr std::array<std::string_view, 4>
+                        shadowComboNames{
+                            "SKINNING", "MORPHING", "MORPHING_NORMALS",
+                            "BONECOUNT",
+                        };
+                    ComboMap shadowCombos;
+                    for (const std::string_view name : shadowComboNames) {
+                        const auto combo = sourcePass->combos.find(
+                            std::string(name)
+                        );
+                        if (combo != sourcePass->combos.end()) {
+                            shadowCombos.emplace(combo->first, combo->second);
+                        }
+                    }
+                    if (alphaToCoverage) {
+                        shadowCombos.insert_or_assign(
+                            "ALPHATOCOVERAGE", 1
+                        );
+                    }
+                    caster.combos = std::move(shadowCombos);
+                    caster.renderVariables = {};
+                    caster.viewport = projection.region;
+                    caster.scissor = projection.region;
+                    caster.instanceCount = 1;
+                    caster.depthBias = 0.0;
+                    caster.depthSlopeScale = -4.0;
+                    caster.depthBiasClamp = 0.0;
+                    caster.matrixOverrides = {};
+                    caster.matrixOverrides.viewportViewProjections.push_back(
+                        projection.matrix
+                    );
+                    caster.shadowCaster = true;
+                    caster.shadowSourceVertexShaderPath =
+                        sourcePass->vertexShaderPath;
+                    caster.shadowSourceFragmentShaderPath =
+                        sourcePass->fragmentShaderPath;
+                    caster.shadowSourceCombos = sourcePass->combos;
+                    caster.writeAlpha = false;
+                    caster.writeColor = false;
+                    casterOperations[imageIndex].push_back(std::move(caster));
+                }
+            }
+        }
+        if (casterOperations.empty()) return;
+
+        const int clearObjectId = std::numeric_limits<int>::min() + 1;
+        const std::size_t clearImageIndex = plan_.images.size();
+        plan_.images.push_back({
+            .objectIndex = model_->project().scene.objects.size(),
+            .objectId = clearObjectId,
+            .visible = true,
+            .source = atlas,
+            .compositeA = atlas,
+            .compositeB = atlas,
+            .size = {
+                static_cast<double>(plan_.shadowAtlasWidth),
+                static_cast<double>(plan_.shadowAtlasHeight),
+            },
+        });
+        std::vector<FrameOperation> rewritten;
+        rewritten.reserve(plan_.operations.size() + casterOperations.size() * 2U);
+        rewritten.emplace_back(FrameClearCommand{
+            .origin = {
+                .imageIndex = clearImageIndex,
+                .objectId = clearObjectId,
+            },
+            .destination = atlas,
+            .color = {
+                .red = 1.0, .green = 1.0, .blue = 1.0, .alpha = 1.0,
+            },
+            .clearDepth = true,
+            .depthValue = 0.0,
+        });
+        std::set<std::size_t> emitted;
+        for (const FrameOperation& operation : plan_.operations) {
+            std::optional<std::size_t> imageIndex;
+            if (const auto* pass = std::get_if<FrameRenderPass>(&operation)) {
+                imageIndex = pass->origin.imageIndex;
+            } else if (const auto* copy = std::get_if<FrameCopyCommand>(&operation)) {
+                imageIndex = copy->origin.imageIndex;
+            } else if (const auto* swap = std::get_if<FrameSwapCommand>(&operation)) {
+                imageIndex = swap->origin.imageIndex;
+            } else if (const auto* clear = std::get_if<FrameClearCommand>(&operation)) {
+                imageIndex = clear->origin.imageIndex;
+            }
+            if (imageIndex && casterOperations.contains(*imageIndex) &&
+                emitted.emplace(*imageIndex).second) {
+                for (FrameRenderPass& caster : casterOperations.at(*imageIndex)) {
+                    rewritten.emplace_back(std::move(caster));
+                }
+            }
+            rewritten.push_back(operation);
+        }
+        plan_.operations = std::move(rewritten);
+    }
+
+    void planVolumetricObjects() {
+        const FrameResourceRef back = sceneFramebuffers_.at(
+            "_rt_volumetricsBack"
+        );
+        const FrameResourceRef single = sceneFramebuffers_.at(
+            "_rt_volumetricsSingle"
+        );
+        const FrameResourceRef lightBuffer = sceneFramebuffers_.at(
+            "_rt_volumetricsLightBuffer"
+        );
+
+        std::vector<const FrameLightDescriptor*> lights;
+        for (const FrameLightDescriptor& light : plan_.lights) {
+            if (!light.visible || !light.castVolumetrics) continue;
+            if (light.type != FrameLightType::point &&
+                light.type != FrameLightType::spot) {
+                addIssue(
+                    FramePlanIssueCode::objectPlanningFailed,
+                    light.objectId,
+                    "/scene/objects/" + std::to_string(light.objectIndex),
+                    "Volumetric rendering currently supports only point and spot lights",
+                    FramePlanIssueSeverity::frameFatal
+                );
+                continue;
+            }
+            if (!std::isfinite(light.radius) || light.radius <= 0.0) {
+                addIssue(
+                    FramePlanIssueCode::objectPlanningFailed,
+                    light.objectId,
+                    "/scene/objects/" + std::to_string(light.objectIndex) +
+                        "/light/radius",
+                    "Volumetric light radius must be greater than zero",
+                    FramePlanIssueSeverity::frameFatal
+                );
+                continue;
+            }
+            if (light.type == FrameLightType::spot &&
+                (!std::isfinite(light.outerCone) ||
+                 light.outerCone <= 0.0)) {
+                addIssue(
+                    FramePlanIssueCode::objectPlanningFailed,
+                    light.objectId,
+                    "/scene/objects/" + std::to_string(light.objectIndex) +
+                        "/light/coneangle",
+                    "Volumetric spot outer cone must be greater than zero",
+                    FramePlanIssueSeverity::frameFatal
+                );
+                continue;
+            }
+            lights.push_back(&light);
+        }
+        if (lights.empty()) return;
+
+        FrameMatrix sceneViewProjection;
+        FrameMatrix sceneViewProjectionInverse;
+        try {
+            sceneViewProjection = frameSceneViewProjection(
+                plan_.camera,
+                static_cast<double>(plan_.camera.orthogonalProjectionWidth),
+                static_cast<double>(plan_.camera.orthogonalProjectionHeight)
+            );
+            sceneViewProjectionInverse = frameMatrixInverse(
+                sceneViewProjection
+            );
+        } catch (const std::invalid_argument& error) {
+            frameError(
+                *model_,
+                SceneModelErrorCode::invalidValue,
+                "/camera",
+                "Volumetric world reconstruction requires a valid scene "
+                "camera: " + std::string(error.what())
+            );
+        }
+
+        // Clear commands carry an origin for diagnostics. Reserve one
+        // synthetic image record before emitting those commands so the origin
+        // remains valid even in a scene containing only lights.
+        const std::size_t clearImageIndex = plan_.images.size();
+        plan_.images.push_back({
+            .objectIndex = lights.front()->objectIndex,
+            .objectId = lights.front()->objectId,
+            .visible = true,
+            .size = {
+                static_cast<double>(plan_.width),
+                static_cast<double>(plan_.height),
+            },
+            .worldTransform = lights.front()->worldTransform,
+            .source = single,
+            .compositeA = lightBuffer,
+            .compositeB = lightBuffer,
+        });
+
+        const FramePassOrigin clearOrigin{
+            .imageIndex = clearImageIndex,
+            .objectId = lights.front()->objectId,
+            .materialPassIndex = 0,
+        };
+        const FrameColor farDepth{
+            .red = 1.0,
+            .green = 1.0,
+            .blue = 1.0,
+            .alpha = 1.0,
+        };
+        plan_.operations.emplace_back(FrameClearCommand{
+            .origin = clearOrigin,
+            .destination = single,
+            .color = farDepth,
+        });
+        plan_.operations.emplace_back(FrameClearCommand{
+            .origin = clearOrigin,
+            .destination = lightBuffer,
+            .color = {
+                .red = 0.0,
+                .green = 0.0,
+                .blue = 0.0,
+                .alpha = 0.0,
+            },
+        });
+
+        const auto renderVariable = [](const FrameLightDescriptor& light) {
+            constexpr double degreesToRadians =
+                3.14159265358979323846264338327950288 / 180.0;
+            const double radius = light.radius;
+            const double inner = std::cos(
+                light.innerCone * degreesToRadians
+            );
+            const double outer = std::cos(
+                light.outerCone * degreesToRadians
+            );
+            const std::array<double, 3> origin = {
+                light.worldTransform.origin.x,
+                light.worldTransform.origin.y,
+                light.worldTransform.origin.z,
+            };
+            const std::array<double, 3> color = {
+                light.color.red,
+                light.color.green,
+                light.color.blue,
+            };
+            const Vector3 direction = frameLightForward(light);
+            const double nearPlane = std::max(light.radius * 0.001, 0.01);
+            const double farPlane = std::max(light.radius, nearPlane + 0.01);
+            // Volumetric point-light depth is sampled with the same reverse-Z
+            // comparison as the shadow atlas.  The point projection matrix
+            // therefore uses the shadow caster's (far, near) argument order:
+            // near radius maps to depth 1 and the light radius maps to 0.
+            const double projectionZ = nearPlane /
+                (farPlane - nearPlane);
+            const double projectionW = (nearPlane * farPlane) /
+                (farPlane - nearPlane);
+            const FrameRenderVariablePayload directionOrProjection{
+                light.type == FrameLightType::point
+                    ? std::array<double, 4>{
+                          projectionZ, projectionW, -1.0, 0.0,
+                      }
+                    : std::array<double, 4>{
+                          direction.x, direction.y, direction.z, 0.0,
+                      },
+            };
+            return std::array<FrameRenderVariablePayload, 5>{
+                FrameRenderVariablePayload{{0.0, 0.0, 1.0, 1.0}},
+                FrameRenderVariablePayload{{
+                    radius, inner, outer, light.intensity,
+                }},
+                FrameRenderVariablePayload{{
+                    origin[0], origin[1], origin[2], light.density,
+                }},
+                directionOrProjection,
+                FrameRenderVariablePayload{{
+                    color[0], color[1], color[2], light.volumetricsExponent,
+                }},
+            };
+        };
+
+        for (const FrameLightDescriptor* light : lights) {
+            const std::size_t lightIndex = static_cast<std::size_t>(
+                light - plan_.lights.data()
+            );
+            const std::size_t imageIndex = plan_.images.size();
+            const FramePassOrigin backOrigin{
+                .imageIndex = imageIndex,
+                .objectId = light->objectId,
+                .materialPassIndex = 0,
+            };
+            const FramePassOrigin frontOrigin{
+                .imageIndex = imageIndex,
+                .objectId = light->objectId,
+                .materialPassIndex = 1,
+            };
+            plan_.images.push_back({
+                .objectIndex = light->objectIndex,
+                .objectId = light->objectId,
+                .visible = true,
+                .size = {
+                    static_cast<double>(plan_.width),
+                    static_cast<double>(plan_.height),
+                },
+                .worldTransform = light->worldTransform,
+                .source = single,
+                .compositeA = lightBuffer,
+                .compositeB = lightBuffer,
+                .alpha = EvaluatedValue{
+                    .value = RuntimeValue::floating(1.0),
+                    .source = DynamicValueSource::literal,
+                },
+                .color = EvaluatedValue{
+                    .value = RuntimeValue::color({1.0, 1.0, 1.0, 1.0}),
+                    .source = DynamicValueSource::literal,
+                },
+                .brightness = EvaluatedValue{
+                    .value = RuntimeValue::floating(1.0),
+                    .source = DynamicValueSource::literal,
+                },
+                .colorBlendMode = EvaluatedValue{
+                    .value = RuntimeValue::integer(0),
+                    .source = DynamicValueSource::literal,
+                },
+                .parallaxDepth = EvaluatedValue{
+                    .value = RuntimeValue::vector({0.0, 0.0, 0.0, 0.0}, 2),
+                    .source = DynamicValueSource::literal,
+                },
+                .horizontalAlignment = "center",
+            });
+
+            const FrameMatrix lightTransform = frameLightVolumeTransform(
+                *light
+            );
+            std::optional<FrameMatrix> spotProjection;
+            if (light->type == FrameLightType::spot) {
+                const double degreesToRadians =
+                    3.14159265358979323846264338327950288 / 180.0;
+                const double radius = std::max(light->radius, 0.02);
+                const double nearPlane = std::max(radius * 0.001, 0.01);
+                const double farPlane = std::max(radius, nearPlane + 0.01);
+                const FrameMatrix orientation = lightTransform;
+                const Vector3 origin{
+                    light->worldTransform.origin.x,
+                    light->worldTransform.origin.y,
+                    light->worldTransform.origin.z,
+                };
+                const Vector3 forward{
+                    orientation[0], orientation[1], orientation[2],
+                };
+                const Vector3 up{
+                    orientation[4], orientation[5], orientation[6],
+                };
+                const FrameCameraDescriptor camera{
+                    .center = {
+                        origin.x + forward.x,
+                        origin.y + forward.y,
+                        origin.z + forward.z,
+                    },
+                    .eye = origin,
+                    .up = up,
+                };
+                spotProjection = frameMatrixMultiply(
+                    framePerspective(
+                        std::clamp(light->outerCone * 2.0, 0.01, 179.0) *
+                            degreesToRadians,
+                        1.0,
+                        farPlane,
+                        nearPlane
+                    ),
+                    frameLookAt(camera)
+                );
+                spotProjection->at(14) -= 0.000500000024;
+            }
+            plan_.operations.emplace_back(FrameClearCommand{
+                .origin = backOrigin,
+                .destination = back,
+                .color = farDepth,
+                .clearDepth = true,
+            });
+            plan_.operations.emplace_back(FrameRenderPass{
+                .origin = backOrigin,
+                .shader = "volumetricsback",
+                .vertexShaderPath = "shaders/volumetricsback.vert",
+                .fragmentShaderPath = "shaders/volumetricsback.frag",
+                .blending = BlendingMode::normal,
+                .culling = CullingMode::normal,
+                .depthTest = DepthMode::enabled,
+                .depthWrite = DepthMode::enabled,
+                .geometry = FrameGeometryKind::lightVolume,
+                .textureCoordinates = FrameTexCoordKind::full,
+                .input = single,
+                .destination = back,
+                .matrixOverrides = {
+                    .viewProjection = sceneViewProjection,
+                    .alternateViewProjection = lightTransform,
+                },
+                .lightIndex = lightIndex,
+            });
+
+            const bool cameraInside = frameCameraInsideLightVolume(
+                plan_.camera, *light
+            );
+            auto variables = renderVariable(*light);
+            const auto atlas = sceneFramebuffers_.at("_rt_shadowAtlas");
+            const auto atlasEntry = std::ranges::find_if(
+                plan_.shadowAtlasEntries,
+                [lightIndex](const FrameShadowAtlasEntry& entry) {
+                    return entry.lightIndex == lightIndex && entry.cascade == 0;
+                }
+            );
+            const bool shadow = light->castShadow;
+            const bool cookie = light->useCookie;
+            if (shadow && atlasEntry == plan_.shadowAtlasEntries.end()) {
+                addIssue(
+                    FramePlanIssueCode::objectPlanningFailed,
+                    light->objectId,
+                    objectPointer(light->objectIndex, "castshadow"),
+                    "Volumetric shadow light has no shadow atlas entry",
+                    FramePlanIssueSeverity::frameFatal
+                );
+                continue;
+            }
+            if (shadow) {
+                const double atlasWidth = static_cast<double>(
+                    std::max<std::uint32_t>(1U, plan_.shadowAtlasWidth)
+                );
+                const double atlasHeight = static_cast<double>(
+                    std::max<std::uint32_t>(1U, plan_.shadowAtlasHeight)
+                );
+                variables[0] = FrameRenderVariablePayload{{
+                    static_cast<double>(atlasEntry->x) / atlasWidth,
+                    static_cast<double>(atlasEntry->y) / atlasHeight,
+                    static_cast<double>(atlasEntry->size) / atlasWidth,
+                    static_cast<double>(atlasEntry->size) / atlasHeight,
+                }};
+            }
+            ComboMap combos{
+                {"FULLSCREEN", cameraInside ? 1 : 0},
+                {"POINTLIGHT", light->type == FrameLightType::point ? 1 : 0},
+                {"QUALITY", static_cast<int>(renderQuality_)},
+                {"SHADOW", shadow ? 1 : 0},
+                {"COOKIE", cookie ? 1 : 0},
+            };
+            std::map<int, FrameTextureBinding> volumetricTextures{
+                {
+                    1,
+                    FrameTextureBinding{.candidates = {{
+                        .source = FrameTextureCandidateSource::bind,
+                        .resource = back,
+                    }}, .sampleDepth = true},
+                },
+                {
+                    3,
+                    FrameTextureBinding{.candidates = {{
+                        .source = FrameTextureCandidateSource::bind,
+                        .resource = single,
+                    }}},
+                },
+            };
+            if (shadow) {
+                volumetricTextures.emplace(
+                    0,
+                    FrameTextureBinding{.candidates = {{
+                        .source = FrameTextureCandidateSource::bind,
+                        .resource = atlas,
+                    }}, .sampleDepth = true}
+                );
+            }
+            if (cookie) {
+                volumetricTextures.emplace(
+                    2,
+                    FrameTextureBinding{.candidates = {{
+                        .source = FrameTextureCandidateSource::bind,
+                        .resource = plan_.lightCookie,
+                    }}}
+                );
+            }
+            plan_.operations.emplace_back(FrameRenderPass{
+                .origin = frontOrigin,
+                .shader = "volumetricsfront",
+                .vertexShaderPath = "shaders/volumetricsfront.vert",
+                .fragmentShaderPath = "shaders/volumetricsfront.frag",
+                .blending = BlendingMode::additive,
+                .culling = cameraInside
+                    ? CullingMode::disabled
+                    : CullingMode::normal,
+                .depthTest = DepthMode::disabled,
+                .depthWrite = DepthMode::disabled,
+                .geometry = cameraInside
+                    ? FrameGeometryKind::fullscreenLocal
+                    : FrameGeometryKind::lightVolume,
+                .textureCoordinates = FrameTexCoordKind::full,
+                .input = single,
+                .destination = lightBuffer,
+                .textures = std::move(volumetricTextures),
+                .combos = std::move(combos),
+                .renderVariables = {{
+                    variables[0], variables[1], variables[2], variables[3],
+                    variables[4],
+                }},
+                .matrixOverrides = {
+                    .viewProjection = sceneViewProjection,
+                    .effectModel = sceneViewProjectionInverse,
+                    .alternateModel = spotProjection,
+                    .alternateViewProjection = lightTransform,
+                },
+                .lightIndex = lightIndex,
+            });
+        }
+
+        const std::size_t combineImageIndex = plan_.images.size() - 1;
+        const bool lowQuality = static_cast<std::uint8_t>(renderQuality_) < 3;
+        if (lowQuality) {
+            const FrameResourceRef lightBufferB = sceneFramebuffers_.at(
+                "_rt_volumetricsLightBufferB"
+            );
+            const FramePassOrigin blurHorizontalOrigin{
+                .imageIndex = combineImageIndex,
+                .objectId = lights.front()->objectId,
+                .materialPassIndex = 2,
+            };
+            plan_.operations.emplace_back(FrameRenderPass{
+                .origin = blurHorizontalOrigin,
+                .shader = "blur_k3",
+                .vertexShaderPath = "shaders/blur_k3.vert",
+                .fragmentShaderPath = "shaders/blur_k3.frag",
+                .blending = BlendingMode::normal,
+                .culling = CullingMode::disabled,
+                .depthTest = DepthMode::disabled,
+                .depthWrite = DepthMode::disabled,
+                .geometry = FrameGeometryKind::fullscreenLocal,
+                .textureCoordinates = FrameTexCoordKind::full,
+                .input = lightBuffer,
+                .destination = lightBufferB,
+                .textures = {{
+                    0,
+                    FrameTextureBinding{.candidates = {{
+                        .source = FrameTextureCandidateSource::bind,
+                        .resource = lightBuffer,
+                    }}},
+                }},
+                .combos = {{"VERTICAL", 0}},
+            });
+
+            const FramePassOrigin blurVerticalOrigin{
+                .imageIndex = combineImageIndex,
+                .objectId = lights.front()->objectId,
+                .materialPassIndex = 3,
+            };
+            plan_.operations.emplace_back(FrameRenderPass{
+                .origin = blurVerticalOrigin,
+                .shader = "blur_k3",
+                .vertexShaderPath = "shaders/blur_k3.vert",
+                .fragmentShaderPath = "shaders/blur_k3.frag",
+                .blending = BlendingMode::normal,
+                .culling = CullingMode::disabled,
+                .depthTest = DepthMode::disabled,
+                .depthWrite = DepthMode::disabled,
+                .geometry = FrameGeometryKind::fullscreenLocal,
+                .textureCoordinates = FrameTexCoordKind::full,
+                .input = lightBufferB,
+                .destination = lightBuffer,
+                .textures = {{
+                    0,
+                    FrameTextureBinding{.candidates = {{
+                        .source = FrameTextureCandidateSource::bind,
+                        .resource = lightBufferB,
+                    }}},
+                }},
+                .combos = {{"VERTICAL", 1}},
+            });
+        }
+
+        const FramePassOrigin combineOrigin{
+            .imageIndex = combineImageIndex,
+            .objectId = lights.front()->objectId,
+            .materialPassIndex = lowQuality ? 4U : 2U,
+        };
+        plan_.operations.emplace_back(FrameRenderPass{
+            .origin = combineOrigin,
+            .shader = "passthrough",
+            .vertexShaderPath = "shaders/passthrough.vert",
+            .fragmentShaderPath = "shaders/passthrough.frag",
+            .blending = BlendingMode::additive,
+            .culling = CullingMode::disabled,
+            .depthTest = DepthMode::disabled,
+            .depthWrite = DepthMode::disabled,
+            .geometry = FrameGeometryKind::fullscreenLocal,
+            .textureCoordinates = FrameTexCoordKind::full,
+            .input = lightBuffer,
+            .destination = plan_.output,
+            .textures = {{
+                0,
+                FrameTextureBinding{.candidates = {{
+                    .source = FrameTextureCandidateSource::bind,
+                    .resource = lightBuffer,
+                }}},
+            }},
+        });
     }
 
     void planBloomObject() {
@@ -4646,6 +6522,7 @@ private:
     const SceneGraphSnapshot& graphSnapshot_;
     FrameProjectionSize projectionSize_;
     SceneFrameInputs inputs_;
+    FrameRenderQuality renderQuality_ = FrameRenderQuality::high;
     SceneGraph::EvaluationFrame* evaluationFrame_ = nullptr;
     const std::map<std::string, EvaluatedValue>* scriptedValues_ = nullptr;
     const std::vector<int>* cursorInteractiveLayerIds_ = nullptr;
@@ -4747,6 +6624,17 @@ FrameProjectionSize SceneFrameGraph::projectionSize(
     std::optional<FrameProjectionSize> drawableFallback
 ) const {
     const SceneCamera& camera = graph_->model()->project().scene.camera;
+    if (!camera.orthographic) {
+        if (!drawableFallback || drawableFallback->width == 0 ||
+            drawableFallback->height == 0) {
+            frameError(
+                *graph_->model(), SceneModelErrorCode::invalidValue,
+                "/general/orthogonalprojection",
+                "Perspective scene requires host drawable pixel dimensions"
+            );
+        }
+        return *drawableFallback;
+    }
     if (!camera.projectionAuto) {
         return {
             .width = checkedDimension(
@@ -4773,31 +6661,38 @@ FrameProjectionSize SceneFrameGraph::projectionSize(
 FrameEvaluationState::FrameEvaluationState(
     std::shared_ptr<const SceneGraph> graph,
     SceneGraphSnapshot graphSnapshot,
-    SceneFrameInputs inputs
+    SceneFrameInputs inputs,
+    FrameRenderQuality renderQuality
 ) : graph_(std::move(graph)), graphSnapshot_(std::move(graphSnapshot)),
-    inputs_(inputs) {}
+    inputs_(inputs), renderQuality_(renderQuality) {}
 
 FramePlan SceneFrameGraph::snapshot(
-    std::optional<FrameProjectionSize> drawableFallback
+    std::optional<FrameProjectionSize> drawableFallback,
+    FrameRenderQuality renderQuality
 ) const {
     const SceneGraphSnapshot graphSnapshot = graph_->snapshot();
     const SceneFrameInputs inputs;
     return PlanBuilder(
-        graph_->model(), graphSnapshot, projectionSize(drawableFallback), inputs
+        graph_->model(), graphSnapshot, projectionSize(drawableFallback), inputs,
+        renderQuality
     ).build();
 }
 
 FramePlan SceneFrameGraph::snapshot(
     const SceneFrameInputs& inputs,
-    std::optional<FrameProjectionSize> drawableFallback
+    std::optional<FrameProjectionSize> drawableFallback,
+    FrameRenderQuality renderQuality
 ) const {
-    EvaluatedFramePlan evaluated = evaluate(inputs, drawableFallback);
+    EvaluatedFramePlan evaluated = evaluate(
+        inputs, drawableFallback, renderQuality
+    );
     return std::move(evaluated.plan);
 }
 
 EvaluatedFramePlan SceneFrameGraph::evaluate(
     const SceneFrameInputs& inputs,
-    std::optional<FrameProjectionSize> drawableFallback
+    std::optional<FrameProjectionSize> drawableFallback,
+    FrameRenderQuality renderQuality
 ) const {
     const auto traceStarted = FrameGraphTraceClock::now();
     auto traceStageStarted = traceStarted;
@@ -4834,16 +6729,17 @@ EvaluatedFramePlan SceneFrameGraph::evaluate(
         initializationSnapshot,
         projection,
         resolvedInputs,
+        renderQuality,
         evaluation.get()
     ).initializeMaterialScripts();
     traceStage("materialScripts");
     FrameEvaluationState state(
-        graph_, graph_->snapshot(*evaluation), resolvedInputs
+        graph_, graph_->snapshot(*evaluation), resolvedInputs, renderQuality
     );
     traceStage("graphSnapshot");
     FramePlan plan = PlanBuilder(
         graph_->model(), state.graphSnapshot_, projection,
-        state.inputs_, evaluation.get()
+        state.inputs_, renderQuality, evaluation.get()
     ).build();
     traceStage("planBuild");
     state.scriptedValues_ = evaluation->evaluatedScriptValues();
@@ -4867,7 +6763,8 @@ EvaluatedFramePlan SceneFrameGraph::evaluate(
 
 FramePlan SceneFrameGraph::reproject(
     const FrameEvaluationState& evaluation,
-    std::optional<FrameProjectionSize> drawableFallback
+    std::optional<FrameProjectionSize> drawableFallback,
+    std::optional<FrameRenderQuality> renderQuality
 ) const {
     if (evaluation.graph_.get() != graph_.get()) {
         frameError(
@@ -4877,7 +6774,8 @@ FramePlan SceneFrameGraph::reproject(
     }
     FramePlan plan = PlanBuilder(
         graph_->model(), evaluation.graphSnapshot_, projectionSize(drawableFallback),
-        evaluation.inputs_, nullptr, &evaluation.scriptedValues_,
+        evaluation.inputs_, renderQuality.value_or(evaluation.renderQuality_),
+        nullptr, &evaluation.scriptedValues_,
         &evaluation.cursorInteractiveLayerIds_
     ).build();
     plan.scriptEvaluations = evaluation.scriptEvaluations_;
@@ -4885,8 +6783,9 @@ FramePlan SceneFrameGraph::reproject(
 }
 
 bool SceneFrameGraph::requiresDrawableProjectionFallback() const noexcept {
-    return graph_->model()->project().scene.camera.projectionAuto &&
-        !automaticProjectionSize_.has_value();
+    const SceneCamera& camera = graph_->model()->project().scene.camera;
+    return !camera.orthographic ||
+        (camera.projectionAuto && !automaticProjectionSize_.has_value());
 }
 
 std::shared_ptr<const SceneGraph> SceneFrameGraph::graph() const noexcept {

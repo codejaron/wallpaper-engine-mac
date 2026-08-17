@@ -368,7 +368,7 @@ final class FrameExecutorBridgeTests: XCTestCase {
         }
     }
 
-    func testLightCookieSamplerMetadataResolvesTheLinuxRuntimeAlias() throws {
+    func testLightCookieSamplerMetadataResolvesTheAssetTextureProvider() throws {
         let loaded = try loadLightCookieFrameGraph()
         defer {
             we_scene_frame_graph_destroy(loaded.frameGraph)
@@ -407,8 +407,8 @@ final class FrameExecutorBridgeTests: XCTestCase {
         )
         XCTAssertEqual(
             framebufferStats.framebuffer_count,
-            3,
-            "The active metadata default must keep output, its procedural source, and the light-cookie framebuffer alive"
+            2,
+            "The light-cookie sampler must use an asset texture instead of allocating a shadow-atlas framebuffer"
         )
         XCTAssertEqual(framebufferStats.depth_attachment_count, 0)
 
@@ -439,7 +439,7 @@ final class FrameExecutorBridgeTests: XCTestCase {
         XCTAssertTrue(
             pixels.withUnsafeBytes { raw in
                 stride(from: 0, to: raw.count, by: 4).allSatisfy { offset in
-                    raw[offset] == 0 &&
+                    raw[offset] == 255 &&
                         raw[offset + 1] == 0 &&
                         raw[offset + 2] == 0 &&
                         raw[offset + 3] == 255
@@ -1364,6 +1364,25 @@ final class FrameExecutorBridgeTests: XCTestCase {
         )
         XCTAssertEqual(we_scene_frame_executor_width(executor), 2)
         XCTAssertEqual(we_scene_frame_executor_height(executor), 2)
+
+        var ultraTarget = WEScenePhysicalRenderTarget(
+            backing_width: 4,
+            backing_height: 4,
+            quality: WE_SCENE_PHYSICAL_RENDER_ULTRA
+        )
+        inputs.time_seconds = 2
+        XCTAssertEqual(
+            we_scene_frame_executor_render_for_drawable_with_physical_render_target(
+                executor, &inputs, 4, 4,
+                WE_SCENE_PRESENTATION_STRETCH,
+                &ultraTarget,
+                &error
+            ),
+            1,
+            errorMessage(error)
+        )
+        XCTAssertEqual(we_scene_frame_executor_width(executor), 8)
+        XCTAssertEqual(we_scene_frame_executor_height(executor), 8)
     }
 
     func testPhysicalReplayResizesWithoutAdvancingEvaluation() throws {
@@ -1617,10 +1636,20 @@ final class FrameExecutorBridgeTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let assets = root.appendingPathComponent("assets", isDirectory: true)
         let shaders = assets.appendingPathComponent("shaders", isDirectory: true)
+        let cookieDirectory = assets
+            .appendingPathComponent("materials", isDirectory: true)
+            .appendingPathComponent("cookie", isDirectory: true)
         let package = root.appendingPathComponent("scene.pkg")
         try FileManager.default.createDirectory(
             at: shaders,
             withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: cookieDirectory,
+            withIntermediateDirectories: true
+        )
+        try makeRGBA8CookieTexture().write(
+            to: cookieDirectory.appendingPathComponent("flashlight1.tex")
         )
         try Data("""
         attribute vec3 a_Position;
@@ -2144,6 +2173,38 @@ final class FrameExecutorBridgeTests: XCTestCase {
         }
         table.append(payload)
         return table
+    }
+
+    private func makeRGBA8CookieTexture() -> Data {
+        var result = Data()
+        appendMagic("TEXV0005", to: &result)
+        appendMagic("TEXI0001", to: &result)
+        appendUInt32(0, to: &result) // ARGB8888, uploaded as RGBA bytes.
+        appendUInt32(1, to: &result) // No interpolation.
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(0, to: &result)
+        appendMagic("TEXB0003", to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(UInt32.max, to: &result)
+        appendUInt32(1, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(2, to: &result)
+        appendUInt32(0, to: &result)
+        appendUInt32(16, to: &result)
+        appendUInt32(16, to: &result)
+        result.append(contentsOf: Array(
+            repeating: [UInt8(255), 0, 0, 255], count: 4
+        ).flatMap { $0 })
+        return result
+    }
+
+    private func appendMagic(_ value: String, to data: inout Data) {
+        precondition(value.utf8.count == 8)
+        data.append(contentsOf: value.utf8)
+        data.append(0)
     }
 
     private func appendUInt32(_ value: UInt32, to data: inout Data) {

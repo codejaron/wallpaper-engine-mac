@@ -337,6 +337,8 @@ struct ScenePresentationLayout: Equatable {
         switch quality {
         case .high:
             return nil
+        case .ultra:
+            bridgeQuality = WE_SCENE_PHYSICAL_RENDER_ULTRA
         case .balanced:
             bridgeQuality = WE_SCENE_PHYSICAL_RENDER_BALANCED
         case .powerSaving:

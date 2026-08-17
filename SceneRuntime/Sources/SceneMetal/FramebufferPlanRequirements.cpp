@@ -11,7 +11,7 @@ namespace {
 }
 
 bool depthEnabled(DepthMode mode) noexcept {
-    return mode == DepthMode::enabled;
+    return mode != DepthMode::disabled;
 }
 
 }  // namespace
@@ -136,9 +136,16 @@ FramebufferPlanRequirements analyzeFramebufferPlanRequirements(
                 static_cast<void>(slot);
                 for (const FrameTextureCandidate& candidate :
                      binding.candidates) {
-                    requireResource(
-                        candidate.resource, "Frame render texture candidate"
-                    );
+                    if (candidate.resource.kind ==
+                        FrameResourceKind::framebuffer) {
+                        requireFramebuffer(
+                            candidate.resource,
+                            "Frame render texture candidate",
+                            binding.sampleDepth ||
+                                candidate.resource.logicalName ==
+                                    "_rt_shadowAtlas"
+                        );
+                    }
                 }
             }
         } else if (const auto* command =
@@ -155,7 +162,11 @@ FramebufferPlanRequirements analyzeFramebufferPlanRequirements(
             );
         } else if (const auto* command =
                        std::get_if<FrameClearCommand>(&operation)) {
-            requireFramebuffer(command->destination, "Frame clear destination");
+            requireFramebuffer(
+                command->destination,
+                "Frame clear destination",
+                command->clearDepth
+            );
         } else if (const auto* command =
                        std::get_if<FrameTextCommand>(&operation)) {
             requireFramebuffer(command->destination, "Frame text destination");

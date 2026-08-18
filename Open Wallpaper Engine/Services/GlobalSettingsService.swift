@@ -417,9 +417,10 @@ class GlobalSettingsViewModel: ObservableObject {
         self.didCurrentWallpaperChangeCancellable =
         AppDelegate.shared.wallpaperViewModel.$wallpapers
             .sink { [weak self] wallpapers in
-                let mainId = WallpaperViewModel.mainScreenId()
-                if let wp = wallpapers[mainId] {
-                    self?.didCurrentWallpaperChange(wp)
+                guard let self else { return }
+                guard self.settings.adjustMenuBarTint else { return }
+                for (screenId, wallpaper) in wallpapers {
+                    self.didCurrentWallpaperChange(wallpaper, screenId: screenId)
                 }
             }
         
@@ -496,17 +497,15 @@ class GlobalSettingsViewModel: ObservableObject {
                 try? NSWorkspace.shared.setDesktopImageURL(wallpaper, for: .main!)
             }
         } else {
-            do {
-                let url = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "staticWP_\(AppDelegate.shared.wallpaperViewModel.currentWallpaper.wallpaperDirectory.hashValue).tiff")
-                try NSWorkspace.shared.setDesktopImageURL(url, for: .main!)
-            } catch {
-                print(error)
+            let wallpaperViewModel = AppDelegate.shared.wallpaperViewModel
+            for (screenId, wallpaper) in wallpaperViewModel.wallpapers {
+                AppDelegate.shared.setPlaceholderWallpaper(with: wallpaper, for: screenId)
             }
         }
     }
     
-    func didCurrentWallpaperChange(_ newValue: WEWallpaper) {
-        AppDelegate.shared.setPlacehoderWallpaper(with: newValue)
+    func didCurrentWallpaperChange(_ newValue: WEWallpaper, screenId: String) {
+        AppDelegate.shared.setPlaceholderWallpaper(with: newValue, for: screenId)
     }
     
     func reset() {

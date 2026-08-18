@@ -102,6 +102,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     
     var eventHandler: Any?
     var localEventHandler: Any?
+
+    /// Monotonically increasing requests prevent an asynchronous frame
+    /// extraction from an older wallpaper from replacing the current one.
+    private var placeholderWallpaperRevisions: [String: UInt64] = [:]
     
     static var shared = AppDelegate()
     
@@ -146,7 +150,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard runtimeMode == .application else { return }
         saveCurrentWallpaper()
-        AppDelegate.shared.setPlacehoderWallpaper(with: wallpaperViewModel.currentWallpaper)
+        if globalSettingsViewModel.settings.adjustMenuBarTint {
+            for (screenId, wallpaper) in wallpaperViewModel.wallpapers {
+                setPlaceholderWallpaper(with: wallpaper, for: screenId)
+            }
+        }
 
         reconcileWallpaperWindowVisibility()
         
@@ -462,34 +470,101 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         UserDefaults.standard.set(wallpaper, forKey: "OSWallpaper")
     }
     
-    func setPlacehoderWallpaper(with wallpaper: WEWallpaper) {
-        switch wallpaper.project.type {
-        case "video":
-            let asset = AVAsset(url: wallpaper.wallpaperDirectory.appending(component: wallpaper.project.file))
-            let imageGenerator = AVAssetImageGenerator(asset: asset)
+    /// Updates the static desktop image used by macOS to derive menu-bar tint.
+    /// The live wallpaper remains rendered by the app; this image is only a
+    /// system-facing snapshot/preview.
+    func setPlaceholderWallpaper(with wallpaper: WEWallpaper, for screenId: String) {
+        guard wallpaper.project != .invalid else { return }
+
+        let revision = (placeholderWallpaperRevisions[screenId] ?? 0) &+ 1
+        placeholderWallpaperRevisions[screenId] = revision
+        let type = wallpaper.project.type.lowercased()
+
+        if type == "video" {
+            let assetURL = wallpaper.wallpaperDirectory.appending(path: wallpaper.project.file)
+            let imageGenerator = AVAssetImageGenerator(asset: AVAsset(url: assetURL))
             imageGenerator.appliesPreferredTrackTransform = true
-            
-            let time = CMTimeMake(value: 1, timescale: 1) // 第一帧的时间
-            imageGenerator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, cgImage, _, _, error in
-                if let error = error {
-                    print(error)
-                } else if let cgImage = cgImage {
-                    let nsImage = NSImage(cgImage: cgImage, size: .zero)
-                    if let data = nsImage.tiffRepresentation {
-                        do {
-                            let url = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "staticWP_\(wallpaper.wallpaperDirectory.hashValue).tiff")
-                            try data.write(to: url, options: .atomic)
-                            for screen in NSScreen.screens {
-                                try NSWorkspace.shared.setDesktopImageURL(url, for: screen)
-                            }
-                        } catch {
-                            print(error)
-                        }
-                    }
+            let time = CMTime(value: 1, timescale: 1)
+            imageGenerator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) {
+                [weak self] _, cgImage, _, _, error in
+                guard let self else { return }
+                if let error {
+                    NSLog("[Wallpaper] Failed to create desktop preview for %@: %@", wallpaper.project.title, error.localizedDescription)
+                    return
+                }
+                guard let cgImage else {
+                    NSLog("[Wallpaper] Video preview returned no image for %@", wallpaper.project.title)
+                    return
+                }
+                let image = NSImage(cgImage: cgImage, size: .zero)
+                DispatchQueue.main.async {
+                    self.applyPlaceholderWallpaper(
+                        image,
+                        for: wallpaper,
+                        screenId: screenId,
+                        revision: revision
+                    )
                 }
             }
-        default:
             return
+        }
+
+        let previewURL = wallpaper.wallpaperDirectory.appending(path: wallpaper.project.preview)
+        guard let image = NSImage(contentsOf: previewURL) else {
+            NSLog("[Wallpaper] Preview image is unavailable for %@: %@", wallpaper.project.title, previewURL.path)
+            return
+        }
+        applyPlaceholderWallpaper(
+            image,
+            for: wallpaper,
+            screenId: screenId,
+            revision: revision
+        )
+    }
+
+    /// Applies a snapshot captured from a Web wallpaper. It shares the same
+    /// cache and stale-request checks as video/scene previews.
+    func applyPlaceholderWallpaper(
+        _ image: NSImage,
+        for wallpaper: WEWallpaper,
+        screenId: String
+    ) {
+        guard globalSettingsViewModel.settings.adjustMenuBarTint else { return }
+        guard wallpaperViewModel.wallpaper(for: screenId).scenePropertyIdentity ==
+                wallpaper.scenePropertyIdentity else { return }
+        applyPlaceholderWallpaper(
+            image,
+            for: wallpaper,
+            screenId: screenId,
+            revision: placeholderWallpaperRevisions[screenId] ?? 0
+        )
+    }
+
+    private func applyPlaceholderWallpaper(
+        _ image: NSImage,
+        for wallpaper: WEWallpaper,
+        screenId: String,
+        revision: UInt64
+    ) {
+        guard placeholderWallpaperRevisions[screenId] == revision else { return }
+        guard let data = image.tiffRepresentation else {
+            NSLog("[Wallpaper] Failed to encode desktop preview for %@", wallpaper.project.title)
+            return
+        }
+        guard let screen = NSScreen.screens.first(where: {
+            WallpaperViewModel.screenId(for: $0) == screenId
+        }) else {
+            NSLog("[Wallpaper] Screen %@ is unavailable while applying desktop preview", screenId)
+            return
+        }
+
+        let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appending(path: "staticWP_\(wallpaper.scenePropertyIdentity.hashValue).tiff")
+        do {
+            try data.write(to: cacheURL, options: .atomic)
+            try NSWorkspace.shared.setDesktopImageURL(cacheURL, for: screen)
+        } catch {
+            NSLog("[Wallpaper] Failed to apply desktop preview for %@: %@", wallpaper.project.title, error.localizedDescription)
         }
     }
 }

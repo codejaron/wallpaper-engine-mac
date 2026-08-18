@@ -170,14 +170,12 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
         if AppDelegate.shared.globalSettingsViewModel.settings.adjustMenuBarTint {
             webView.takeSnapshot(with: nil) { [weak self] nsImage, error in
                 guard let self = self else { return }
-                if let data = nsImage?.tiffRepresentation {
-                    do {
-                        let url = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "staticWP_\(self.currentWallpaper.wallpaperDirectory.hashValue).tiff")
-                        try data.write(to: url, options: .atomic)
-                        try NSWorkspace.shared.setDesktopImageURL(url, for: .main!)
-                    } catch {
-                        print(error)
-                    }
+                if let nsImage {
+                    AppDelegate.shared.applyPlaceholderWallpaper(
+                        nsImage,
+                        for: self.currentWallpaper,
+                        screenId: self.screenId
+                    )
                 }
             }
         }

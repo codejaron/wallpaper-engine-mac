@@ -28,6 +28,62 @@ enum SceneRuntimeSessionError: LocalizedError {
     }
 }
 
+struct SceneRenderedFrameRGBA8: Sendable {
+    let width: UInt32
+    let height: UInt32
+    let pixels: Data
+}
+
+private final class SceneRenderedFrameCaptureRequest: @unchecked Sendable {
+    let width: UInt32
+    let height: UInt32
+    let completion: @Sendable (
+        Result<SceneRenderedFrameRGBA8, SceneRuntimeSessionError>
+    ) -> Void
+
+    init(
+        width: UInt32,
+        height: UInt32,
+        completion: @escaping @Sendable (
+            Result<SceneRenderedFrameRGBA8, SceneRuntimeSessionError>
+        ) -> Void
+    ) {
+        self.width = width
+        self.height = height
+        self.completion = completion
+    }
+}
+
+private func receiveSceneRenderedFrame(
+    context: UnsafeMutableRawPointer?,
+    pixels: UnsafePointer<UInt8>?,
+    pixelCount: Int,
+    errorMessage: UnsafePointer<CChar>?
+) {
+    guard let context else { return }
+    let request = Unmanaged<SceneRenderedFrameCaptureRequest>
+        .fromOpaque(context)
+        .takeRetainedValue()
+    if let errorMessage {
+        request.completion(.failure(.runtime(String(cString: errorMessage))))
+        return
+    }
+    let expectedCount = UInt64(request.width) * UInt64(request.height) * 4
+    guard let pixels,
+          expectedCount <= UInt64(Int.max),
+          pixelCount == Int(expectedCount) else {
+        request.completion(.failure(.runtime(
+            "Rendered Scene frame has an invalid asynchronous RGBA8 layout"
+        )))
+        return
+    }
+    request.completion(.success(SceneRenderedFrameRGBA8(
+        width: request.width,
+        height: request.height,
+        pixels: Data(bytes: pixels, count: pixelCount)
+    )))
+}
+
 /// Owns one complete SceneRuntime pipeline for one screen and one Metal device.
 /// Handles are destroyed in strict reverse dependency order.
 @MainActor
@@ -148,6 +204,45 @@ final class SceneRuntimeSession {
             &error
         ) == 1 else {
             throw bridgeError("Updating Scene pointer state", error)
+        }
+    }
+
+    func captureRenderedFrame(
+        completion: @escaping @Sendable (
+            Result<SceneRenderedFrameRGBA8, SceneRuntimeSessionError>
+        ) -> Void
+    ) throws {
+        guard let executor else {
+            throw SceneRuntimeSessionError.runtime("Scene executor is not available")
+        }
+        let width = we_scene_frame_executor_width(executor)
+        let height = we_scene_frame_executor_height(executor)
+        let expectedByteCount = UInt64(width) * UInt64(height) * 4
+        guard width > 0,
+              height > 0,
+              expectedByteCount <= UInt64(Int.max),
+              we_scene_frame_executor_rgba8_byte_count(executor) ==
+                Int(expectedByteCount) else {
+            throw SceneRuntimeSessionError.runtime(
+                "Rendered Scene frame has an invalid RGBA8 layout"
+            )
+        }
+
+        let request = Unmanaged.passRetained(SceneRenderedFrameCaptureRequest(
+            width: width,
+            height: height,
+            completion: completion
+        ))
+        var error: WESceneRuntimeErrorRef?
+        let result = we_scene_frame_executor_read_rgba8_async(
+            executor,
+            request.toOpaque(),
+            receiveSceneRenderedFrame,
+            &error
+        )
+        guard result == 1 else {
+            request.release()
+            throw bridgeError("Scheduling rendered Scene frame capture", error)
         }
     }
 

@@ -2129,6 +2129,100 @@ void Device::Session::readRGBA8(
     }
 }
 
+void Device::Session::readRGBA8Async(
+    const FramebufferResource& framebuffer,
+    std::function<void(std::vector<std::uint8_t>, std::string)> completion
+) {
+    if (!completion) {
+        throw Error(
+            ErrorCode::invalidArgument,
+            "RGBA8 readback completion is required"
+        );
+    }
+    if (!framebuffer ||
+        (framebuffer.format != PixelFormat::rgba8 &&
+         framebuffer.format != PixelFormat::bgra8)) {
+        throw Error(
+            ErrorCode::readback,
+            "RGBA8 readback requires an RGBA8 or BGRA8 Metal framebuffer"
+        );
+    }
+    const std::size_t rowBytes =
+        static_cast<std::size_t>(framebuffer.width) * 4;
+    const std::size_t required = rowBytes * framebuffer.height;
+    const std::size_t alignedRowBytes = (rowBytes + 255) & ~std::size_t(255);
+    id<MTLDevice> device = object<id<MTLDevice>>(device_.device_);
+    id<MTLBuffer> buffer = [device
+        newBufferWithLength:alignedRowBytes * framebuffer.height
+        options:MTLResourceStorageModeShared];
+    if (buffer == nil) {
+        throw Error(
+            ErrorCode::readback,
+            "Metal failed to allocate the asynchronous readback buffer"
+        );
+    }
+    MetalObject retainedBuffer = retainOwnedObject(buffer);
+    id<MTLCommandBuffer> commandBuffer =
+        object<id<MTLCommandBuffer>>(commandBuffer_);
+    id<MTLBlitCommandEncoder> encoder = [commandBuffer blitCommandEncoder];
+    if (encoder == nil) {
+        throw Error(
+            ErrorCode::readback,
+            "Metal failed to encode asynchronous framebuffer readback"
+        );
+    }
+    [encoder copyFromTexture:object<id<MTLTexture>>(
+                                 framebuffer.colorTexture.texture
+                             )
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(
+                       framebuffer.width, framebuffer.height, 1
+                   )
+                     toBuffer:buffer
+            destinationOffset:0
+       destinationBytesPerRow:alignedRowBytes
+     destinationBytesPerImage:alignedRowBytes * framebuffer.height];
+    [encoder endEncoding];
+
+    const PixelFormat format = framebuffer.format;
+    const std::uint32_t height = framebuffer.height;
+    auto handler = std::move(completion);
+    [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        if (completed.status == MTLCommandBufferStatusError) {
+            handler({}, "Metal command buffer failed: " + diagnostic(completed.error));
+            return;
+        }
+        try {
+            std::vector<std::uint8_t> pixels(required);
+            const auto* bytes = static_cast<const std::uint8_t*>(buffer.contents);
+            for (std::size_t row = 0; row < height; ++row) {
+                const auto* source = bytes + row * alignedRowBytes;
+                auto* destination = pixels.data() + row * rowBytes;
+                if (format == PixelFormat::rgba8) {
+                    std::memcpy(destination, source, rowBytes);
+                    continue;
+                }
+                for (std::size_t column = 0; column < rowBytes / 4; ++column) {
+                    const std::size_t offset = column * 4;
+                    destination[offset] = source[offset + 2];
+                    destination[offset + 1] = source[offset + 1];
+                    destination[offset + 2] = source[offset];
+                    destination[offset + 3] = source[offset + 3];
+                }
+            }
+            handler(std::move(pixels), {});
+        } catch (const std::exception& error) {
+            handler({}, "Copying asynchronous RGBA8 readback failed: " +
+                std::string(error.what()));
+        } catch (...) {
+            handler({}, "Copying asynchronous RGBA8 readback failed");
+        }
+    }];
+    finish(false);
+}
+
 void Device::Session::finish(bool waitForCompletion) {
     if (finished_) return;
     id<MTLCommandBuffer> commandBuffer =

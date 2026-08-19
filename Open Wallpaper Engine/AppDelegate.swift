@@ -8,7 +8,9 @@
 import Cocoa
 import SwiftUI
 import AVKit
+import ImageIO
 import SceneAudio
+import UniformTypeIdentifiers
 import WebKit
 
 private enum ApplicationRuntimeMode: Equatable {
@@ -480,7 +482,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         placeholderWallpaperRevisions[screenId] = revision
         let type = wallpaper.project.type.lowercased()
 
-        if type == "video" {
+        switch type {
+        case "video":
             let assetURL = wallpaper.wallpaperDirectory.appending(path: wallpaper.project.file)
             let imageGenerator = AVAssetImageGenerator(asset: AVAsset(url: assetURL))
             imageGenerator.appliesPreferredTrackTransform = true
@@ -506,20 +509,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     )
                 }
             }
+        case "scene", "web":
+            // Scene publishes an asynchronous Metal readback after its first
+            // rendered frame. Web publishes a WKWebView snapshot after load.
+            // Workshop previews are commonly 240x240 and must not become the
+            // system image that macOS also uses for the lock screen.
             return
+        default:
+            NSLog(
+                "[Wallpaper] Cannot create a desktop preview for unsupported type '%@'",
+                wallpaper.project.type
+            )
         }
-
-        let previewURL = wallpaper.wallpaperDirectory.appending(path: wallpaper.project.preview)
-        guard let image = NSImage(contentsOf: previewURL) else {
-            NSLog("[Wallpaper] Preview image is unavailable for %@: %@", wallpaper.project.title, previewURL.path)
-            return
-        }
-        applyPlaceholderWallpaper(
-            image,
-            for: wallpaper,
-            screenId: screenId,
-            revision: revision
-        )
     }
 
     /// Applies a snapshot captured from a Web wallpaper. It shares the same
@@ -540,6 +541,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
+    func applyPlaceholderWallpaper(
+        _ frame: SceneRenderedFrameRGBA8,
+        for wallpaper: WEWallpaper,
+        screenId: String
+    ) {
+        guard globalSettingsViewModel.settings.adjustMenuBarTint else { return }
+        guard wallpaperViewModel.wallpaper(for: screenId).scenePropertyIdentity ==
+                wallpaper.scenePropertyIdentity else { return }
+        do {
+            try applyPlaceholderWallpaper(
+                DesktopWallpaperImageRenderer.cgImage(from: frame),
+                for: wallpaper,
+                screenId: screenId,
+                revision: placeholderWallpaperRevisions[screenId] ?? 0
+            )
+        } catch {
+            NSLog(
+                "[Wallpaper] Failed to convert Scene preview for %@: %@",
+                wallpaper.project.title,
+                error.localizedDescription
+            )
+        }
+    }
+
     private func applyPlaceholderWallpaper(
         _ image: NSImage,
         for wallpaper: WEWallpaper,
@@ -547,10 +572,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         revision: UInt64
     ) {
         guard placeholderWallpaperRevisions[screenId] == revision else { return }
-        guard let data = image.tiffRepresentation else {
-            NSLog("[Wallpaper] Failed to encode desktop preview for %@", wallpaper.project.title)
-            return
+        do {
+            try applyPlaceholderWallpaper(
+                DesktopWallpaperImageRenderer.cgImage(from: image),
+                for: wallpaper,
+                screenId: screenId,
+                revision: revision
+            )
+        } catch {
+            NSLog(
+                "[Wallpaper] Failed to convert desktop preview for %@: %@",
+                wallpaper.project.title,
+                error.localizedDescription
+            )
         }
+    }
+
+    private func applyPlaceholderWallpaper(
+        _ image: CGImage,
+        for wallpaper: WEWallpaper,
+        screenId: String,
+        revision: UInt64
+    ) throws {
+        guard placeholderWallpaperRevisions[screenId] == revision else { return }
         guard let screen = NSScreen.screens.first(where: {
             WallpaperViewModel.screenId(for: $0) == screenId
         }) else {
@@ -558,13 +602,55 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
+        let scale = screen.backingScaleFactor
+        let pixelWidth = Int((screen.frame.width * scale).rounded())
+        let pixelHeight = Int((screen.frame.height * scale).rounded())
         let cacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appending(path: "staticWP_\(wallpaper.scenePropertyIdentity.hashValue).tiff")
-        do {
+            .appending(
+                path: "staticWP_\(wallpaper.scenePropertyIdentity.hashValue)_"
+                    + "\(screenId)_\(revision).png"
+            )
+        let source = DesktopWallpaperRasterSource(image: image)
+        let title = wallpaper.project.title
+        let identity = wallpaper.scenePropertyIdentity
+        let renderingTask = Task.detached(priority: .utility) {
+            let data = try DesktopWallpaperImageRenderer.pngData(
+                from: source.image,
+                pixelWidth: pixelWidth,
+                pixelHeight: pixelHeight
+            )
             try data.write(to: cacheURL, options: .atomic)
-            try NSWorkspace.shared.setDesktopImageURL(cacheURL, for: screen)
-        } catch {
-            NSLog("[Wallpaper] Failed to apply desktop preview for %@: %@", wallpaper.project.title, error.localizedDescription)
+        }
+        Task { [weak self] in
+            do {
+                try await renderingTask.value
+                guard let self,
+                      self.globalSettingsViewModel.settings.adjustMenuBarTint,
+                      self.placeholderWallpaperRevisions[screenId] == revision,
+                      self.wallpaperViewModel.wallpaper(for: screenId)
+                        .scenePropertyIdentity == identity,
+                      let currentScreen = NSScreen.screens.first(where: {
+                          WallpaperViewModel.screenId(for: $0) == screenId
+                      }) else {
+                    try? FileManager.default.removeItem(at: cacheURL)
+                    return
+                }
+                try NSWorkspace.shared.setDesktopImageURL(
+                    cacheURL,
+                    for: currentScreen,
+                    options: [
+                        .imageScaling:
+                            NSImageScaling.scaleProportionallyUpOrDown.rawValue,
+                        .allowClipping: true,
+                    ]
+                )
+            } catch {
+                NSLog(
+                    "[Wallpaper] Failed to apply desktop preview for %@: %@",
+                    title,
+                    error.localizedDescription
+                )
+            }
         }
     }
 }
@@ -588,4 +674,137 @@ enum SettingsToolbarIdentifiers {
     static let general = NSToolbarItem.Identifier(rawValue: "general")
     static let plugins = NSToolbarItem.Identifier(rawValue: "plugins")
     static let about = NSToolbarItem.Identifier(rawValue: "about")
+}
+
+private struct DesktopWallpaperRasterSource: @unchecked Sendable {
+    let image: CGImage
+}
+
+enum DesktopWallpaperImageRenderingError: LocalizedError {
+    case invalidTargetSize(width: Int, height: Int)
+    case missingSourceImage
+    case invalidRGBA8Frame
+    case contextCreationFailed
+    case destinationCreationFailed
+    case encodingFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidTargetSize(let width, let height):
+            return "Desktop preview target size is invalid: \(width)x\(height)"
+        case .missingSourceImage:
+            return "Desktop preview source has no raster image"
+        case .invalidRGBA8Frame:
+            return "Desktop preview source has an invalid RGBA8 layout"
+        case .contextCreationFailed:
+            return "Desktop preview bitmap context could not be created"
+        case .destinationCreationFailed:
+            return "Desktop preview PNG destination could not be created"
+        case .encodingFailed:
+            return "Desktop preview PNG encoding failed"
+        }
+    }
+}
+
+enum DesktopWallpaperImageRenderer {
+    static func cgImage(from image: NSImage) throws -> CGImage {
+        var proposedRect = NSRect(origin: .zero, size: image.size)
+        guard let source = image.cgImage(
+            forProposedRect: &proposedRect,
+            context: nil,
+            hints: nil
+        ) else {
+            throw DesktopWallpaperImageRenderingError.missingSourceImage
+        }
+        return source
+    }
+
+    static func cgImage(from frame: SceneRenderedFrameRGBA8) throws -> CGImage {
+        let width = Int(frame.width)
+        let height = Int(frame.height)
+        guard width > 0,
+              height > 0,
+              frame.pixels.count == width * height * 4,
+              let provider = CGDataProvider(data: frame.pixels as CFData),
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let image = CGImage(
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bitsPerPixel: 32,
+                  bytesPerRow: width * 4,
+                  space: colorSpace,
+                  bitmapInfo: CGBitmapInfo(
+                      rawValue: CGImageAlphaInfo.premultipliedLast.rawValue |
+                          CGBitmapInfo.byteOrder32Big.rawValue
+                  ),
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: false,
+                  intent: .defaultIntent
+              ) else {
+            throw DesktopWallpaperImageRenderingError.invalidRGBA8Frame
+        }
+        return image
+    }
+
+    static func pngData(
+        from source: CGImage,
+        pixelWidth: Int,
+        pixelHeight: Int
+    ) throws -> Data {
+        guard pixelWidth > 0, pixelHeight > 0 else {
+            throw DesktopWallpaperImageRenderingError.invalidTargetSize(
+                width: pixelWidth,
+                height: pixelHeight
+            )
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                  data: nil,
+                  width: pixelWidth,
+                  height: pixelHeight,
+                  bitsPerComponent: 8,
+                  bytesPerRow: 0,
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue |
+                      CGBitmapInfo.byteOrder32Big.rawValue
+              ) else {
+            throw DesktopWallpaperImageRenderingError.contextCreationFailed
+        }
+
+        let horizontalScale = CGFloat(pixelWidth) / CGFloat(source.width)
+        let verticalScale = CGFloat(pixelHeight) / CGFloat(source.height)
+        let scale = max(horizontalScale, verticalScale)
+        let renderedSize = CGSize(
+            width: CGFloat(source.width) * scale,
+            height: CGFloat(source.height) * scale
+        )
+        let destinationRect = CGRect(
+            x: (CGFloat(pixelWidth) - renderedSize.width) / 2,
+            y: (CGFloat(pixelHeight) - renderedSize.height) / 2,
+            width: renderedSize.width,
+            height: renderedSize.height
+        )
+        context.interpolationQuality = .high
+        context.draw(source, in: destinationRect)
+        guard let rendered = context.makeImage() else {
+            throw DesktopWallpaperImageRenderingError.contextCreationFailed
+        }
+
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data,
+            UTType.png.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw DesktopWallpaperImageRenderingError.destinationCreationFailed
+        }
+        CGImageDestinationAddImage(destination, rendered, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            throw DesktopWallpaperImageRenderingError.encodingFailed
+        }
+        return data as Data
+    }
 }

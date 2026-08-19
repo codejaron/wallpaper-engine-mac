@@ -449,6 +449,24 @@ struct SceneWallpaperView: View {
                         )
                     }
                 },
+                captureDesktopPreview:
+                    globalSettingsViewModel.settings.adjustMenuBarTint,
+                onDesktopPreview: { result in
+                    switch result {
+                    case .success(let frame):
+                        AppDelegate.shared.applyPlaceholderWallpaper(
+                            frame,
+                            for: wallpaper,
+                            screenId: screenId
+                        )
+                    case .failure(let error):
+                        NSLog(
+                            "[Wallpaper] Failed to capture Scene preview for %@: %@",
+                            wallpaper.project.title,
+                            error.localizedDescription
+                        )
+                    }
+                },
                 errorMessage: $errorMessage
             )
             if let errorMessage {
@@ -484,6 +502,10 @@ private struct SceneMetalRepresentable: NSViewRepresentable {
     let propertyOverrides: [String: ScenePropertyValue]
     let onPropertiesLoaded: ([ScenePropertyDefinition]?) -> Void
     let onRuntimeError: (String?) -> Void
+    let captureDesktopPreview: Bool
+    let onDesktopPreview: (
+        Result<SceneRenderedFrameRGBA8, SceneRuntimeSessionError>
+    ) -> Void
     @Binding var errorMessage: String?
 
     func makeNSView(context: Context) -> SceneMetalContainerView {
@@ -495,6 +517,7 @@ private struct SceneMetalRepresentable: NSViewRepresentable {
             }
         }
         view.onPropertiesLoaded = onPropertiesLoaded
+        view.onDesktopPreview = onDesktopPreview
         view.setSystemAudioCaptureEnabled(systemAudioCaptureEnabled)
         view.configure(
             wallpaper: wallpaper,
@@ -512,6 +535,7 @@ private struct SceneMetalRepresentable: NSViewRepresentable {
         )
         view.setMediaSnapshot(mediaSnapshot)
         view.setFramesPerSecond(framesPerSecond)
+        view.setDesktopPreviewCaptureEnabled(captureDesktopPreview)
         return view
     }
 
@@ -523,6 +547,7 @@ private struct SceneMetalRepresentable: NSViewRepresentable {
             }
         }
         view.onPropertiesLoaded = onPropertiesLoaded
+        view.onDesktopPreview = onDesktopPreview
         view.setSystemAudioCaptureEnabled(systemAudioCaptureEnabled)
         view.configure(
             wallpaper: wallpaper,
@@ -540,6 +565,7 @@ private struct SceneMetalRepresentable: NSViewRepresentable {
         )
         view.setMediaSnapshot(mediaSnapshot)
         view.setFramesPerSecond(framesPerSecond)
+        view.setDesktopPreviewCaptureEnabled(captureDesktopPreview)
     }
 
     static func dismantleNSView(_ view: SceneMetalContainerView, coordinator: ()) {
@@ -553,6 +579,11 @@ final class SceneMetalContainerView: NSView {
     }
     var onPropertiesLoaded: (([ScenePropertyDefinition]?) -> Void)? {
         didSet { metalView?.onPropertiesLoaded = onPropertiesLoaded }
+    }
+    var onDesktopPreview: ((
+        Result<SceneRenderedFrameRGBA8, SceneRuntimeSessionError>
+    ) -> Void)? {
+        didSet { metalView?.onDesktopPreview = onDesktopPreview }
     }
 
     private let metalView: SceneMetalView?
@@ -624,6 +655,10 @@ final class SceneMetalContainerView: NSView {
 
     func setFramesPerSecond(_ value: Double) { metalView?.setFramesPerSecond(value) }
 
+    func setDesktopPreviewCaptureEnabled(_ enabled: Bool) {
+        metalView?.setDesktopPreviewCaptureEnabled(enabled)
+    }
+
     func forwardDesktopLeftMouseButton(isDown: Bool) {
         metalView?.setPointerState(active: true, leftDown: isDown)
     }
@@ -646,6 +681,9 @@ private final class SceneMetalView: MTKView, MTKViewDelegate {
 
     var onError: ((String?) -> Void)?
     var onPropertiesLoaded: (([ScenePropertyDefinition]?) -> Void)?
+    var onDesktopPreview: ((
+        Result<SceneRenderedFrameRGBA8, SceneRuntimeSessionError>
+    ) -> Void)?
 
     private var session: SceneRuntimeSession?
     private var requestedWallpaper: WEWallpaper?
@@ -692,6 +730,8 @@ private final class SceneMetalView: MTKView, MTKViewDelegate {
     private var lastReportedFatalIssue: String?
     private var lastReportedAudioIssue: String?
     private var frameStats = SceneDrawFrameStats()
+    private var desktopPreviewCaptureEnabled = false
+    private var desktopPreviewCaptureAttemptedIdentity: SessionIdentity?
 
     private lazy var clearCommandQueue = device?.makeCommandQueue()
 
@@ -741,6 +781,7 @@ private final class SceneMetalView: MTKView, MTKViewDelegate {
         sessionRetryAttempt = 0
         attemptedIdentity = nil
         activeIdentity = nil
+        desktopPreviewCaptureAttemptedIdentity = nil
         closeSession()
         propertyConfigurationValid = false
         hasRenderedFrame = false
@@ -871,6 +912,15 @@ private final class SceneMetalView: MTKView, MTKViewDelegate {
         updateDisplayLink()
     }
 
+    func setDesktopPreviewCaptureEnabled(_ enabled: Bool) {
+        guard desktopPreviewCaptureEnabled != enabled else { return }
+        desktopPreviewCaptureEnabled = enabled
+        if enabled {
+            desktopPreviewCaptureAttemptedIdentity = nil
+            requestDesktopPreviewIfNeeded()
+        }
+    }
+
     func setPointerState(active: Bool, leftDown: Bool) {
         guard let session else { return }
         do {
@@ -995,6 +1045,7 @@ private final class SceneMetalView: MTKView, MTKViewDelegate {
                 )
                 hasRenderedFrame = true
             }
+            requestDesktopPreviewIfNeeded()
             let finished = CACurrentMediaTime()
             let displayLabel = displaySequence.map(String.init) ?? "none"
             let flushMilliseconds = 0.0
@@ -1032,6 +1083,7 @@ private final class SceneMetalView: MTKView, MTKViewDelegate {
         requestedIdentity = nil
         requestedWallpaper = nil
         requestedPropertyOverrides = [:]
+        desktopPreviewCaptureAttemptedIdentity = nil
         propertyConfigurationValid = false
         hasRenderedFrame = false
         runtimeSeconds = 0
@@ -1184,6 +1236,28 @@ private final class SceneMetalView: MTKView, MTKViewDelegate {
         encoder.endEncoding()
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+
+    private func requestDesktopPreviewIfNeeded() {
+        guard desktopPreviewCaptureEnabled,
+              hasRenderedFrame,
+              let activeIdentity,
+              desktopPreviewCaptureAttemptedIdentity != activeIdentity,
+              let session else { return }
+        desktopPreviewCaptureAttemptedIdentity = activeIdentity
+        do {
+            try session.captureRenderedFrame { [weak self] result in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.activeIdentity == activeIdentity else { return }
+                    self.onDesktopPreview?(result)
+                }
+            }
+        } catch let error as SceneRuntimeSessionError {
+            onDesktopPreview?(.failure(error))
+        } catch {
+            onDesktopPreview?(.failure(.runtime(error.localizedDescription)))
+        }
     }
 
     private func closeSession() {

@@ -1228,6 +1228,22 @@ int we_scene_frame_executor_read_rgba8(
     size_t output_length,
     WESceneRuntimeErrorRef* out_error
 );
+// Schedules a non-blocking readback of the current rendered frame. Pixel and
+// error pointers are borrowed and remain valid only for the callback duration.
+// Scheduling failures are returned synchronously through out_error and do not
+// invoke the callback.
+typedef void (*WESceneFrameExecutorRGBA8Callback)(
+    void* context,
+    const uint8_t* pixels,
+    size_t pixel_count,
+    const char* error_message
+);
+int we_scene_frame_executor_read_rgba8_async(
+    WESceneFrameExecutorRef executor,
+    void* context,
+    WESceneFrameExecutorRGBA8Callback callback,
+    WESceneRuntimeErrorRef* out_error
+);
 
 WESceneFramePlanRef we_scene_frame_graph_plan_create(
     WESceneFrameGraphRef graph,

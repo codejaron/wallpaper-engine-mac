@@ -3,9 +3,108 @@ import SceneMetalTestSupport
 import SceneRuntimeBridge
 import XCTest
 
+private final class AsyncRGBA8ReadbackBox: @unchecked Sendable {
+    let expectation: XCTestExpectation
+    private let lock = NSLock()
+    private(set) var pixels = Data()
+    private(set) var errorMessage: String?
+
+    init(expectation: XCTestExpectation) {
+        self.expectation = expectation
+    }
+
+    func finish(
+        pixels: UnsafePointer<UInt8>?,
+        pixelCount: Int,
+        errorMessage: UnsafePointer<CChar>?
+    ) {
+        lock.lock()
+        if let pixels {
+            self.pixels = Data(bytes: pixels, count: pixelCount)
+        }
+        self.errorMessage = errorMessage.map(String.init(cString:))
+        lock.unlock()
+        expectation.fulfill()
+    }
+
+    func result() -> (pixels: Data, errorMessage: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (pixels, errorMessage)
+    }
+}
+
+private func receiveAsyncRGBA8Readback(
+    context: UnsafeMutableRawPointer?,
+    pixels: UnsafePointer<UInt8>?,
+    pixelCount: Int,
+    errorMessage: UnsafePointer<CChar>?
+) {
+    guard let context else { return }
+    let box = Unmanaged<AsyncRGBA8ReadbackBox>
+        .fromOpaque(context)
+        .takeRetainedValue()
+    box.finish(
+        pixels: pixels,
+        pixelCount: pixelCount,
+        errorMessage: errorMessage
+    )
+}
+
 final class FrameExecutorBridgeTests: XCTestCase {
     func testFixedPhysicalRenderPolicyKeepsLogicalProjectionIndependent() {
         XCTAssertEqual(we_scene_metal_test_physical_render_policy(), 1)
+    }
+
+    func testAsynchronousReadbackReturnsRenderedRGBA8Pixels() throws {
+        let loaded = try loadEmptyFrameGraph()
+        defer {
+            we_scene_frame_graph_destroy(loaded.frameGraph)
+            we_scene_graph_destroy(loaded.graph)
+            we_scene_model_destroy(loaded.model)
+            we_scene_runtime_destroy(loaded.runtime)
+            try? FileManager.default.removeItem(at: loaded.root)
+        }
+        var error: WESceneRuntimeErrorRef?
+        guard let executor = we_scene_frame_executor_create(
+            loaded.frameGraph, &error
+        ) else {
+            throw failure("executor", error)
+        }
+        defer { we_scene_frame_executor_destroy(executor) }
+        var inputs = WESceneFrameInputs(
+            pointer_x: 0.5,
+            pointer_y: 0.5,
+            time_seconds: 0,
+            frame_time_seconds: 1.0 / 60.0
+        )
+        XCTAssertEqual(
+            we_scene_frame_executor_render(executor, &inputs, &error),
+            1,
+            errorMessage(error)
+        )
+
+        let expectation = expectation(description: "Metal readback completed")
+        let box = AsyncRGBA8ReadbackBox(expectation: expectation)
+        let retainedBox = Unmanaged.passRetained(box)
+        let scheduled = we_scene_frame_executor_read_rgba8_async(
+            executor,
+            retainedBox.toOpaque(),
+            receiveAsyncRGBA8Readback,
+            &error
+        )
+        if scheduled != 1 {
+            retainedBox.release()
+        }
+        XCTAssertEqual(scheduled, 1, errorMessage(error))
+        wait(for: [expectation], timeout: 2)
+
+        let result = box.result()
+        XCTAssertNil(result.errorMessage)
+        XCTAssertEqual(
+            result.pixels.count,
+            we_scene_frame_executor_rgba8_byte_count(executor)
+        )
     }
 
     func testFramebufferArenaRetainsOnlyReachableColorResources() throws {

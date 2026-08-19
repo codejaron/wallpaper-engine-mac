@@ -1563,3 +1563,52 @@ extern "C" int we_scene_frame_executor_read_rgba8(
     }
     return 0;
 }
+
+extern "C" int we_scene_frame_executor_read_rgba8_async(
+    WESceneFrameExecutorRef executor,
+    void* context,
+    WESceneFrameExecutorRGBA8Callback callback,
+    WESceneRuntimeErrorRef* out_error
+) {
+    clearError(out_error);
+    if (!requireExecutor(executor, out_error)) return 0;
+    if (callback == nullptr) {
+        assignError(
+            out_error,
+            WE_SCENE_RUNTIME_ERROR_INVALID_ARGUMENT,
+            "RGBA8 readback callback is required"
+        );
+        return 0;
+    }
+    try {
+        executor->executor->readRGBA8Async(
+            [context, callback](
+                std::vector<std::uint8_t> pixels,
+                std::string errorMessage
+            ) noexcept {
+                callback(
+                    context,
+                    pixels.empty() ? nullptr : pixels.data(),
+                    pixels.size(),
+                    errorMessage.empty() ? nullptr : errorMessage.c_str()
+                );
+            }
+        );
+        return 1;
+    } catch (const metal::Error& error) {
+        assignMetalError(out_error, error);
+    } catch (const std::exception& error) {
+        assignExceptionError(
+            out_error,
+            "scheduling rendered scene frame readback",
+            error.what()
+        );
+    } catch (...) {
+        assignExceptionError(
+            out_error,
+            "scheduling rendered scene frame readback",
+            nullptr
+        );
+    }
+    return 0;
+}

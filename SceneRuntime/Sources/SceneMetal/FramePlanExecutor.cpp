@@ -11513,4 +11513,17 @@ void FramePlanExecutor::readRGBA8(std::span<std::uint8_t> output) {
     }), output);
 }
 
+void FramePlanExecutor::readRGBA8Async(
+    std::function<void(std::vector<std::uint8_t>, std::string)> completion
+) {
+    if (impl_->outputId.empty()) {
+        throw Error(ErrorCode::readback, "No frame has been rendered");
+    }
+    auto session = impl_->ensureDevice().activate();
+    session.readRGBA8Async(impl_->framebuffer({
+        .kind = FrameResourceKind::framebuffer,
+        .id = impl_->outputId,
+    }), std::move(completion));
+}
+
 }  // namespace we::scene::metal

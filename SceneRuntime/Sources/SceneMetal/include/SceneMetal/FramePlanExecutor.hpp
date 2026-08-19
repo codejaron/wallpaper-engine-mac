@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -249,6 +250,11 @@ public:
 
     // Returns tightly packed RGBA8 rows with a top-left origin.
     void readRGBA8(std::span<std::uint8_t> output);
+    // Schedules the same readback without waiting for the Metal command buffer.
+    // Completion runs on Metal's callback queue after the copied pixels are safe.
+    void readRGBA8Async(
+        std::function<void(std::vector<std::uint8_t>, std::string)> completion
+    );
 
 private:
     struct Impl;

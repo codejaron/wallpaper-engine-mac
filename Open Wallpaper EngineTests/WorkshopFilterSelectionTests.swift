@@ -5,6 +5,40 @@ import UniformTypeIdentifiers
 import XCTest
 @testable import Open_Wallpaper_Engine
 
+final class DesktopWallpaperImageRendererTests: XCTestCase {
+    func testRendersAtTheRequestedBackingPixelSize() throws {
+        let source = try XCTUnwrap(
+            bitmapRepresentation(width: 24, height: 16, color: .red).cgImage
+        )
+
+        let data = try DesktopWallpaperImageRenderer.pngData(
+            from: source,
+            pixelWidth: 300,
+            pixelHeight: 180
+        )
+        let rendered = try XCTUnwrap(NSBitmapImageRep(data: data))
+
+        XCTAssertEqual(rendered.pixelsWide, 300)
+        XCTAssertEqual(rendered.pixelsHigh, 180)
+    }
+
+    func testAspectFillCropsTheSourceAroundItsCenter() throws {
+        let source = try stripedBitmapRepresentation()
+
+        let data = try DesktopWallpaperImageRenderer.pngData(
+            from: try XCTUnwrap(source.cgImage),
+            pixelWidth: 100,
+            pixelHeight: 100
+        )
+        let rendered = try XCTUnwrap(NSBitmapImageRep(data: data))
+        let center = try XCTUnwrap(rendered.colorAt(x: 50, y: 50))
+
+        XCTAssertGreaterThan(center.greenComponent, 0.8)
+        XCTAssertLessThan(center.redComponent, 0.2)
+        XCTAssertLessThan(center.blueComponent, 0.2)
+    }
+}
+
 final class FilterResultsSystemImageTests: XCTestCase {
     func testShowOnlyOptionsNeverUseAnEmptySystemImageName() {
         let hasOnlyValidImageNames = FRShowOnly.allOptions.allSatisfy { option in
@@ -697,6 +731,23 @@ private func bitmapRepresentation(width: Int, height: Int, color: NSColor) throw
     NSGraphicsContext.current = context
     color.setFill()
     NSRect(x: 0, y: 0, width: width, height: height).fill()
+    NSGraphicsContext.restoreGraphicsState()
+    return representation
+}
+
+private func stripedBitmapRepresentation() throws -> NSBitmapImageRep {
+    let representation = try bitmapRepresentation(
+        width: 300,
+        height: 100,
+        color: .green
+    )
+    let context = try XCTUnwrap(NSGraphicsContext(bitmapImageRep: representation))
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    NSColor.red.setFill()
+    NSRect(x: 0, y: 0, width: 100, height: 100).fill()
+    NSColor.blue.setFill()
+    NSRect(x: 200, y: 0, width: 100, height: 100).fill()
     NSGraphicsContext.restoreGraphicsState()
     return representation
 }

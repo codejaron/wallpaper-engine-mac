@@ -8,10 +8,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -317,6 +319,10 @@ public:
         void readRGBA8(
             const FramebufferResource& framebuffer,
             std::span<std::uint8_t> output
+        );
+        void readRGBA8Async(
+            const FramebufferResource& framebuffer,
+            std::function<void(std::vector<std::uint8_t>, std::string)> completion
         );
 
         void finish(bool waitForCompletion = false);

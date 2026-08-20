@@ -502,7 +502,7 @@ final class PlaybackPolicyTests: XCTestCase {
         XCTAssertTrue(isDirectory.boolValue)
     }
 
-    func testLegacyDisplaySleepSettingDoesNotInvalidateOtherSettings() throws {
+    func testLegacyDisplaySleepSettingMigratesToScreenInactiveRule() throws {
         let data = try XCTUnwrap(
             #"{"displayAsleep":"stop","otherApplicationFocused":"mute"}"#
                 .data(using: .utf8)
@@ -514,6 +514,11 @@ final class PlaybackPolicyTests: XCTestCase {
         XCTAssertEqual(
             settings.playbackPolicyConfiguration.otherApplicationFocused,
             .mute
+        )
+        XCTAssertEqual(settings.screenInactive, .stop)
+        XCTAssertEqual(
+            settings.playbackPolicyConfiguration.screenInactive,
+            .stop
         )
     }
 
@@ -729,17 +734,17 @@ final class PlaybackPolicyTests: XCTestCase {
         XCTAssertEqual(restored.scenePresentationScaling, .stretch)
     }
 
-    func testDisplaySleepAppliesAnUnconditionalPause() {
+    func testScreenInactiveUsesConfiguredAction() {
         var state = PlaybackPolicyState()
 
-        let transition = state.reduce(.displayAsleep(true))
+        let transition = state.reduce(.screenInactive(true))
 
         XCTAssertEqual(transition.previous, .keepRunning)
-        XCTAssertEqual(transition.current, .pause)
-        XCTAssertEqual(state.effectiveAction, .pause)
+        XCTAssertEqual(transition.current, .stop)
+        XCTAssertEqual(state.effectiveAction, .stop)
     }
 
-    func testDisplayWakeRecomputesTheRemainingActiveConditions() {
+    func testScreenActiveRecomputesTheRemainingActiveConditions() {
         var state = PlaybackPolicyState(
             configuration: PlaybackPolicyConfiguration(
                 otherApplicationFocused: .pause,
@@ -748,24 +753,35 @@ final class PlaybackPolicyTests: XCTestCase {
         )
         state.reduce(.otherApplicationFocused(true))
         state.reduce(.otherApplicationFullscreenOrMaximized(true))
-        state.reduce(.displayAsleep(true))
+        state.reduce(.screenInactive(true))
 
-        let wakeTransition = state.reduce(.displayAsleep(false))
+        let wakeTransition = state.reduce(.screenInactive(false))
 
         XCTAssertEqual(wakeTransition.previous, .stop)
         XCTAssertEqual(wakeTransition.current, .stop)
         XCTAssertEqual(state.effectiveAction, .stop)
     }
 
-    func testDisplayWakeRemovesOnlyTheTemporaryPause() {
+    func testScreenActiveRemovesOnlyTheConfiguredOverride() {
         var state = PlaybackPolicyState()
-        state.reduce(.displayAsleep(true))
+        state.reduce(.screenInactive(true))
 
-        let wakeTransition = state.reduce(.displayAsleep(false))
+        let wakeTransition = state.reduce(.screenInactive(false))
 
-        XCTAssertEqual(wakeTransition.previous, .pause)
+        XCTAssertEqual(wakeTransition.previous, .stop)
         XCTAssertEqual(wakeTransition.current, .keepRunning)
         XCTAssertEqual(state.effectiveAction, .keepRunning)
+    }
+
+    func testScreenInactiveRuleDefaultsToStopAndRoundTrips() throws {
+        let defaults = GlobalSettings()
+        XCTAssertEqual(defaults.screenInactive, .stop)
+
+        let restored = try JSONDecoder().decode(
+            GlobalSettings.self,
+            from: JSONEncoder().encode(defaults)
+        )
+        XCTAssertEqual(restored.screenInactive, .stop)
     }
 
     func testFullscreenGeometryAcceptsWholeDisplayAndUsableDesktopArea() {
@@ -930,15 +946,15 @@ final class WallpaperWindowPlaybackSuppressionTests: XCTestCase {
 
 @MainActor
 final class PlaybackConditionMonitorTests: XCTestCase {
-    func testScreenWakeClearsTheDisplaySleepCondition() {
-        var displaySleepEvents: [Bool] = []
+    func testScreenWakeClearsTheScreenInactiveCondition() {
+        var screenInactiveEvents: [Bool] = []
         let monitor = PlaybackConditionMonitor { event in
-            guard case .displayAsleep(let isAsleep) = event else { return }
-            displaySleepEvents.append(isAsleep)
+            guard case .screenInactive(let isInactive) = event else { return }
+            screenInactiveEvents.append(isInactive)
         }
         monitor.start()
         defer { monitor.stop() }
-        displaySleepEvents.removeAll()
+        screenInactiveEvents.removeAll()
 
         let workspaceCenter = NSWorkspace.shared.notificationCenter
         workspaceCenter.post(
@@ -950,7 +966,20 @@ final class PlaybackConditionMonitorTests: XCTestCase {
             object: nil
         )
 
-        XCTAssertEqual(displaySleepEvents, [true, false])
+        XCTAssertEqual(screenInactiveEvents, [true, false])
+    }
+
+    func testOverlappingScreenSignalsStayInactiveUntilAllClear() {
+        var state = PlaybackScreenState()
+        state.screenLocked = true
+        state.screenSaverActive = true
+        XCTAssertTrue(state.isInactive)
+
+        state.screenLocked = false
+        XCTAssertTrue(state.isInactive)
+
+        state.screenSaverActive = false
+        XCTAssertFalse(state.isInactive)
     }
 }
 
@@ -1002,7 +1031,7 @@ final class WebMediaPolicyTests: XCTestCase {
             media.volume=0.8;
             media.muted=false;
             media.dispatchEvent(new Event('volumechange'));
-            await window.__weSetMediaPolicy({muted:true,volume:0});
+            await window.__weSetMediaPolicy({muted:true,volume:1});
             const initiallyMuted={volume:media.volume,muted:media.muted};
             media.volume=0.6;
             media.muted=false;
@@ -1026,9 +1055,9 @@ final class WebMediaPolicyTests: XCTestCase {
         )
         let restored = try XCTUnwrap(output["restored"] as? [String: Any])
 
-        XCTAssertEqual(initiallyMuted["volume"] as? Double, 0)
+        XCTAssertEqual(initiallyMuted["volume"] as? Double, 0.8)
         XCTAssertEqual(initiallyMuted["muted"] as? Bool, true)
-        XCTAssertEqual(policyReapplied["volume"] as? Double, 0)
+        XCTAssertEqual(policyReapplied["volume"] as? Double, 0.6)
         XCTAssertEqual(policyReapplied["muted"] as? Bool, true)
         XCTAssertEqual(
             try XCTUnwrap(restored["volume"] as? Double),

@@ -55,6 +55,15 @@ struct PerformancePage: SettingsPage {
                     Text("Pause").tag(GSPlayback.pause)
                     Text("Stop (free memory)").tag(GSPlayback.stop)
                 }
+
+                Picker(
+                    "When the Screen Locks, Sleeps, or Starts the Screen Saver:",
+                    selection: $viewModel.settings.screenInactive
+                ) {
+                    Text("Keep Running").tag(GSPlayback.keepRunning)
+                    Text("Pause").tag(GSPlayback.pause)
+                    Text("Stop (free memory)").tag(GSPlayback.stop)
+                }
                 
                 HStack {
                     Text("Application Rules")

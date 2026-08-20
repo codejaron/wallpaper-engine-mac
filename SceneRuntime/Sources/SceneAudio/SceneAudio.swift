@@ -451,6 +451,12 @@ public final class SceneAudioController {
         audioOutput: Float,
         loadAsset: (String) throws -> Data
     ) throws {
+        try validateVolume(masterVolume)
+        try validateVolume(audioOutput)
+        guard masterVolume != 0, audioOutput != 0 else {
+            releasePlaybackResources()
+            return
+        }
         try reconcile(
             sounds,
             masterVolume: masterVolume,
@@ -665,6 +671,10 @@ public final class SceneAudioController {
             stopAll()
             return [SceneAudioSynchronizationIssue(message: error.localizedDescription)]
         }
+        guard masterVolume != 0, audioOutput != 0 else {
+            releasePlaybackResources()
+            return []
+        }
 
         var objectOrder: [Int] = []
         var soundsByObjectId: [Int: [SceneSoundSnapshot]] = [:]
@@ -831,9 +841,16 @@ public final class SceneAudioController {
     }
 
     public func stopAll() {
+        releasePlaybackResources()
+        isPaused = false
+    }
+
+    /// Stops playback and drops every AVAudioPlayer while preserving the host
+    /// pause state. Re-enabling output rebuilds players from the next runtime
+    /// snapshot instead of keeping a silent Core Audio stream alive.
+    public func releasePlaybackResources() {
         for entry in players.values { entry.player.stop() }
         players.removeAll()
-        isPaused = false
     }
 
     public func playerState(identifier: String) throws -> SceneAudioPlayerState {

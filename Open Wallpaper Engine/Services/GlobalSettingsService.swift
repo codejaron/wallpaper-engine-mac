@@ -75,6 +75,7 @@ struct GlobalSettings: Codable, Equatable {
     var otherApplicationFullscreen = GSPlayback.keepRunning
     var otherApplicationPlayingAudio = GSPlayback.keepRunning
     var laptopOnBattery = GSPlayback.keepRunning
+    var screenInactive = GSPlayback.stop
     
     // MARK: Quality
     var antiAliasing = GSAntiAliasingQuality.msaa_x2
@@ -134,7 +135,8 @@ struct GlobalSettings: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case otherApplicationFocused, otherApplicationFullscreen,
-             otherApplicationPlayingAudio, laptopOnBattery
+             otherApplicationPlayingAudio, laptopOnBattery,
+             screenInactive
         case antiAliasing, postProcessing, textureResolution,
              sceneRenderQuality, reflections, fps,
              frameSchedulingSettingsVersion
@@ -151,11 +153,16 @@ struct GlobalSettings: Codable, Equatable {
         case logLevel, autoRefresh
     }
 
+    private enum LegacyCodingKeys: String, CodingKey {
+        case displayAsleep
+    }
+
     init() {
         otherApplicationFocused = .keepRunning
         otherApplicationFullscreen = .keepRunning
         otherApplicationPlayingAudio = .keepRunning
         laptopOnBattery = .keepRunning
+        screenInactive = .stop
         antiAliasing = .msaa_x2
         postProcessing = .disabled
         textureResolution = .automatic
@@ -191,6 +198,7 @@ struct GlobalSettings: Codable, Equatable {
     // user's unrelated preferences.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let legacyContainer = try decoder.container(keyedBy: LegacyCodingKeys.self)
         otherApplicationFocused = try container.decodeIfPresent(
             GSPlayback.self, forKey: .otherApplicationFocused
         ) ?? .keepRunning
@@ -203,6 +211,11 @@ struct GlobalSettings: Codable, Equatable {
         laptopOnBattery = try container.decodeIfPresent(
             GSPlayback.self, forKey: .laptopOnBattery
         ) ?? .keepRunning
+        screenInactive = try container.decodeIfPresent(
+            GSPlayback.self, forKey: .screenInactive
+        ) ?? legacyContainer.decodeIfPresent(
+            GSPlayback.self, forKey: .displayAsleep
+        ) ?? .stop
         antiAliasing = try container.decodeIfPresent(
             GSAntiAliasingQuality.self, forKey: .antiAliasing
         ) ?? .msaa_x2
@@ -314,7 +327,8 @@ struct GlobalSettings: Codable, Equatable {
             otherApplicationFocused: otherApplicationFocused,
             otherApplicationFullscreenOrMaximized: otherApplicationFullscreen,
             otherApplicationPlayingAudio: otherApplicationPlayingAudio,
-            laptopOnBattery: laptopOnBattery
+            laptopOnBattery: laptopOnBattery,
+            screenInactive: screenInactive
         )
     }
 

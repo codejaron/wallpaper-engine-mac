@@ -535,6 +535,81 @@ final class SceneAudioTests: XCTestCase {
         )
     }
 
+    func testZeroHostOutputReleasesPlayersAndPreservesPauseState() throws {
+        let (controller, created) = controlledController()
+        let sounds = [sound(
+            objectId: 8,
+            visible: true,
+            sources: [source(index: 0, resource: "audio.wav")]
+        )]
+        var loadCount = 0
+        let loader: (String) throws -> Data = { _ in
+            loadCount += 1
+            return self.waveData()
+        }
+
+        try controller.reconcile(
+            sounds,
+            masterVolume: 1,
+            audioOutput: 1,
+            loadAsset: loader
+        )
+        XCTAssertEqual(controller.playerCount, 1)
+        XCTAssertEqual(created().first?.playbackState, .playing)
+
+        controller.pauseAll()
+        try controller.reconcile(
+            sounds,
+            masterVolume: 1,
+            audioOutput: 0,
+            loadAsset: loader
+        )
+        XCTAssertEqual(controller.playerCount, 0)
+        XCTAssertEqual(created().first?.stopCount, 1)
+        XCTAssertEqual(loadCount, 1, "Disabling output must not decode silent audio")
+
+        try controller.reconcile(
+            sounds,
+            masterVolume: 1,
+            audioOutput: 1,
+            loadAsset: loader
+        )
+        XCTAssertEqual(controller.playerCount, 1)
+        XCTAssertEqual(created().count, 2)
+        XCTAssertEqual(created().last?.playbackState, .stopped)
+
+        try controller.resumeAll()
+        XCTAssertEqual(created().last?.playbackState, .playing)
+    }
+
+    func testZeroMasterVolumeReleasesPlayers() throws {
+        let (controller, created) = controlledController()
+        let sounds = [sound(
+            objectId: 9,
+            visible: true,
+            sources: [source(index: 0, resource: "audio.wav")]
+        )]
+
+        try controller.reconcile(
+            sounds,
+            masterVolume: 1,
+            audioOutput: 1,
+            loadAsset: { _ in self.waveData() }
+        )
+        try controller.reconcile(
+            sounds,
+            masterVolume: 0,
+            audioOutput: 1,
+            loadAsset: { _ in
+                XCTFail("Muted audio must not be decoded")
+                return self.waveData()
+            }
+        )
+
+        XCTAssertEqual(controller.playerCount, 0)
+        XCTAssertEqual(created().first?.stopCount, 1)
+    }
+
     func testSoundObjectOwnsOnlyOneActivePlayerAcrossCandidateResources() throws {
         let (controller, created) = controlledController()
         let sounds = [sound(

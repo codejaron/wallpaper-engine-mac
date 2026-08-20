@@ -116,7 +116,7 @@ class WebWallpaperViewModel: NSObject, ObservableObject, WKNavigationDelegate {
     private func reconcileMediaPolicy(force: Bool = false) {
         guard let webView = attachedWebView else { return }
         let muted = shouldMuteAudio
-        let volume = min(max(AppDelegate.shared.wallpaperViewModel.effectivePlayVolume, 0), 1)
+        let volume = min(max(AppDelegate.shared.wallpaperViewModel.playVolume, 0), 1)
         let paused = policyPaused
         if mediaPlaybackSuspended != paused {
             mediaPlaybackSuspended = paused
@@ -408,7 +408,7 @@ function apply(element){
   install(element);
   const authored=mediaStates.get(element);
   if(!authored)return Promise.resolve();
-  const factor=state.muted?0:state.volume;
+  const factor=state.volume;
   const appliedVolume=clamp(authored.volume*factor);
   const appliedMuted=state.muted||authored.muted;
   authored.lastFactor=factor;

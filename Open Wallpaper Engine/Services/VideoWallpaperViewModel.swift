@@ -26,12 +26,13 @@ class VideoWallpaperViewModel: ObservableObject {
 
     var playVolume: Float = 0 {
         didSet {
-            applyEffectiveVolume()
+            applyAudioOutputState()
         }
     }
 
     let player = AVPlayer()
     private var cancellables = Set<AnyCancellable>()
+    private var itemStatusCancellable: AnyCancellable?
 
     init(wallpaper currentWallpaper: WEWallpaper, screenId: String) {
         self.screenId = screenId
@@ -53,16 +54,16 @@ class VideoWallpaperViewModel: ObservableObject {
                 self?.playVolume = volume
             }
             .store(in: &cancellables)
-        applyEffectiveVolume()
+        applyAudioOutputState()
         AppDelegate.shared.sceneAudioOwnerCoordinator.$ownerScreenId
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.applyEffectiveVolume() }
+            .sink { [weak self] _ in self?.applyAudioOutputState() }
             .store(in: &cancellables)
         AppDelegate.shared.globalSettingsViewModel.$settings
             .map(\.audioOutput)
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.applyEffectiveVolume() }
+            .sink { [weak self] _ in self?.applyAudioOutputState() }
             .store(in: &cancellables)
     }
 
@@ -76,6 +77,8 @@ class VideoWallpaperViewModel: ObservableObject {
     }
 
     func releasePlaybackResources() {
+        itemStatusCancellable?.cancel()
+        itemStatusCancellable = nil
         if let item = player.currentItem {
             NotificationCenter.default.removeObserver(
                 self,
@@ -95,6 +98,12 @@ class VideoWallpaperViewModel: ObservableObject {
             )
         )
         player.replaceCurrentItem(with: item)
+        itemStatusCancellable = item.publisher(
+            for: \.status,
+            options: [.initial, .new]
+        )
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.applyAudioOutputState() }
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(playerDidFinishPlaying(_:)),
@@ -103,7 +112,7 @@ class VideoWallpaperViewModel: ObservableObject {
         )
         // Replacing an item resets AVPlayer to paused and may reset volume.
         applyEffectiveRate()
-        applyEffectiveVolume()
+        applyAudioOutputState()
     }
 
     @objc private func playerDidFinishPlaying(_ notification: Notification) {
@@ -121,9 +130,17 @@ class VideoWallpaperViewModel: ObservableObject {
         player.rate = playRate
     }
 
-    private func applyEffectiveVolume() {
+    private func applyAudioOutputState() {
         let enabled = AppDelegate.shared.globalSettingsViewModel.settings.audioOutput
         let owner = AppDelegate.shared.sceneAudioOwnerCoordinator.isAudible(screenId: screenId)
-        player.volume = owner && enabled ? playVolume : 0
+        let shouldEnableAudio = owner && enabled && playVolume > 0
+        player.isMuted = !shouldEnableAudio
+        if shouldEnableAudio {
+            player.volume = playVolume
+        }
+        for track in player.currentItem?.tracks ?? []
+        where track.assetTrack?.mediaType == .audio {
+            track.isEnabled = shouldEnableAudio
+        }
     }
 }

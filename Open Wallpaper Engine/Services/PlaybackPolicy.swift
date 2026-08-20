@@ -35,6 +35,7 @@ struct PlaybackPolicyConfiguration: Equatable, Sendable {
     var otherApplicationFullscreenOrMaximized: GSPlayback = .keepRunning
     var otherApplicationPlayingAudio: GSPlayback = .keepRunning
     var laptopOnBattery: GSPlayback = .keepRunning
+    var screenInactive: GSPlayback = .stop
 }
 
 /// Current host conditions. A value is true only while that condition is
@@ -44,8 +45,8 @@ struct PlaybackPolicyConditions: Equatable, Sendable {
     var otherApplicationFocused = false
     var otherApplicationFullscreenOrMaximized = false
     var otherApplicationPlayingAudio = false
-    var displayAsleep = false
     var laptopOnBattery = false
+    var screenInactive = false
 }
 
 /// Explicit inputs accepted from settings changes and platform detectors.
@@ -55,8 +56,8 @@ enum PlaybackPolicyEvent: Equatable, Sendable {
     case otherApplicationFocused(Bool)
     case otherApplicationFullscreenOrMaximized(Bool)
     case otherApplicationPlayingAudio(Bool)
-    case displayAsleep(Bool)
     case laptopOnBattery(Bool)
+    case screenInactive(Bool)
 }
 
 struct PlaybackPolicyState: Equatable, Sendable {
@@ -93,8 +94,8 @@ struct PlaybackPolicyTransition: Equatable, Sendable {
     var changed: Bool { previous != current }
 }
 
-/// Pure reducer for playback policy. Display sleep is a lifecycle suspension,
-/// not a configurable playback rule, so it always contributes `pause`. If
+/// Pure reducer for playback policy. Lock, screen-saver, and display-sleep
+/// signals are folded into one configurable screen-inactive condition. If
 /// multiple conditions are active, the most restrictive action wins:
 /// stop > pause > mute > keepRunning.
 enum PlaybackPolicyReducer {
@@ -116,10 +117,10 @@ enum PlaybackPolicyReducer {
             state.conditions.otherApplicationFullscreenOrMaximized = active
         case .otherApplicationPlayingAudio(let active):
             state.conditions.otherApplicationPlayingAudio = active
-        case .displayAsleep(let active):
-            state.conditions.displayAsleep = active
         case .laptopOnBattery(let active):
             state.conditions.laptopOnBattery = active
+        case .screenInactive(let active):
+            state.conditions.screenInactive = active
         }
 
         return PlaybackPolicyTransition(
@@ -139,9 +140,10 @@ enum PlaybackPolicyReducer {
                 ? configuration.otherApplicationFullscreenOrMaximized : .keepRunning,
             conditions.otherApplicationPlayingAudio
                 ? configuration.otherApplicationPlayingAudio : .keepRunning,
-            conditions.displayAsleep ? .pause : .keepRunning,
             conditions.laptopOnBattery
                 ? configuration.laptopOnBattery : .keepRunning,
+            conditions.screenInactive
+                ? configuration.screenInactive : .keepRunning,
         ]
 
         return candidates.max {

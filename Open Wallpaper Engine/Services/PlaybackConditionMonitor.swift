@@ -14,11 +14,13 @@ final class PlaybackConditionMonitor {
     private let issueHandler: IssueHandler
     private var workspaceObservers: [NSObjectProtocol] = []
     private var notificationObservers: [NSObjectProtocol] = []
+    private var distributedObservers: [NSObjectProtocol] = []
     private var pollTimer: Timer?
     private var previousFullscreenOrMaximized: Bool?
     private var previousAudio: Bool?
     private var previousBattery: Bool?
-    private var displayAsleep = false
+    private var screenState = PlaybackScreenState()
+    private var previousScreenInactive: Bool?
     private var audioDetectionEnabled = false
     private var audioDetectionRequestID = 0
     private var currentAudioIssue: String?
@@ -57,6 +59,52 @@ final class PlaybackConditionMonitor {
             ) { [weak self] _ in
                 MainActor.assumeIsolated { self?.setDisplayAsleep(false) }
             },
+            workspaceCenter.addObserver(
+                forName: NSWorkspace.sessionDidResignActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.setSessionInactive(true) }
+            },
+            workspaceCenter.addObserver(
+                forName: NSWorkspace.sessionDidBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.setSessionInactive(false) }
+            },
+        ]
+
+        let distributedCenter = DistributedNotificationCenter.default()
+        distributedObservers = [
+            distributedCenter.addObserver(
+                forName: .playbackScreenDidLock,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.setScreenLocked(true) }
+            },
+            distributedCenter.addObserver(
+                forName: .playbackScreenDidUnlock,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.setScreenLocked(false) }
+            },
+            distributedCenter.addObserver(
+                forName: .playbackScreenSaverDidStart,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.setScreenSaverActive(true) }
+            },
+            distributedCenter.addObserver(
+                forName: .playbackScreenSaverDidStop,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.setScreenSaverActive(false) }
+            },
         ]
 
         notificationObservers = [
@@ -89,7 +137,7 @@ final class PlaybackConditionMonitor {
         refreshFullscreenOrMaximized()
         refreshAudio()
         refreshBattery()
-        eventHandler(.displayAsleep(displayAsleep))
+        publishScreenState()
     }
 
     /// Audio capture is a privacy-sensitive resource. Start it only when the
@@ -146,12 +194,41 @@ final class PlaybackConditionMonitor {
         workspaceObservers.removeAll()
         notificationObservers.forEach(NotificationCenter.default.removeObserver)
         notificationObservers.removeAll()
+        let distributedCenter = DistributedNotificationCenter.default()
+        distributedObservers.forEach(distributedCenter.removeObserver)
+        distributedObservers.removeAll()
+        previousScreenInactive = nil
     }
 
     private func setDisplayAsleep(_ value: Bool) {
-        guard displayAsleep != value else { return }
-        displayAsleep = value
-        eventHandler(.displayAsleep(value))
+        guard screenState.displayAsleep != value else { return }
+        screenState.displayAsleep = value
+        publishScreenState()
+    }
+
+    private func setSessionInactive(_ value: Bool) {
+        guard screenState.sessionInactive != value else { return }
+        screenState.sessionInactive = value
+        publishScreenState()
+    }
+
+    private func setScreenLocked(_ value: Bool) {
+        guard screenState.screenLocked != value else { return }
+        screenState.screenLocked = value
+        publishScreenState()
+    }
+
+    private func setScreenSaverActive(_ value: Bool) {
+        guard screenState.screenSaverActive != value else { return }
+        screenState.screenSaverActive = value
+        publishScreenState()
+    }
+
+    private func publishScreenState() {
+        let value = screenState.isInactive
+        guard previousScreenInactive != value else { return }
+        previousScreenInactive = value
+        eventHandler(.screenInactive(value))
     }
 
     private func refreshAudio() {
@@ -245,6 +322,28 @@ final class PlaybackConditionMonitor {
             excludingOwnerProcessIDs: [getpid()]
         )
     }
+}
+
+struct PlaybackScreenState: Equatable {
+    var displayAsleep = false
+    var sessionInactive = false
+    var screenLocked = false
+    var screenSaverActive = false
+
+    var isInactive: Bool {
+        displayAsleep || sessionInactive || screenLocked || screenSaverActive
+    }
+}
+
+private extension Notification.Name {
+    static let playbackScreenDidLock = Notification.Name("com.apple.screenIsLocked")
+    static let playbackScreenDidUnlock = Notification.Name("com.apple.screenIsUnlocked")
+    static let playbackScreenSaverDidStart = Notification.Name(
+        "com.apple.screensaver.didstart"
+    )
+    static let playbackScreenSaverDidStop = Notification.Name(
+        "com.apple.screensaver.didstop"
+    )
 }
 
 /// A display represented in Quartz coordinates. `NSScreen.visibleFrame` uses

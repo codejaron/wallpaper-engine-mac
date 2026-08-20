@@ -2572,6 +2572,16 @@
         }
       }
     },
+    "When the Screen Locks, Sleeps, or Starts the Screen Saver:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当屏幕锁定、休眠或进入屏幕保护程序时"
+          }
+        }
+      }
+    },
     "When it comes to without pluging to the power adapter, we reduced the power consumption as much as possible, without just stoping the playback." : {
       "localizations" : {
         "zh-Hans" : {

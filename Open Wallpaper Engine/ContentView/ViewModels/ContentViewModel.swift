@@ -297,6 +297,20 @@ class ContentViewModel: ObservableObject, DropDelegate {
 //        let clip = filteredWallpapers[startIndex..<filteredWallpapers.endIndex]
 //        return Array(clip.prefix(self.wallpapersPerPage))
     }
+
+    @MainActor
+    var visibleWorkshopDownloadJobs: [SteamCmdService.DownloadJob] {
+        steamCmd.downloadJobs.values
+            .filter { job in
+                switch job.state {
+                case .queued, .downloading, .failed:
+                    return true
+                case .completed:
+                    return false
+                }
+            }
+            .sorted { $0.order < $1.order }
+    }
     
     /// Caculates the maximium possible page index for all wallpapers in your application wallpaper directory
     var maxPage: Int {

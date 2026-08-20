@@ -1,6 +1,6 @@
 import Foundation
 
-struct WorkshopItem: Identifiable, Codable {
+struct WorkshopItem: Identifiable, Codable, Equatable, Sendable {
     let id: String
     let title: String
     let previewURL: String?
@@ -183,9 +183,11 @@ class WorkshopAPIService {
 
         let previewURL = dict["preview_url"] as? String
         let tags: [String] = (dict["tags"] as? [[String: Any]])?.compactMap { $0["tag"] as? String } ?? []
-        let subscriptions = dict["subscriptions"] as? Int ?? dict["lifetime_subscriptions"] as? Int ?? 0
-        let fileSize = dict["file_size"] as? Int ?? 0
-        let creatorAppId = dict["creator_app_id"] as? Int
+        let subscriptions = Self.integerValue(dict["subscriptions"])
+            ?? Self.integerValue(dict["lifetime_subscriptions"])
+            ?? 0
+        let fileSize = Self.integerValue(dict["file_size"]) ?? 0
+        let creatorAppId = Self.integerValue(dict["creator_app_id"])
         let description = dict["short_description"] as? String ?? dict["description"] as? String
 
         return WorkshopItem(
@@ -198,6 +200,16 @@ class WorkshopAPIService {
             creatorAppId: creatorAppId,
             description: description
         )
+    }
+
+    private static func integerValue(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        if let string = value as? String {
+            return Int(string)
+        }
+        return nil
     }
 }
 

@@ -111,12 +111,14 @@ class WorkshopViewModel: ObservableObject {
         }
     }
 
+    @MainActor
     func download(item: WorkshopItem) {
-        steamCmd.downloadWorkshopItem(workshopId: item.id)
+        steamCmd.downloadWorkshopItem(item: item)
     }
 
+    @MainActor
     func downloadState(for item: WorkshopItem) -> SteamCmdService.DownloadState? {
-        steamCmd.downloadProgress[item.id]
+        steamCmd.downloadState(for: item.id)
     }
 
     func isTagSelected(_ tag: String, in group: WorkshopFilterGroup) -> Bool {

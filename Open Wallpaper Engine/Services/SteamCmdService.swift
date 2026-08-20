@@ -1,21 +1,36 @@
 import Foundation
 import Combine
 
-class SteamCmdService: ObservableObject {
+@MainActor
+final class SteamCmdService: ObservableObject {
     @Published var steamCmdPath: String?
     @Published var isLoggedIn = false
     @Published var steamUsername: String = ""
     @Published var loginError: String?
     @Published var isLoggingIn = false
-    @Published var downloadProgress: [String: DownloadState] = [:]
+    @Published private(set) var downloadJobs: [String: DownloadJob] = [:]
 
-    enum DownloadState: Equatable {
-        case downloading(status: String)
+    enum DownloadState: Equatable, Sendable {
+        case queued
+        case downloading(progress: Double?, status: String)
         case completed
         case failed(String)
     }
 
-    enum LoginResult: Equatable {
+    struct DownloadProgressUpdate: Equatable, Sendable {
+        let progress: Double?
+        let status: String
+    }
+
+    struct DownloadJob: Identifiable, Equatable, Sendable {
+        let item: WorkshopItem
+        let order: Int
+        var state: DownloadState
+
+        var id: String { item.id }
+    }
+
+    enum LoginResult: Equatable, Sendable {
         case success
         case steamGuardRequired
         case invalidCredentials
@@ -38,13 +53,15 @@ class SteamCmdService: ObservableObject {
         }
     }
 
-    private struct CommandResult {
+    private struct CommandResult: Sendable {
         let output: String
         let exitCode: Int32
         let didTimeOut: Bool
     }
 
     private static let lastUsernameKey = "SteamLastUsername"
+    private let workshopDownloader = WorkshopDownloadCoordinator()
+    private var nextDownloadOrder = 0
 
     init() {
         detectSteamCmd()
@@ -53,26 +70,25 @@ class SteamCmdService: ObservableObject {
 
     /// Run a steamcmd process with proper pipe handling to avoid deadlocks.
     /// Reads stdout/stderr concurrently with process execution and applies a timeout.
-    private func runSteamCmd(arguments: [String], timeout: TimeInterval = 30) -> CommandResult {
-        guard let cmdPath = steamCmdPath else {
-            return CommandResult(output: "", exitCode: -1, didTimeOut: false)
-        }
-
+    nonisolated private static func runSteamCmd(
+        executablePath: String,
+        arguments: [String],
+        timeout: TimeInterval = 30
+    ) -> CommandResult {
         let process = Process()
         let outputPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: cmdPath)
+        process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         process.standardOutput = outputPipe
         process.standardError = outputPipe
 
         // Read pipe concurrently to prevent buffer deadlock
-        var outputData = Data()
-        let readQueue = DispatchQueue(label: "steamcmd.pipe.read")
+        let outputBuffer = SteamCmdOutputBuffer()
         let handle = outputPipe.fileHandleForReading
         handle.readabilityHandler = { fileHandle in
             let data = fileHandle.availableData
             if !data.isEmpty {
-                readQueue.sync { outputData.append(data) }
+                outputBuffer.append(data)
             }
         }
 
@@ -99,18 +115,16 @@ class SteamCmdService: ObservableObject {
         if waitGroup.wait(timeout: deadline) == .timedOut {
             process.terminate()
             handle.readabilityHandler = nil
-            let output = readQueue.sync {
-                String(data: outputData, encoding: .utf8) ?? ""
-            }
+            let output = outputBuffer.stringValue()
             return CommandResult(output: output, exitCode: -1, didTimeOut: true)
         }
 
         handle.readabilityHandler = nil
         // Read any remaining data
         let remaining = handle.readDataToEndOfFile()
-        readQueue.sync { outputData.append(remaining) }
+        outputBuffer.append(remaining)
 
-        let output = String(data: outputData, encoding: .utf8) ?? ""
+        let output = outputBuffer.stringValue()
         return CommandResult(
             output: output,
             exitCode: process.terminationStatus,
@@ -118,7 +132,11 @@ class SteamCmdService: ObservableObject {
         )
     }
 
-    static func loginResult(output: String, exitCode: Int32, didTimeOut: Bool) -> LoginResult {
+    nonisolated static func loginResult(
+        output: String,
+        exitCode: Int32,
+        didTimeOut: Bool
+    ) -> LoginResult {
         if didTimeOut {
             return .timedOut
         }
@@ -192,7 +210,7 @@ class SteamCmdService: ObservableObject {
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !path.isEmpty {
-                    DispatchQueue.main.async {
+                    Task { @MainActor [weak self] in
                         self?.steamCmdPath = path
                     }
                 }
@@ -222,29 +240,32 @@ class SteamCmdService: ObservableObject {
 
     /// Attempt login with username and password. Steam Guard code is optional.
     func login(username: String, password: String, guardCode: String? = nil) {
-        guard steamCmdPath != nil else { return }
+        guard let cmdPath = steamCmdPath else { return }
 
         isLoggingIn = true
         loginError = nil
         steamUsername = username
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-
+        DispatchQueue.global(qos: .userInitiated).async {
             var args = ["+login", username, password]
             if let code = guardCode, !code.isEmpty {
                 args = ["+login", username, password, code]
             }
             args += ["+quit"]
 
-            let commandResult = self.runSteamCmd(arguments: args, timeout: 60)
+            let commandResult = Self.runSteamCmd(
+                executablePath: cmdPath,
+                arguments: args,
+                timeout: 60
+            )
             let loginResult = Self.loginResult(
                 output: commandResult.output,
                 exitCode: commandResult.exitCode,
                 didTimeOut: commandResult.didTimeOut
             )
 
-            DispatchQueue.main.async {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
                 self.isLoggingIn = false
                 if loginResult == .success {
                     self.isLoggedIn = true
@@ -259,16 +280,15 @@ class SteamCmdService: ObservableObject {
 
     /// Try login with cached session (no password needed if previously authenticated).
     func loginWithCachedSession(username: String) {
-        guard steamCmdPath != nil else { return }
+        guard let cmdPath = steamCmdPath else { return }
 
         isLoggingIn = true
         loginError = nil
         steamUsername = username
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-
-            let commandResult = self.runSteamCmd(
+        DispatchQueue.global(qos: .userInitiated).async {
+            let commandResult = Self.runSteamCmd(
+                executablePath: cmdPath,
                 arguments: ["+login", username, "+quit"],
                 timeout: 30
             )
@@ -278,7 +298,8 @@ class SteamCmdService: ObservableObject {
                 didTimeOut: commandResult.didTimeOut
             )
 
-            DispatchQueue.main.async {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
                 self.isLoggingIn = false
                 if loginResult == .success {
                     self.isLoggedIn = true
@@ -292,154 +313,125 @@ class SteamCmdService: ObservableObject {
         }
     }
 
-    /// Download a workshop item by its ID.
-    func downloadWorkshopItem(workshopId: String) {
-        guard let cmdPath = steamCmdPath, isLoggedIn else { return }
+    /// Download a workshop item by its ID. SteamCMD shares mutable state, so all
+    /// downloads run on one serial queue instead of launching competing processes.
+    @MainActor
+    func downloadWorkshopItem(item: WorkshopItem) {
+        let workshopId = item.id
+        guard !workshopId.isEmpty, WorkshopId(rawValue: workshopId) != nil else {
+            setDownloadState(.failed("Invalid Workshop item ID"), for: item)
+            return
+        }
 
-        downloadProgress[workshopId] = .downloading(status: "Starting steamcmd...")
+        let destinationDirectory = FileManager.default.wallpapersDirectory
+            .appending(path: workshopId, directoryHint: .isDirectory)
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
+        if Self.isValidWallpaperPackage(at: destinationDirectory) {
+            setDownloadState(.completed, for: item)
+            return
+        }
 
-            let process = Process()
-            let outputPipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: cmdPath)
-            process.currentDirectoryURL = URL(fileURLWithPath: cmdPath).deletingLastPathComponent()
-            process.arguments = [
-                "+login", self.steamUsername,
-                "+workshop_download_item", "431960", workshopId, "validate",
-                "+quit"
-            ]
-            process.standardOutput = outputPipe
-            process.standardError = outputPipe
-
-            // Read output in real-time for progress updates
-            var fullOutput = ""
-            let handle = outputPipe.fileHandleForReading
-            handle.readabilityHandler = { [weak self] fileHandle in
-                let data = fileHandle.availableData
-                guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
-                fullOutput += line
-
-                let status = self?.parseProgress(line) ?? nil
-                if let status = status {
-                    DispatchQueue.main.async {
-                        self?.downloadProgress[workshopId] = .downloading(status: status)
-                    }
-                }
-            }
-
-            do {
-                try process.run()
-                process.waitUntilExit()
-            } catch {
-                handle.readabilityHandler = nil
-                DispatchQueue.main.async {
-                    self.downloadProgress[workshopId] = .failed("steamcmd failed to run: \(error.localizedDescription)")
-                }
+        if let state = downloadJobs[workshopId]?.state {
+            switch state {
+            case .queued, .downloading:
                 return
+            case .completed, .failed:
+                break
             }
+        }
 
-            handle.readabilityHandler = nil
-            // Read any remaining data
-            let remaining = handle.readDataToEndOfFile()
-            if let str = String(data: remaining, encoding: .utf8) { fullOutput += str }
+        guard let cmdPath = steamCmdPath else {
+            setDownloadState(.failed("steamcmd is not installed"), for: item)
+            return
+        }
+        guard isLoggedIn else {
+            setDownloadState(.failed("Steam login is required"), for: item)
+            return
+        }
 
-            let exitCode = process.terminationStatus
-            print("steamcmd download [\(workshopId)] exit=\(exitCode)\n\(fullOutput)")
-
-            // Find downloaded content
-            let steamAppsDir = self.findSteamAppsDir(cmdPath: cmdPath)
-            let sourcePath = steamAppsDir?
-                .appending(path: "workshop/content/431960/\(workshopId)")
-
-            DispatchQueue.main.async {
-                self.downloadProgress[workshopId] = .downloading(status: "Copying to library...")
-
-                if let sourceDir = sourcePath {
-                    let fm = FileManager.default
-                    if fm.fileExists(atPath: sourceDir.path) {
-                        let dest = fm.wallpapersDirectory.appending(path: workshopId)
-                        if !fm.fileExists(atPath: dest.path) {
-                            do {
-                                try fm.copyItem(at: sourceDir, to: dest)
-                            } catch {
-                                self.downloadProgress[workshopId] = .failed("Copy failed: \(error.localizedDescription)")
-                                return
-                            }
-                        }
-                        self.downloadProgress[workshopId] = .completed
-                        return
-                    }
-                }
-
-                if fullOutput.contains("ERROR") || fullOutput.contains("FAILED") {
-                    let errorLine = fullOutput.components(separatedBy: "\n")
-                        .first(where: { $0.contains("ERROR") || $0.contains("FAILED") })
-                        ?? "Unknown error"
-                    self.downloadProgress[workshopId] = .failed(errorLine)
-                } else if exitCode != 0 {
-                    self.downloadProgress[workshopId] = .failed("Exit code \(exitCode)")
-                } else {
-                    self.downloadProgress[workshopId] = .failed("Files not found at expected path")
-                }
+        let username = steamUsername
+        setDownloadState(.queued, for: item)
+        workshopDownloader.enqueue(
+            workshopId: workshopId,
+            cmdPath: cmdPath,
+            username: username,
+            expectedDownloadBytes: Int64(item.fileSize),
+            destinationDirectory: destinationDirectory
+        ) { [weak self] state in
+            Task { @MainActor [weak self] in
+                self?.setDownloadState(state, for: item)
             }
         }
     }
 
-    /// Parse steamcmd output lines into human-readable progress.
-    private func parseProgress(_ output: String) -> String? {
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        if trimmed.contains("Logging in") || trimmed.contains("Logged in") {
-            return "Authenticating..."
-        }
-        if trimmed.contains("Downloading item") || trimmed.contains("workshop_download_item") {
-            return "Requesting download..."
-        }
-        if trimmed.contains("Downloading") || trimmed.contains("downloading") {
-            // Try to extract percentage like "Update state (0x61) downloading, progress: 45.23"
-            if let range = trimmed.range(of: "progress:\\s*([\\d.]+)", options: .regularExpression),
-               let pct = Double(trimmed[range].replacingOccurrences(of: "progress:", with: "").trimmingCharacters(in: .whitespaces)) {
-                return String(format: "Downloading... %.0f%%", min(pct, 100))
-            }
-            return "Downloading..."
-        }
-        if trimmed.contains("Validating") || trimmed.contains("validating") {
-            return "Validating..."
-        }
-        if trimmed.contains("Success") {
-            return "Download complete, importing..."
-        }
-        if trimmed.contains("Update state") {
-            // Generic state update
-            if trimmed.contains("0x5") { return "Validating..." }
-            if trimmed.contains("0x61") { return "Downloading..." }
-            if trimmed.contains("0x101") { return "Committing..." }
-        }
-        return nil
+    @MainActor
+    func downloadState(for workshopId: String) -> DownloadState? {
+        Self.resolvedDownloadState(
+            for: workshopId,
+            activeState: downloadJobs[workshopId]?.state,
+            libraryDirectory: FileManager.default.wallpapersDirectory
+        )
     }
 
-    private func findSteamAppsDir(cmdPath: String) -> URL? {
-        // steamcmd typically stores downloads relative to its install location
-        let cmdURL = URL(fileURLWithPath: cmdPath)
+    nonisolated static func parseDownloadProgress(_ output: String) -> DownloadProgressUpdate? {
+        WorkshopDownloadCoordinator.parseProgress(output)
+    }
 
-        // Homebrew: /opt/homebrew/Cellar/steamcmd/...  -> steamapps at ~/Library/Application Support/Steam
-        // Manual: wherever steamcmd is -> steamapps in same dir
-        let possiblePaths = [
-            cmdURL.deletingLastPathComponent().appending(path: "steamapps"),
-            FileManager.default.homeDirectoryForCurrentUser
-                .appending(path: "Library/Application Support/Steam/steamapps"),
-            FileManager.default.homeDirectoryForCurrentUser
-                .appending(path: "Steam/steamapps"),
-        ]
-
-        for path in possiblePaths {
-            if FileManager.default.fileExists(atPath: path.path) {
-                return path
-            }
+    nonisolated static func resolvedDownloadState(
+        for workshopId: String,
+        activeState: DownloadState?,
+        libraryDirectory: URL
+    ) -> DownloadState? {
+        let destinationDirectory = libraryDirectory
+            .appending(path: workshopId, directoryHint: .isDirectory)
+        if isValidWallpaperPackage(at: destinationDirectory) {
+            return .completed
         }
-        return nil
+        if case .completed? = activeState {
+            return nil
+        }
+        return activeState
+    }
+
+    nonisolated static func isValidWallpaperPackage(
+        at directory: URL,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        WorkshopDownloadCoordinator.isValidWallpaperPackage(
+            at: directory,
+            fileManager: fileManager
+        )
+    }
+
+    private func setDownloadState(_ state: DownloadState, for item: WorkshopItem) {
+        if var job = downloadJobs[item.id] {
+            job.state = state
+            downloadJobs[item.id] = job
+        } else {
+            downloadJobs[item.id] = DownloadJob(
+                item: item,
+                order: nextDownloadOrder,
+                state: state
+            )
+            nextDownloadOrder += 1
+        }
+    }
+}
+
+private final class SteamCmdOutputBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ newData: Data) {
+        lock.lock()
+        data.append(newData)
+        lock.unlock()
+    }
+
+    func stringValue() -> String {
+        lock.lock()
+        let snapshot = data
+        lock.unlock()
+        return String(data: snapshot, encoding: .utf8) ?? ""
     }
 }

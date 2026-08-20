@@ -20,7 +20,8 @@ struct WallpaperExplorer: SubviewOfContentView {
         ScrollView {
             Group {
                 // MARK: Items
-                if viewModel.autoRefreshWallpapers.isEmpty {
+                if viewModel.autoRefreshWallpapers.isEmpty &&
+                    viewModel.visibleWorkshopDownloadJobs.isEmpty {
                     HStack {
                         Spacer()
                         Text("""
@@ -38,6 +39,13 @@ struct WallpaperExplorer: SubviewOfContentView {
                     .padding(.top, 50)
                 } else {
                     LazyVGrid(columns: gridColumns, alignment: .leading) {
+                        ForEach(viewModel.visibleWorkshopDownloadJobs) { job in
+                            WorkshopDownloadExplorerItem(
+                                viewModel: viewModel,
+                                job: job
+                            )
+                        }
+
                         ForEach(viewModel.autoRefreshWallpapers, id: \.wallpaperDirectory) { wallpaper in
                             ExplorerItem(viewModel: viewModel, wallpaperViewModel: wallpaperViewModel, wallpaper: wallpaper)
                                 .contextMenu {
@@ -70,6 +78,70 @@ struct WallpaperExplorer: SubviewOfContentView {
 
     private var gridColumns: [GridItem] {
         WallpaperGridLayout.columns(iconSize: viewModel.explorerIconSize)
+    }
+}
+
+private struct WorkshopDownloadExplorerItem: View {
+    @ObservedObject var viewModel: ContentViewModel
+    let job: SteamCmdService.DownloadJob
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            WorkshopItemPreview(url: job.item.previewImageURL)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(job.item.title)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+
+                switch job.state {
+                case .queued:
+                    downloadProgress(progress: 0, status: "Queued")
+                case .downloading(let progress, let status):
+                    downloadProgress(progress: progress ?? 0, status: status)
+                case .failed(let message):
+                    HStack(spacing: 6) {
+                        Label("Failed", systemImage: "xmark.circle.fill")
+                            .foregroundStyle(.red)
+                        Spacer(minLength: 4)
+                        Button("Retry") {
+                            viewModel.steamCmd.downloadWorkshopItem(item: job.item)
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.white)
+                    }
+                    .font(.caption2)
+                    Text(message)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.8))
+                        .lineLimit(2)
+                case .completed:
+                    EmptyView()
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.black.opacity(0.7))
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 2))
+    }
+
+    private func downloadProgress(progress: Double, status: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ProgressView(value: progress)
+                .progressViewStyle(.linear)
+                .tint(.blue)
+            HStack(spacing: 5) {
+                Text(status)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(progress, format: .percent.precision(.fractionLength(0)))
+                    .monospacedDigit()
+            }
+            .font(.caption2)
+            .foregroundStyle(.white.opacity(0.9))
+        }
     }
 }
 

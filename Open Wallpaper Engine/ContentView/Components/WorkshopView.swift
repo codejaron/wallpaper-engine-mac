@@ -503,24 +503,62 @@ private struct WorkshopItemCard: View {
     private var downloadButton: some View {
         let state = viewModel.downloadState(for: item)
         switch state {
-        case .downloading(let status):
-            HStack(spacing: 4) {
-                ProgressView().controlSize(.mini)
-                Text(status)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        case .queued:
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 4) {
+                    Image(systemName: "clock")
+                    Text("Queued")
+                    Spacer(minLength: 4)
+                    Text(0.0, format: .percent.precision(.fractionLength(0)))
+                        .monospacedDigit()
+                }
+                ProgressView(value: 0)
+                    .progressViewStyle(.linear)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        case .downloading(let progress, let status):
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 4) {
+                    if progress == nil {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Text(status)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    if let progress {
+                        Text(progress, format: .percent.precision(.fractionLength(0)))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let progress {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                }
             }
         case .completed:
             Label("Downloaded", systemImage: "checkmark.circle.fill")
                 .font(.caption2)
                 .foregroundStyle(.green)
         case .failed(let msg):
-            VStack(alignment: .leading) {
-                Label("Failed", systemImage: "xmark.circle")
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Label("Failed", systemImage: "xmark.circle")
+                        .foregroundStyle(.red)
+                    Spacer()
+                    Button("Retry") {
+                        viewModel.download(item: item)
+                    }
+                    .buttonStyle(.borderless)
+                }
+                .font(.caption2)
+                Text(msg)
                     .font(.caption2)
-                    .foregroundStyle(.red)
-                Text(msg).font(.caption2).foregroundStyle(.secondary)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
         case .none:
             if viewModel.steamCmd.isLoggedIn {

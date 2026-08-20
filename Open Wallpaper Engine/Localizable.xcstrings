@@ -1707,6 +1707,9 @@
         }
       }
     },
+    "Queued" : {
+
+    },
     "Quit" : {
       "localizations" : {
         "zh-Hans" : {

@@ -11,6 +11,7 @@ class WorkshopViewModel: ObservableObject {
     @Published var currentPage = 1
     @Published var filters = WorkshopFilterSelection()
     @Published var isFilterReveal = false
+    @Published var scrollPosition: WorkshopItem.ID?
     @Published private(set) var hasMoreResults = true
 
     let steamCmd: SteamCmdService
@@ -61,6 +62,7 @@ class WorkshopViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
         currentPage = 1
+        scrollPosition = nil
         items = []
         hasMoreResults = true
         defer {

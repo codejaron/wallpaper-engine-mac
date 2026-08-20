@@ -379,6 +379,7 @@ private struct WorkshopResults: View {
                             WorkshopItemCard(item: item, viewModel: viewModel)
                         }
                     }
+                    .scrollTargetLayout()
                     .padding()
 
                     if let error = viewModel.errorMessage {
@@ -398,6 +399,7 @@ private struct WorkshopResults: View {
                         .padding(.bottom)
                     }
                 }
+                .scrollPosition(id: $viewModel.scrollPosition, anchor: .top)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

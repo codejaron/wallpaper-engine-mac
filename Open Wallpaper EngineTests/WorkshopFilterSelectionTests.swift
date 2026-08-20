@@ -571,6 +571,21 @@ final class WorkshopFilterSelectionTests: XCTestCase {
         XCTAssertTrue(api.requests.allSatisfy { !$0.matchAllTags })
     }
 
+    func testNewSearchClearsPersistedScrollPosition() async {
+        let api = StubWorkshopAPI(pages: [
+            1: [item("new-item", tags: ["Video"])],
+        ])
+        let viewModel = WorkshopViewModel(
+            steamCmd: SteamCmdService(),
+            api: api
+        )
+        viewModel.scrollPosition = "old-item"
+
+        await viewModel.search()
+
+        XCTAssertNil(viewModel.scrollPosition)
+    }
+
     private func item(_ id: String, tags: [String]) -> WorkshopItem {
         WorkshopItem(
             id: id,
